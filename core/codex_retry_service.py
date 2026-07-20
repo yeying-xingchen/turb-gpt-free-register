@@ -3,6 +3,7 @@
 import ctypes
 import logging
 import threading
+import time
 from pathlib import Path
 
 from core import db
@@ -14,11 +15,27 @@ _RETRYING: set[str] = set()
 _RETRYING_LOCK = threading.Lock()
 _STOP_REQUESTED: set[str] = set()
 _RUNNING_THREADS: dict[str, int] = {}
+_RESERVED_AT: dict[str, float] = {}
 
 
 class CodexRetryStopped(Exception):
     """用户手动停止 Codex 补跑。"""
 
+
+def _thread_alive(thread_id: int | None) -> bool:
+    if not thread_id:
+        return False
+    try:
+        tid = int(thread_id)
+    except Exception:
+        return False
+    return any(getattr(t, "ident", None) == tid and t.is_alive() for t in threading.enumerate())
+
+
+def _clear_state_locked(key: str) -> None:
+    _RETRYING.discard(key)
+    _RUNNING_THREADS.pop(key, None)
+    _RESERVED_AT.pop(key, None)
 
 
 def log_path(email: str) -> Path:
@@ -33,18 +50,35 @@ def reserve(email: str) -> bool:
         return False
     with _RETRYING_LOCK:
         if key in _RETRYING:
-            return False
+            thread_id = _RUNNING_THREADS.get(key)
+            alive = _thread_alive(thread_id)
+            age = time.time() - float(_RESERVED_AT.get(key) or 0)
+            try:
+                acc = db.get_account_by_email(email)
+                status = str((acc or {}).get("codex_status") or "").lower()
+            except Exception:
+                status = ""
+            # 修复“实际已停止/线程已结束，但进程内占位未释放”导致无法再次补跑。
+            # 有运行线程时仍拒绝；无运行线程且状态已不是 retrying，或占位过久，则视作脏占位清理。
+            if (not alive) and (status != "retrying" or age > 15 * 60):
+                logger.warning(
+                    "[Codex 补跑] 清理脏占位：email=%s status=%s thread_id=%s alive=%s age=%.1fs",
+                    email, status or "-", thread_id or "-", alive, age,
+                )
+                _clear_state_locked(key)
+            else:
+                return False
         _STOP_REQUESTED.discard(key)
         _RUNNING_THREADS.pop(key, None)
         _RETRYING.add(key)
+        _RESERVED_AT[key] = time.time()
         return True
 
 
 def release(email: str) -> None:
     key = (email or "").strip().lower()
     with _RETRYING_LOCK:
-        _RETRYING.discard(key)
-        _RUNNING_THREADS.pop(key, None)
+        _clear_state_locked(key)
 
 
 def is_retrying(email: str) -> bool:
@@ -93,6 +127,10 @@ def request_stop(email: str) -> dict:
 
     injected = bool(thread_id and _async_raise(int(thread_id), CodexRetryStopped))
     db.update_account_codex_status(email, "stopped", "用户手动停止 Codex 补跑")
+    # 如果没有可注入的存活线程，立即释放进程内占位，避免 UI 显示已停止但再次补跑仍 409。
+    with _RETRYING_LOCK:
+        if not _thread_alive(thread_id):
+            _clear_state_locked(key)
     try:
         p = log_path(email)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -119,6 +157,7 @@ def run_worker(
     try:
         with _RETRYING_LOCK:
             _RUNNING_THREADS[key] = threading.get_ident()
+            _RESERVED_AT[key] = time.time()
         check_stop_requested(email)
 
         from core.codex_oauth import run_codex_oauth
