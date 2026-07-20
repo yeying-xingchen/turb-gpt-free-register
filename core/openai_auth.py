@@ -308,6 +308,7 @@ def build_sentinel_header(session: BrowserSession, sentinel_resp: dict, flow: st
         react_listening_key=getattr(session, "react_listening_key", None),
         react_container_key=getattr(session, "react_container_key", None),
         react_resources_key=getattr(session, "react_resources_key", None),
+        cookie=session.auth_cookie_header() if hasattr(session, "auth_cookie_header") else f"oai-did={session.device_id}",
     )
 
     # 解析 runner 输出，单独抽出 so 字段填充 openai-sentinel-so-token

@@ -465,12 +465,22 @@ function createIntlObject(options) {
   return intlObject;
 }
 
-function createPerformanceObserver() {
+function createPerformanceObserver(observerSet) {
   return class PerformanceObserverMock {
-    constructor(callback) { this.callback = callback; this._observed = false; }
-    observe() { this._observed = true; }
-    disconnect() { this._observed = false; }
+    constructor(callback) { this.callback = callback; this._observed = false; this._types = new Set(); }
+    observe(options = {}) {
+      this._observed = true;
+      if (options.type) this._types.add(String(options.type));
+      if (Array.isArray(options.entryTypes)) for (const type of options.entryTypes) this._types.add(String(type));
+      observerSet.add(this);
+    }
+    disconnect() { this._observed = false; observerSet.delete(this); }
     takeRecords() { return []; }
+    _notify(entry) {
+      if (!this._observed) return;
+      if (this._types.size && !this._types.has(entry.entryType)) return;
+      try { this.callback({ getEntries: () => [entry], getEntriesByType: (type) => entry.entryType === String(type) ? [entry] : [] }); } catch {}
+    }
     static get supportedEntryTypes() { return ["navigation", "resource", "paint", "mark", "measure"]; }
   };
 }
@@ -661,6 +671,7 @@ function createBrowserContext(options) {
   };
   browserCrypto.getRandomValues = crypto.webcrypto.getRandomValues.bind(crypto.webcrypto);
 
+  const performanceObservers = new Set();
   const perfEntries = [{
     name: options.pageUrl,
     entryType: "navigation",
@@ -673,6 +684,11 @@ function createBrowserContext(options) {
     decodedBodySize: 0,
     toJSON() { return { ...this }; },
   }];
+  function pushPerformanceEntry(entry) {
+    perfEntries.push(entry);
+    for (const observer of [...performanceObservers]) observer._notify?.(entry);
+  }
+
   const browserIntl = createIntlObject(options);
 
   const browserPerformance = {
@@ -686,8 +702,8 @@ function createBrowserContext(options) {
     getEntries() { return perfEntries.slice(); },
     getEntriesByType(type) { return perfEntries.filter((entry) => entry.entryType === String(type)); },
     getEntriesByName(name) { return perfEntries.filter((entry) => entry.name === String(name)); },
-    mark(name) { perfEntries.push({ name: String(name), entryType: "mark", startTime: this.now(), duration: 0, toJSON() { return { ...this }; } }); },
-    measure(name) { perfEntries.push({ name: String(name), entryType: "measure", startTime: this.now(), duration: 0, toJSON() { return { ...this }; } }); },
+    mark(name) { pushPerformanceEntry({ name: String(name), entryType: "mark", startTime: this.now(), duration: 0, toJSON() { return { ...this }; } }); },
+    measure(name) { pushPerformanceEntry({ name: String(name), entryType: "measure", startTime: this.now(), duration: 0, toJSON() { return { ...this }; } }); },
     clearMarks() {},
     clearMeasures() {},
   };
@@ -916,8 +932,8 @@ function createBrowserContext(options) {
     hardwareConcurrency: options.hardwareConcurrency,
     ...(isSafari ? {} : { deviceMemory: options.deviceMemory }),
     maxTouchPoints: 0,
-    platform: "MacIntel",
-    vendor: isSafari ? "Apple Computer, Inc." : "Google Inc.",
+    platform: options.navigatorPlatform || "MacIntel",
+    vendor: options.navigatorVendor || (isSafari ? "Apple Computer, Inc." : "Google Inc."),
     webdriver: false,
     bluetooth: { toString: () => "[object Bluetooth]" },
     ...(isSafari ? {} : { gpu: { toString: () => "[object GPU]" } }),
@@ -937,7 +953,7 @@ function createBrowserContext(options) {
       login: { toString: () => "[object NavigatorLogin]" },
       userAgentData: {
         mobile: false,
-        platform: options.secChUaPlatform || "macOS",
+        platform: options.userAgentDataPlatform || options.secChUaPlatform || "macOS",
         brands: parseSecChBrands(options.secChUa, options.chromeMajor),
         getHighEntropyValues: async (hints = []) => {
           const values = {
@@ -945,8 +961,8 @@ function createBrowserContext(options) {
             bitness: options.secChUaBitness || "64",
             mobile: false,
             model: options.secChUaModel || "",
-            platform: options.secChUaPlatform || "macOS",
-            platformVersion: options.secChUaPlatformVersion || "15.5.0",
+            platform: options.userAgentDataPlatform || options.secChUaPlatform || "macOS",
+            platformVersion: options.secChUaPlatformVersion || "15.7.0",
             uaFullVersion: options.chromeFullVersion || "",
             fullVersionList: parseSecChBrands(options.secChUaFullVersionList, options.chromeFullVersion || options.chromeMajor),
           };
@@ -975,6 +991,62 @@ function createBrowserContext(options) {
     },
   };
 
+  async function browserFetch(input, init = {}) {
+    const url = typeof input === "string" ? input : (input?.url || String(input));
+    const start = browserPerformance.now();
+    const isSentinelPing = /\/backend-api\/sentinel\/ping(?:$|[?#])/.test(url);
+    if (isSentinelPing) {
+      const edge = String(options.cfEdgeMsec ?? 38);
+      const origin = String(options.cfOriginTtfbMsec ?? 74);
+      const tcp = String(options.cfTcpRttMsec ?? 22);
+      const quic = String(options.cfQuicRttMsec ?? 0);
+      const duration = Math.max(1, Number(edge) + Number(origin));
+      const entry = {
+        name: url,
+        entryType: "resource",
+        initiatorType: "fetch",
+        startTime: start,
+        requestStart: start + 1,
+        responseStart: start + Math.max(1, Number(edge)),
+        responseEnd: start + duration,
+        duration,
+        transferSize: 300,
+        encodedBodySize: 0,
+        decodedBodySize: 0,
+        nextHopProtocol: options.nextHopProtocol || "h2",
+        toJSON() { return { ...this }; },
+      };
+      pushPerformanceEntry(entry);
+      return new Response("", {
+        status: 204,
+        headers: {
+          "s-cf-edge-msec": edge,
+          "s-cf-origin-ttfb-msec": origin,
+          "s-cf-tcp-rtt-msec": tcp,
+          "s-cf-quic-rtt-msec": quic,
+        },
+      });
+    }
+    const response = await fetch(input, init);
+    const end = browserPerformance.now();
+    pushPerformanceEntry({
+      name: url,
+      entryType: "resource",
+      initiatorType: init?.method ? String(init.method).toLowerCase() : "fetch",
+      startTime: start,
+      requestStart: start + 1,
+      responseStart: Math.max(start + 1, end - 1),
+      responseEnd: end,
+      duration: Math.max(1, end - start),
+      transferSize: 0,
+      encodedBodySize: 0,
+      decodedBodySize: 0,
+      nextHopProtocol: options.nextHopProtocol || "h2",
+      toJSON() { return { ...this }; },
+    });
+    return response;
+  }
+
   const window = Object.assign(windowTarget, {
     window: null,
     self: null,
@@ -998,7 +1070,7 @@ function createBrowserContext(options) {
     HTMLElement: function HTMLElement() {},
     HTMLIFrameElement: function HTMLIFrameElement() {},
     MutationObserver: class MutationObserver { constructor(callback) { this.callback = callback; } observe() {} disconnect() {} takeRecords() { return []; } },
-    PerformanceObserver: createPerformanceObserver(),
+    PerformanceObserver: createPerformanceObserver(performanceObservers),
     document,
     navigator,
     screen: options.screen,
@@ -1034,7 +1106,7 @@ function createBrowserContext(options) {
     queueMicrotask: queueMicrotask.bind(globalThis),
     btoa: btoaBinary,
     atob: atobBinary,
-    fetch,
+    fetch: browserFetch,
     console,
     Math: mathObject,
     Date,
@@ -1126,7 +1198,7 @@ function createBrowserContext(options) {
       queueMicrotask: queueMicrotask.bind(globalThis),
       btoa: btoaBinary,
       atob: atobBinary,
-      fetch,
+      fetch: browserFetch,
       console,
       Math: mathObject,
       Date,
@@ -1251,6 +1323,9 @@ async function main(argv = process.argv.slice(2), writeOutput = true) {
       ),
     contentType,
     browserFamily: pick(args["browser-family"], cfg("browserFamily", "browser_family"), process.env.SENTINEL_BROWSER_FAMILY, "chrome"),
+    navigatorPlatform: pick(args["navigator-platform"], cfg("navigatorPlatform", "navigator_platform"), process.env.SENTINEL_NAVIGATOR_PLATFORM, "MacIntel"),
+    navigatorVendor: pick(args["navigator-vendor"], cfg("navigatorVendor", "navigator_vendor"), process.env.SENTINEL_NAVIGATOR_VENDOR, "Google Inc."),
+    userAgentDataPlatform: pick(args["user-agent-data-platform"], cfg("userAgentDataPlatform", "user_agent_data_platform"), process.env.SENTINEL_UA_DATA_PLATFORM, "macOS"),
     requestIdleCallback: truthy(pick(args["request-idle-callback"], cfg("requestIdleCallback", "request_idle_callback"), process.env.SENTINEL_REQUEST_IDLE_CALLBACK, "0")),
     language: pick(args.language, cfg("language"), process.env.SENTINEL_LANGUAGE, "ja-JP"),
     languages: normalizeList(pick(args.languages, cfg("languages")), process.env.SENTINEL_LANGUAGES || "ja-JP"),
@@ -1270,10 +1345,14 @@ async function main(argv = process.argv.slice(2), writeOutput = true) {
     secChUa: pick(args["sec-ch-ua"], cfg("secChUa", "sec_ch_ua"), process.env.SENTINEL_SEC_CH_UA, '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'),
     secChUaPlatform: String(pick(args["sec-ch-ua-platform"], cfg("secChUaPlatform", "sec_ch_ua_platform"), process.env.SENTINEL_SEC_CH_UA_PLATFORM, "macOS")).replace(/^"|"$/g, ""),
     secChUaFullVersionList: pick(args["sec-ch-ua-full-version-list"], cfg("secChUaFullVersionList", "sec_ch_ua_full_version_list"), process.env.SENTINEL_SEC_CH_UA_FULL_VERSION_LIST, ""),
-    secChUaPlatformVersion: String(pick(args["sec-ch-ua-platform-version"], cfg("secChUaPlatformVersion", "sec_ch_ua_platform_version"), process.env.SENTINEL_SEC_CH_UA_PLATFORM_VERSION, "15.5.0")).replace(/^"|"$/g, ""),
+    secChUaPlatformVersion: String(pick(args["sec-ch-ua-platform-version"], cfg("secChUaPlatformVersion", "sec_ch_ua_platform_version"), process.env.SENTINEL_SEC_CH_UA_PLATFORM_VERSION, "15.7.0")).replace(/^"|"$/g, ""),
     secChUaArch: String(pick(args["sec-ch-ua-arch"], cfg("secChUaArch", "sec_ch_ua_arch"), process.env.SENTINEL_SEC_CH_UA_ARCH, "arm")).replace(/^"|"$/g, ""),
     secChUaBitness: String(pick(args["sec-ch-ua-bitness"], cfg("secChUaBitness", "sec_ch_ua_bitness"), process.env.SENTINEL_SEC_CH_UA_BITNESS, "64")).replace(/^"|"$/g, ""),
     secChUaModel: String(pick(args["sec-ch-ua-model"], cfg("secChUaModel", "sec_ch_ua_model"), process.env.SENTINEL_SEC_CH_UA_MODEL, "")).replace(/^"|"$/g, ""),
+    cfEdgeMsec: Number(pick(args["cf-edge-msec"], cfg("cfEdgeMsec", "cf_edge_msec"), process.env.SENTINEL_CF_EDGE_MSEC, 38)),
+    cfOriginTtfbMsec: Number(pick(args["cf-origin-ttfb-msec"], cfg("cfOriginTtfbMsec", "cf_origin_ttfb_msec"), process.env.SENTINEL_CF_ORIGIN_TTFB_MSEC, 74)),
+    cfTcpRttMsec: Number(pick(args["cf-tcp-rtt-msec"], cfg("cfTcpRttMsec", "cf_tcp_rtt_msec"), process.env.SENTINEL_CF_TCP_RTT_MSEC, 22)),
+    cfQuicRttMsec: Number(pick(args["cf-quic-rtt-msec"], cfg("cfQuicRttMsec", "cf_quic_rtt_msec"), process.env.SENTINEL_CF_QUIC_RTT_MSEC, 0)),
     screen: (() => {
       const width = Number(pick(args.width, cfg("width", "screenWidth"), process.env.SENTINEL_SCREEN_WIDTH, 1680));
       const height = Number(pick(args.height, cfg("height", "screenHeight"), process.env.SENTINEL_SCREEN_HEIGHT, 1050));

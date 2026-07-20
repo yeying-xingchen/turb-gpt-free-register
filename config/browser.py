@@ -39,6 +39,10 @@ IMPERSONATE = "chrome146"
 # ---------- 桌面 Chrome 画像 ----------
 BROWSER_FAMILY = "chrome"
 BROWSER_OS = "macOS"
+# OS 相关字段必须和 UA / Client Hints / JS navigator 三方一致。
+NAVIGATOR_PLATFORM = "MacIntel"
+NAVIGATOR_VENDOR = "Google Inc."
+USER_AGENT_DATA_PLATFORM = "macOS"
 USER_AGENT = (
     f"Mozilla/5.0 (Macintosh; Intel Mac OS X {MAC_OS_UA_VERSION}) "
     f"AppleWebKit/{SAFARI_WEBKIT_VERSION} (KHTML, like Gecko) "
@@ -64,6 +68,16 @@ IP_GEO_ENDPOINTS = [
     "https://ipinfo.io/json",
     "https://ipapi.co/json",
     "https://ipwho.is/",
+]
+
+# 代理出口质量诊断：默认不拦截，只在手动开启时拒绝云厂商/DC ASN。
+# 用户可能明确使用固定云出口复现实验抓包，因此默认 False。
+REJECT_CLOUD_PROXY = False
+CLOUD_PROXY_ORG_KEYWORDS = [
+    "amazon", "aws", "google cloud", "google llc", "microsoft", "azure",
+    "digitalocean", "linode", "akamai", "ovh", "hetzner", "oracle",
+    "tencent", "alibaba", "aliyun", "huawei cloud", "vultr", "contabo",
+    "data center", "datacenter", "hosting", "host", "server", "cloud",
 ]
 COUNTRY_LOCALE_PROFILE_MAP = {
     "JP": "jp", "CN": "cn", "HK": "hk", "TW": "tw", "US": "us", "CA": "us",
@@ -225,6 +239,10 @@ def build_browser_environment(geo: dict | None = None, base_profile: dict | None
         "navigator_languages": list(locale["navigator_languages"]),
         "accept_language": locale["accept_language"],
         "browser_family": BROWSER_FAMILY,
+        "browser_os": BROWSER_OS,
+        "navigator_platform": NAVIGATOR_PLATFORM,
+        "navigator_vendor": NAVIGATOR_VENDOR,
+        "user_agent_data_platform": USER_AGENT_DATA_PLATFORM,
         "safari_version": SAFARI_VERSION,
         "safari_webkit_version": SAFARI_WEBKIT_VERSION,
         "chrome_major": CHROME_MAJOR,
@@ -233,6 +251,11 @@ def build_browser_environment(geo: dict | None = None, base_profile: dict | None
         "send_client_hints": SEND_CLIENT_HINTS,
         "sec_ch_ua": SEC_CH_UA,
         "sec_ch_ua_platform": SEC_CH_UA_PLATFORM,
+        "sec_ch_ua_platform_version": SEC_CH_UA_PLATFORM_VERSION,
+        "sec_ch_ua_arch": SEC_CH_UA_ARCH,
+        "sec_ch_ua_bitness": SEC_CH_UA_BITNESS,
+        "sec_ch_ua_model": SEC_CH_UA_MODEL,
+        "sec_ch_ua_full_version_list": SEC_CH_UA_FULL_VERSION_LIST,
         "sec_ch_ua_mobile": SEC_CH_UA_MOBILE,
         "navigator_proto_samples": list(NAVIGATOR_PROTO_SAMPLES),
         "document_key_samples": list(DOCUMENT_KEY_SAMPLES),
@@ -261,6 +284,13 @@ def validate_browser_profile(profile: dict) -> list[str]:
             issues.append("Safari 不应发送 Chromium Client Hints")
     elif f"Chrome/{profile.get('chrome_full_version')}" not in ua:
         issues.append("UA 与 chrome_full_version 不一致")
+    if profile.get("browser_os") == "macOS":
+        if "Macintosh; Intel Mac OS X" not in ua:
+            issues.append("macOS 画像但 UA 不是 Macintosh")
+        if str(profile.get("navigator_platform") or "") != "MacIntel":
+            issues.append("macOS 画像但 navigator.platform 不是 MacIntel")
+        if "macOS" not in str(profile.get("sec_ch_ua_platform") or ""):
+            issues.append("macOS 画像但 sec-ch-ua-platform 不是 macOS")
     if not profile.get("navigator_language"):
         issues.append("navigator_language 为空")
     languages = profile.get("navigator_languages") or []
@@ -270,4 +300,4 @@ def validate_browser_profile(profile: dict) -> list[str]:
     return issues
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'BROWSER_LOCALE_PROFILE': 'str', 'AUTO_BROWSER_LOCALE_FROM_IP': 'bool', 'IP_GEO_TIMEOUT': 'float'})
+apply_env_overrides(globals(), {'BROWSER_LOCALE_PROFILE': 'str', 'AUTO_BROWSER_LOCALE_FROM_IP': 'bool', 'IP_GEO_TIMEOUT': 'float', 'REJECT_CLOUD_PROXY': 'bool'})

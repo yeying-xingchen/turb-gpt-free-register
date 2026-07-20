@@ -93,6 +93,7 @@ def generate_sentinel_token(
     react_listening_key: str | None = None,
     react_container_key: str | None = None,
     react_resources_key: str | None = None,
+    cookie: str | None = None,
 ) -> str:
     """
     把 sentinel.openai.com 返回的 challenge 喂给 sdk.js，生成最终 sentinel-token 字符串。
@@ -134,6 +135,9 @@ def generate_sentinel_token(
     chrome_full_version = str(profile.get("chrome_full_version", CHROME_FULL_VERSION))
     sec_ch_ua = str(profile.get("sec_ch_ua", SEC_CH_UA))
     sec_ch_ua_platform = str(profile.get("sec_ch_ua_platform", SEC_CH_UA_PLATFORM))
+    navigator_platform = str(profile.get("navigator_platform", "MacIntel"))
+    navigator_vendor = str(profile.get("navigator_vendor", "Google Inc."))
+    user_agent_data_platform = str(profile.get("user_agent_data_platform", sec_ch_ua_platform.strip('\"') or "macOS"))
     sec_ch_ua_full_version_list = str(profile.get("sec_ch_ua_full_version_list", SEC_CH_UA_FULL_VERSION_LIST))
     sec_ch_ua_platform_version = str(profile.get("sec_ch_ua_platform_version", SEC_CH_UA_PLATFORM_VERSION))
     sec_ch_ua_arch = str(profile.get("sec_ch_ua_arch", SEC_CH_UA_ARCH))
@@ -146,6 +150,7 @@ def generate_sentinel_token(
     timezone_iana = str(profile.get("timezone_iana", TIMEZONE_IANA))
     timezone_name = str(profile.get("timezone_name", TIMEZONE_NAME))
     timezone_offset_minutes = int(profile.get("timezone_offset_minutes", TIMEZONE_OFFSET_MINUTES))
+    runner_cookie = cookie or f"oai-did={device_id}"
 
     page = page_url or _FLOW_PAGE_URL.get(
         flow, "https://auth.openai.com/create-account/password"
@@ -177,6 +182,9 @@ def generate_sentinel_token(
             "--page-url", page,
             "--user-agent", ua,
             "--browser-family", browser_family,
+            "--navigator-platform", navigator_platform,
+            "--navigator-vendor", navigator_vendor,
+            "--user-agent-data-platform", user_agent_data_platform,
             "--request-idle-callback", "1" if request_idle_callback else "0",
             "--sdk", str(_SDK_PATH),
             "--script-src", f"https://sentinel.openai.com/sentinel/{SENTINEL_SV}/sdk.js",
@@ -202,7 +210,7 @@ def generate_sentinel_token(
             "--sec-ch-ua-arch", sec_ch_ua_arch,
             "--sec-ch-ua-bitness", sec_ch_ua_bitness,
             "--sec-ch-ua-model", sec_ch_ua_model,
-            "--no-cookie",
+            "--cookie", runner_cookie,
         ]
 
         logger.info(f"[SentinelRunner] 调用 Node 生成 token, flow={flow}")

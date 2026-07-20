@@ -23,6 +23,7 @@ from config import (
 logger = logging.getLogger(__name__)
 _GEO_CACHE: dict[str, dict] = {}
 _GEO_CACHE_LOCK = threading.Lock()
+_CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
 
 
 class BrowserSession:
@@ -92,6 +93,7 @@ class BrowserSession:
         # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
         # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
         self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
+        self._enforce_proxy_quality()
         self.browser_profile = pick_browser_profile(self.exit_geo)
         self.browser_profile["react_listening_key"] = self.react_listening_key
         self.browser_profile["react_container_key"] = self.react_container_key
@@ -105,6 +107,73 @@ class BrowserSession:
         # “头部/参数/JS 指纹有设备 ID，但 Cookie Jar 为空”的不一致。
         for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
             self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
+
+        # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
+        self._cf_cookie_seen = self.cf_cookie_snapshot()
+
+    def cf_cookie_snapshot(self) -> dict:
+        """返回当前 CookieJar 中的 Cloudflare 关键 Cookie 摘要，便于确认同 IP/同会话连续性。"""
+        out = {}
+        try:
+            for cookie in self.session.cookies.jar:
+                name = getattr(cookie, "name", "")
+                if name in _CF_COOKIE_NAMES:
+                    out[f"{getattr(cookie, 'domain', '')}:{name}"] = len(str(getattr(cookie, "value", "") or ""))
+        except Exception:
+            pass
+        return out
+
+    def _observe_cf_cookie_changes(self, url: str) -> None:
+        current = self.cf_cookie_snapshot()
+        if current != getattr(self, "_cf_cookie_seen", {}):
+            logger.info("[CF] Cookie 状态更新 url=%s keys=%s", url, sorted(current.keys()))
+            self._cf_cookie_seen = current
+
+    def _enforce_proxy_quality(self) -> None:
+        """根据 GeoIP org/ASN 粗判代理质量，默认拒绝云厂商/DC 出口。"""
+        try:
+            from config import browser as _browser_cfg
+            reject = bool(getattr(_browser_cfg, "REJECT_CLOUD_PROXY", True))
+            keywords = list(getattr(_browser_cfg, "CLOUD_PROXY_ORG_KEYWORDS", []) or [])
+        except Exception:
+            return
+        if not reject or not self.exit_geo:
+            return
+        org = str(self.exit_geo.get("org") or "").lower()
+        if not org:
+            return
+        hit = next((kw for kw in keywords if kw and str(kw).lower() in org), "")
+        if hit:
+            raise RuntimeError(
+                f"代理出口疑似云厂商/DC，已拒绝继续注册："
+                f"ip={self.exit_geo.get('ip') or '?'} country={self.exit_geo.get('country') or '?'} "
+                f"org={self.exit_geo.get('org') or '?'} hit={hit}. "
+                f"如确认是住宅代理，可设置 REJECT_CLOUD_PROXY=False。"
+            )
+
+    def _cookie_header_for_domain(self, domain: str) -> str:
+        """导出当前会话给指定域名可见的 Cookie，供 Node VM document.cookie 使用。"""
+        pairs = []
+        wanted = domain.lower().lstrip(".")
+        try:
+            for cookie in self.session.cookies.jar:
+                name = getattr(cookie, "name", "")
+                value = getattr(cookie, "value", "")
+                cdom = str(getattr(cookie, "domain", "") or "").lower().lstrip(".")
+                if not name:
+                    continue
+                if cdom and not (wanted == cdom or wanted.endswith("." + cdom) or cdom.endswith("." + wanted)):
+                    continue
+                pairs.append(f"{name}={value}")
+        except Exception:
+            pass
+        return "; ".join(pairs)
+
+    def auth_cookie_header(self) -> str:
+        return self._cookie_header_for_domain("auth.openai.com") or f"oai-did={self.device_id}"
+
+    def chatgpt_cookie_header(self) -> str:
+        return self._cookie_header_for_domain("chatgpt.com") or f"oai-did={self.device_id}"
 
     def _detect_exit_geo(self) -> dict:
         """通过当前代理检测出口 IP 地理信息；失败返回空 dict 并回退到默认地区画像。"""
@@ -413,6 +482,7 @@ class BrowserSession:
 
     def _observe_response_for_circuit_breaker(self, resp, url: str):
         status = int(getattr(resp, "status_code", 0) or 0)
+        self._observe_cf_cookie_changes(url)
         if status not in (403, 429):
             return resp
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
