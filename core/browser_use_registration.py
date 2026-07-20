@@ -449,7 +449,9 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             # 提交邮箱后如果仍显示 /auth/login 但页面其实已经渲染验证码输入框，
             # 某些 Browser Use target 上 DOM 状态会短暂滞后。不要在“密码页检测”里长等，
             # 直接交给后面的 OTP 阶段处理，避免云端会话被拖到关闭。
-            if _fast_mode() and time.time() - started >= 3:
+            # fast 模式也不要 3 秒就放弃：提交邮箱后常仍停在 /auth/login，
+            # 需等跳到 auth.openai.com 或出现密码/OTP 控件。
+            if _fast_mode() and time.time() - started >= 8:
                 logger.info("[BrowserUse] 未检测到密码页，提前进入 OTP 阶段：state=%s url=%s", state, state_info.get("url") or "-")
                 return None
             time.sleep(0.15 if _fast_mode() else 0.4)
@@ -1148,19 +1150,72 @@ def _pick_live_page(context, preferred=None):
 
 
 def _browser_use_heartbeat(page, context=None, label: str = ""):
-    """给 Browser Use 云端页面做轻量心跳，并顺便探测 target 是否已被平台关闭。"""
+    """给 Browser Use 云端页面做轻量心跳，并顺便探测 target 是否已被平台关闭。
+
+    OpenAI 跳转时常会关掉旧 target 再开新页；这里在 closed 时短暂重试切换到存活页，
+    避免把正常导航误判成“会话已死”。
+    """
+    tag = f"({label})" if label else ""
+
+    def _inventory() -> str:
+        if context is None:
+            return "no-context"
+        items = []
+        try:
+            for idx, p in enumerate(list(context.pages)):
+                try:
+                    closed = p.is_closed()
+                except Exception:
+                    closed = True
+                items.append(f"#{idx}:{'closed' if closed else 'open'}:{_page_url(p)[:100]}")
+        except Exception as exc:
+            return f"inventory-failed:{type(exc).__name__}"
+        return items and "; ".join(items) or "no-pages"
+
+    def _recover_live(preferred=None):
+        if context is None:
+            return None
+        # 跳转瞬间 pages 可能短暂为空，稍等再取
+        for delay in (0.0, 0.35, 0.8):
+            if delay:
+                time.sleep(delay)
+            live = _pick_live_page(context, preferred)
+            if live is None:
+                continue
+            try:
+                if live.is_closed():
+                    continue
+            except Exception:
+                continue
+            return live
+        return None
+
     if context is not None:
         live = _pick_live_page(context, page)
         if live is not None:
             page = live
     if page is None:
-        raise RuntimeError("BrowserUse 页面已关闭，无法继续心跳")
+        page = _recover_live(None)
+    if page is None:
+        raise RuntimeError(f"BrowserUse 页面已关闭，无法继续心跳{tag}；pages={_inventory()}")
+
     try:
         if page.is_closed():
-            raise RuntimeError("BrowserUse page.is_closed()=True")
+            recovered = _recover_live(page)
+            if recovered is None:
+                raise RuntimeError(f"BrowserUse page.is_closed()=True{tag}；pages={_inventory()}")
+            page = recovered
+            logger.info("[BrowserUse] 心跳恢复到存活页%s：url=%s", tag, _page_url(page) or "-")
     except Exception as exc:
         if _is_target_closed_error(exc):
-            raise RuntimeError(f"BrowserUse 页面已关闭，无法继续心跳：{exc}") from exc
+            recovered = _recover_live(None)
+            if recovered is None:
+                raise RuntimeError(f"BrowserUse 页面已关闭，无法继续心跳{tag}：{exc}；pages={_inventory()}") from exc
+            page = recovered
+            logger.info("[BrowserUse] target 关闭后切换存活页%s：url=%s", tag, _page_url(page) or "-")
+        else:
+            raise
+
     try:
         # 读 location/visibilityState 足够轻量，不会改变页面状态；比 context.request 更能保持远端 page target 活跃。
         page.evaluate("() => ({href: location.href, visibility: document.visibilityState, t: Date.now()})", timeout=2500)
@@ -1170,13 +1225,24 @@ def _browser_use_heartbeat(page, context=None, label: str = ""):
             page.evaluate("() => ({href: location.href, visibility: document.visibilityState, t: Date.now()})")
         except Exception as exc:
             if _is_target_closed_error(exc):
-                raise RuntimeError(f"BrowserUse 页面已关闭，无法继续心跳：{exc}") from exc
-            logger.debug("[BrowserUse] 心跳失败%s：%s", f"({label})" if label else "", str(exc)[:180])
+                recovered = _recover_live(None)
+                if recovered is None:
+                    raise RuntimeError(f"BrowserUse 页面已关闭，无法继续心跳{tag}：{exc}；pages={_inventory()}") from exc
+                page = recovered
+                logger.info("[BrowserUse] evaluate 关闭后切换存活页%s：url=%s", tag, _page_url(page) or "-")
+            else:
+                logger.debug("[BrowserUse] 心跳失败%s：%s", tag, str(exc)[:180])
     except Exception as exc:
         if _is_target_closed_error(exc):
-            raise RuntimeError(f"BrowserUse 页面已关闭，无法继续心跳：{exc}") from exc
-        logger.debug("[BrowserUse] 心跳失败%s：%s", f"({label})" if label else "", str(exc)[:180])
+            recovered = _recover_live(None)
+            if recovered is None:
+                raise RuntimeError(f"BrowserUse 页面已关闭，无法继续心跳{tag}：{exc}；pages={_inventory()}") from exc
+            page = recovered
+            logger.info("[BrowserUse] evaluate 关闭后切换存活页%s：url=%s", tag, _page_url(page) or "-")
+        else:
+            logger.debug("[BrowserUse] 心跳失败%s：%s", tag, str(exc)[:180])
     return page
+
 
 
 def _wait_for_otp_with_browser_heartbeat(page, context, email: str, after_ts: float) -> str:
@@ -1485,7 +1551,7 @@ def run_browser_use_registration(
             max_otp_attempts = 3
             for otp_attempt in range(1, max_otp_attempts + 1):
                 # 等验证码页出现
-                wait_end = time.time() + (6 if _fast_mode() else 30)
+                wait_end = time.time() + (20 if _fast_mode() else 45)
                 last_verify_log = 0.0
                 while time.time() < wait_end:
                     page = _browser_use_heartbeat(page, context=context, label="wait-email-verification")

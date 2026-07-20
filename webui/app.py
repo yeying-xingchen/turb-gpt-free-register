@@ -66,7 +66,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         pool = {"total": 0, "available": 0, "used": 0, "failed": 0}
         for src in parse_email_sources(_email_cfg.EMAIL_SOURCE):
             # GPTMail/MailNest/CloudMail 地址按需生成，不属于本地邮箱池。
-            if src in ("gptmail", "mailnest", "cloudmail"):
+            if src in ("gptmail", "mailnest", "cloudmail", "cloudflare"):
                 continue
             one = (
                 db.generic_api_email_pool_summary() if src == "generic_api"
@@ -1067,6 +1067,22 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "ok": False,
                     "error": "已选择 gptmail 邮箱来源，请填写 GPTMail API Key（配置 → 邮箱 / OTP）。",
                 }), 400
+        if "cloudflare" in sources:
+            api_base = str(getattr(_email_cfg, "CLOUDFLARE_API_BASE", "") or "").strip()
+            if not api_base:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 cloudflare 邮箱来源，请填写 Cloudflare API 地址（配置 → 邮箱 / OTP）。",
+                }), 400
+            auth_mode = str(getattr(_email_cfg, "CLOUDFLARE_AUTH_MODE", "none") or "none").strip().lower()
+            accounts_path = str(getattr(_email_cfg, "CLOUDFLARE_PATH_ACCOUNTS", "/api/new_address") or "").strip().lower()
+            api_key = str(getattr(_email_cfg, "CLOUDFLARE_API_KEY", "") or "").strip()
+            needs_key = auth_mode in ("x-admin-auth", "bearer", "x-api-key", "query-key") or accounts_path.rstrip("/").endswith("/admin/new_address")
+            if needs_key and not api_key:
+                return jsonify({
+                    "ok": False,
+                    "error": "Cloudflare admin/鉴权模式需要填写 Cloudflare API Key（配置 → 邮箱 / OTP）。",
+                }), 400
         if "mailnest" in sources:
             api_key = str(getattr(_email_cfg, "MAIL_NEST_API_KEY", "") or "").strip()
             project_code = str(getattr(_email_cfg, "MAIL_NEST_PROJECT_CODE", "") or "").strip()
@@ -1093,7 +1109,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "ok": False,
                     "error": "已选择 cloudmail 邮箱来源，请填写 CloudMail Token（配置 → 邮箱 / OTP）。",
                 }), 400
-        if "gptmail" in sources or "mailnest" in sources or "cloudmail" in sources:
+        if "gptmail" in sources or "mailnest" in sources or "cloudmail" in sources or "cloudflare" in sources:
             # 临时邮箱在任务开始时动态生成，不需要本地邮箱池容量提示。
             warning = ""
         elif "cloudflare_domain" in sources:
