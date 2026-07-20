@@ -421,15 +421,27 @@ def _is_email_verification_page(page) -> bool:
 
 
 def _click_passwordless_signup_if_present(page) -> bool:
-    """在注册密码页优先点击“使用一次性验证码注册”，进入邮箱 OTP 流。"""
+    """在注册/登录密码页优先点击“使用一次性验证码”，进入邮箱 OTP 流。"""
     selectors = [
         "button[name='intent'][value='passwordless_signup_send_otp']",
         "input[type='submit'][name='intent'][value='passwordless_signup_send_otp']",
+        "button[name='intent'][value='passwordless_login_send_otp']",
+        "input[type='submit'][name='intent'][value='passwordless_login_send_otp']",
+        "button[name='intent'][value*='passwordless'][value*='send_otp']",
+        "input[type='submit'][name='intent'][value*='passwordless'][value*='send_otp']",
         "button:has-text('使用一次性验证码注册')",
+        "button:has-text('使用一次性验证码登录')",
+        "button:has-text('使用一次性验证码')",
         "button:has-text('使用一次性驗證碼註冊')",
+        "button:has-text('使用一次性驗證碼登入')",
         "button:has-text('Use a one-time code')",
         "button:has-text('one-time code')",
+        "a:has-text('使用一次性验证码')",
+        "a:has-text('使用一次性驗證碼')",
+        "a:has-text('Use a one-time code')",
+        "a:has-text('one-time code')",
         "[role='button']:has-text('使用一次性验证码注册')",
+        "[role='button']:has-text('使用一次性验证码登录')",
         "[role='button']:has-text('one-time code')",
     ]
     if _click_first(page, selectors, timeout_ms=1500):
@@ -445,15 +457,20 @@ def _click_passwordless_signup_if_present(page) -> bool:
               };
               const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
               const norm = s => String(s || '').replace(/\\s+/g, '').toLowerCase();
-              const btn = [...document.querySelectorAll('button,input[type="submit"],[role="button"]')]
+              const btn = [...document.querySelectorAll('button,a,input[type="submit"],[role="button"],[role="link"]')]
                 .filter(el => visible(el) && enabled(el))
                 .find(el => {
                   const name = String(el.getAttribute('name') || '').toLowerCase();
                   const value = String(el.getAttribute('value') || '').toLowerCase();
                   const text = norm(el.textContent || el.getAttribute('value') || '');
-                  return (name === 'intent' && value === 'passwordless_signup_send_otp')
+                  return (name === 'intent' && value.includes('passwordless') && value.includes('send_otp'))
+                    || (name === 'intent' && value === 'passwordless_signup_send_otp')
+                    || (name === 'intent' && value === 'passwordless_login_send_otp')
                     || text.includes('使用一次性验证码注册')
+                    || text.includes('使用一次性验证码登录')
+                    || text.includes('使用一次性验证码')
                     || text.includes('使用一次性驗證碼註冊')
+                    || text.includes('使用一次性驗證碼登入')
                     || text.includes('one-timecode');
                 });
               if (!btn) return false;
@@ -491,7 +508,7 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             last_log = time.time()
         if state == "email_verification":
             return None
-        if state != "password":
+        if state not in ("password", "login_password"):
             # 提交邮箱后如果仍显示 /auth/login 但页面其实已经渲染验证码输入框，
             # 某些 Browser Use target 上 DOM 状态会短暂滞后。不要在“密码页检测”里长等，
             # 直接交给后面的 OTP 阶段处理，避免云端会话被拖到关闭。
@@ -503,20 +520,23 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
             time.sleep(0.15 if _fast_mode() else 0.4)
             continue
         if _click_passwordless_signup_if_present(page):
-            logger.info("[BrowserUse] 检测到密码页，已点击一次性验证码注册：%s", email)
+            logger.info("[BrowserUse] 检测到密码页，已点击一次性验证码入口：state=%s email=%s", state, email)
             wait_end = time.time() + 20
             while time.time() < wait_end:
                 state_after = _quick_auth_state(page)
                 if state_after.get("state") == "email_verification":
-                    logger.info("[BrowserUse] 一次性验证码注册已进入邮箱验证码页")
+                    logger.info("[BrowserUse] 一次性验证码入口已进入邮箱验证码页")
                     return None
                 if state_after.get("state") == "chatgpt":
-                    logger.info("[BrowserUse] 一次性验证码注册后已进入 ChatGPT")
+                    logger.info("[BrowserUse] 一次性验证码入口后已进入 ChatGPT")
                     return None
-                if state_after.get("state") != "password":
+                if state_after.get("state") not in ("password", "login_password"):
                     return None
                 time.sleep(0.2 if _fast_mode() else 0.5)
-            logger.info("[BrowserUse] 已点击一次性验证码注册，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
+            logger.info("[BrowserUse] 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
+            return None
+        if state == "login_password":
+            logger.info("[BrowserUse] 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：url=%s", state_info.get("url") or "-")
             return None
         password = _registration_password()
         logger.info("[BrowserUse] 检测到密码页，设置密码（%s 位）：%s", len(password), email)

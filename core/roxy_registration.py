@@ -923,10 +923,22 @@ def _is_signup_password_page(driver) -> bool:
     )
 
 
+def _is_login_password_page(driver) -> bool:
+    try:
+        url = str(driver.current_url or '').lower()
+    except Exception:
+        url = ''
+    if '/log-in/password' in url:
+        return True
+    state = _password_page_state(driver)
+    url = str(state.get('url') or '').lower()
+    return '/log-in/password' in url
+
+
 def _click_passwordless_signup_if_present(driver) -> dict:
     """
-    新版注册流在 /create-account/password 上可能默认要求设置密码。
-    如果页面提供“使用一次性验证码注册”按钮，优先点击进入邮箱 OTP 页面。
+    新版注册/登录流在 password 页可能默认要求密码。
+    如果页面提供“使用一次性验证码”按钮，优先点击进入邮箱 OTP 页面。
     """
     try:
         return driver.execute_script(r"""
@@ -934,7 +946,7 @@ def _click_passwordless_signup_if_present(driver) -> dict:
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
         const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
         const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
-        const candidates = [...document.querySelectorAll('button,input[type="submit"],[role="button"]')].filter(el => visible(el) && enabled(el));
+        const candidates = [...document.querySelectorAll('button,a,input[type="submit"],[role="button"],[role="link"]')].filter(el => visible(el) && enabled(el));
         const btn = candidates.find(el => {
           const name = String(el.getAttribute('name') || '').toLowerCase();
           const value = String(el.getAttribute('value') || '').toLowerCase();
@@ -944,13 +956,21 @@ def _click_passwordless_signup_if_present(driver) -> dict:
           ].join(' ').toLowerCase();
           const text = norm(el.textContent || el.getAttribute('value') || '');
           return (
+            (name === 'intent' && value.includes('passwordless') && value.includes('send_otp')) ||
             (name === 'intent' && value === 'passwordless_signup_send_otp') ||
+            (name === 'intent' && value === 'passwordless_login_send_otp') ||
             attrs.includes('passwordless_signup_send_otp') ||
+            attrs.includes('passwordless_login_send_otp') ||
             text.includes('使用一次性验证码注册') ||
+            text.includes('使用一次性验证码登录') ||
+            text.includes('使用一次性验证码') ||
             text.includes('使用一次性驗證碼註冊') ||
+            text.includes('使用一次性驗證碼登入') ||
             text.includes('useonetimeregistrationcode') ||
             text.includes('useaone-timecodetosignup') ||
-            text.includes('useaone-timecodetoregister')
+            text.includes('useaone-timecodetoregister') ||
+            text.includes('useaone-timecodetologin') ||
+            text.includes('one-timecode')
           );
         });
         if (!btn) return {ok:false, reason:'missing_passwordless_button'};
@@ -958,7 +978,7 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         btn.click();
         return {
           ok:true,
-          reason:'clicked_passwordless_signup_send_otp',
+          reason:'clicked_passwordless_send_otp',
           name: btn.getAttribute('name') || '',
           value: btn.getAttribute('value') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
@@ -978,22 +998,27 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         if _has_access_token(driver):
             return None
         last = _password_page_state(driver)
-        if not _is_signup_password_page(driver):
+        is_signup_password = _is_signup_password_page(driver)
+        is_login_password = _is_login_password_page(driver)
+        if not (is_signup_password or is_login_password):
             time.sleep(0.5)
             continue
         passwordless = _click_passwordless_signup_if_present(driver)
         if passwordless.get('ok'):
-            logger.info("[Roxy注册] 检测到 create-account/password，已点击一次性验证码注册：email=%s detail=%s", email, passwordless)
+            logger.info("[Roxy注册] 检测到 password 页，已点击一次性验证码入口：email=%s detail=%s", email, passwordless)
             wait_end = time.time() + 20
             while time.time() < wait_end:
                 if _is_email_verification_page(driver):
-                    logger.info("[Roxy注册] 一次性验证码注册已进入邮箱验证码页")
+                    logger.info("[Roxy注册] 一次性验证码入口已进入邮箱验证码页")
                     return None
                 if _has_access_token(driver):
-                    logger.info("[Roxy注册] 一次性验证码注册后已检测到登录态")
+                    logger.info("[Roxy注册] 一次性验证码入口后已检测到登录态")
                     return None
                 time.sleep(0.5)
-            logger.info("[Roxy注册] 已点击一次性验证码注册，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
+            logger.info("[Roxy注册] 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
+            return None
+        if is_login_password:
+            logger.info("[Roxy注册] 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：state=%s", last)
             return None
         password = _registration_password()
         logger.info("[Roxy注册] 检测到 create-account/password，准备设置密码（%s 位）：email=%s", len(password), email)
