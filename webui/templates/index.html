@@ -355,9 +355,11 @@
           </label>
           <button class="btn primary" id="btnCheckSelectedPlans" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查询选中套餐</button>
           <button class="btn primary" id="btnRetrySelectedCodex" disabled title="给选中的账号批量补跑 Codex 授权">批量补跑 Codex</button>
+          <button class="btn good" id="btnDownloadSelectedCpa" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载选中CPA</button>
           <button class="btn danger" id="btnStopSelectedCodex" disabled title="停止选中账号中正在补跑的 Codex 授权">停止选中补跑</button>
           <button class="btn good" id="btnNoteSelectedAccounts" disabled title="给选中的账号统一设置备注，留空可清空备注">批量备注</button>
           <button class="btn good" id="btnCopySelectedLines" disabled title="复制选中账号的完整整行，每个账号一行">复制选中整行</button>
+          <button class="btn good" id="btnDownloadSelectedTxt" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载选中TXT</button>
           <button class="btn" id="btnDeleteSelectedAccounts" disabled title="删除选中的本地账号/token记录">删除选中</button>
           <button class="btn primary" id="copyAllTokens">复制全部 Token</button>
           <button class="btn good" id="copyAllLines">复制全部整行</button>
@@ -1158,15 +1160,19 @@ function updateAccountSelectionUi(pageRows = null) {
   const bulkBtn = $('#btnDeleteSelectedAccounts');
   const retryBulkBtn = $('#btnRetrySelectedCodex');
   const stopCodexBulkBtn = $('#btnStopSelectedCodex');
+  const downloadCpaBtn = $('#btnDownloadSelectedCpa');
   const checkPlanBtn = $('#btnCheckSelectedPlans');
   const copySelectedBtn = $('#btnCopySelectedLines');
+  const downloadTxtBtn = $('#btnDownloadSelectedTxt');
   const noteSelectedBtn = $('#btnNoteSelectedAccounts');
   if (hint) hint.textContent = `已选 ${ACCOUNT_SELECTED.size}`;
   if (bulkBtn) bulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (retryBulkBtn) retryBulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (stopCodexBulkBtn) stopCodexBulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
+  if (downloadCpaBtn) downloadCpaBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (checkPlanBtn) checkPlanBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (copySelectedBtn) copySelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
+  if (downloadTxtBtn) downloadTxtBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (noteSelectedBtn) noteSelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
 
   const cbAll = $('#accountsSelectAll');
@@ -1315,8 +1321,10 @@ $('#accountsSelectAll').addEventListener('change', (e) => {
 });
 $('#btnDeleteSelectedAccounts').addEventListener('click', deleteSelectedAccounts);
 $('#btnCopySelectedLines').addEventListener('click', copySelectedAccountLines);
+$('#btnDownloadSelectedTxt').addEventListener('click', downloadSelectedAccountTxt);
 $('#btnNoteSelectedAccounts').addEventListener('click', noteSelectedAccounts);
 $('#btnRetrySelectedCodex').addEventListener('click', retrySelectedCodex);
+$('#btnDownloadSelectedCpa').addEventListener('click', downloadSelectedCpa);
 $('#btnStopSelectedCodex').addEventListener('click', stopSelectedCodex);
 $('#btnCheckSelectedPlans').addEventListener('click', checkSelectedPlans);
 
@@ -1331,6 +1339,83 @@ function copySelectedAccountLines() {
   if (!lines.length) { showToast('请先选择账号'); return; }
   copyText(lines.join('\n'));
   showToast(`已复制 ${lines.length} 行`);
+}
+
+function _selectedAccountLines() {
+  const ids = new Set(Array.from(ACCOUNT_SELECTED).map(Number));
+  return ACCOUNTS
+    .filter(r => ids.has(Number(r.id)))
+    .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
+    .map(r => r.copy_line || '')
+    .filter(Boolean);
+}
+
+function downloadSelectedAccountTxt() {
+  const lines = _selectedAccountLines();
+  if (!lines.length) { showToast('请先选择账号'); return; }
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const filename = `accounts-selected-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
+  const blob = new Blob(['\ufeff' + lines.join('\n') + '\n'], {type: 'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+  showToast(`已下载 ${lines.length} 个账号 TXT`);
+}
+
+async function downloadSelectedCpa() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  const missingCodex = selectedAccounts.filter(a => (a.codex_status || '') !== 'success').length;
+  let msg = `确定从 CPA 下载选中的 ${ids.length} 个账号的 CPA/Codex JSON 吗？\n\n会按账号邮箱匹配 CPA auth-files，成功的文件会打包成 ZIP。`;
+  if (missingCodex) msg += `\n\n其中 ${missingCodex} 个账号本地 Codex 状态不是 success，若 CPA 端没有文件会写入 manifest 错误清单。`;
+  if (!confirm(msg)) return;
+  const btn = $('#btnDownloadSelectedCpa');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '下载中…';
+  try {
+    const resp = await fetch('/api/accounts/download-cpa-bulk', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids}),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      let msg = text || resp.statusText;
+      try {
+        const j = JSON.parse(text);
+        msg = j.error || msg;
+        if (Array.isArray(j.errors) && j.errors.length) msg += `；失败 ${j.errors.length} 个`;
+      } catch(e) {}
+      throw new Error(msg);
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    let filename = 'accounts-cpa-bulk.zip';
+    const m = cd.match(/filename\*=UTF-8''([^;]+)|filename="([^"]+)"|filename=([^;]+)/i);
+    if (m) filename = decodeURIComponent(m[1] || m[2] || m[3] || filename).replace(/^["']|["']$/g, '');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    showToast(`已生成下载：${filename}`);
+    loadCodex();
+  } catch(err) {
+    showToast('下载 CPA 失败: ' + err.message);
+  } finally {
+    btn.textContent = old;
+    updateAccountSelectionUi();
+  }
 }
 
 async function checkOnePlan(id, btn) {

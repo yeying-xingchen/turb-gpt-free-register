@@ -291,6 +291,108 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped_count": len(skipped),
         }), 202
 
+    @app.post("/api/accounts/download-cpa-bulk")
+    def api_accounts_download_cpa_bulk():
+        """
+        从账号列表选中的账号直接到 CPA auth-files 下载 Codex CPA JSON，并打包为 ZIP。
+        Body: {"account_ids": [1,2,...]} 或 {"ids": [...]}
+        """
+        import io
+        import json as _json
+        import zipfile
+        from datetime import datetime as _dt
+        from core.codex_oauth import download_cpa_codex_auth_text
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 1000:
+            return jsonify({"ok": False, "error": "单次最多下载 1000 个账号"}), 400
+
+        # 建立 email -> 本地 codex 文件名索引；有本地文件名时传给 CPA 匹配逻辑可提升命中率。
+        local_by_email: dict[str, str] = {}
+        try:
+            for item in db.list_codex_accounts():
+                email_key = str(item.get("email") or "").strip().lower()
+                fname = str(item.get("filename") or "").strip()
+                if email_key and fname and email_key not in local_by_email:
+                    local_by_email[email_key] = fname
+        except Exception:
+            local_by_email = {}
+
+        errors = []
+        added = []
+        used_names = set()
+        seen_ids = set()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for raw_id in ids:
+                try:
+                    acc_id = int(raw_id)
+                except (TypeError, ValueError):
+                    errors.append({"id": raw_id, "error": "ID 非法"})
+                    continue
+                if acc_id in seen_ids:
+                    continue
+                seen_ids.add(acc_id)
+
+                acc = db.get_account(acc_id)
+                if not acc:
+                    errors.append({"id": acc_id, "error": "账号不存在"})
+                    continue
+                email = str(acc.get("email") or "").strip()
+                if not email:
+                    errors.append({"id": acc_id, "error": "账号缺少 email"})
+                    continue
+
+                local_filename = local_by_email.get(email.lower(), "")
+                try:
+                    cpa_text, cpa_name, meta = download_cpa_codex_auth_text(
+                        email=email,
+                        local_filename=local_filename,
+                    )
+                    arcname = cpa_name
+                    if arcname in used_names:
+                        stem, dot, ext = arcname.rpartition(".")
+                        arcname = f"{stem or arcname}-{len(used_names)+1}{dot}{ext}" if dot else f"{arcname}-{len(used_names)+1}"
+                    used_names.add(arcname)
+                    zf.writestr(arcname, cpa_text)
+                    added.append({
+                        "id": acc_id,
+                        "email": email,
+                        "local_filename": local_filename,
+                        "cpa_filename": cpa_name,
+                        "cpa_meta": meta,
+                    })
+                    if local_filename:
+                        try:
+                            db.mark_codex_exported(local_filename)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    errors.append({"id": acc_id, "email": email, "error": f"{type(exc).__name__}: {exc}"})
+
+            manifest = {
+                "exported_at": _dt.now().isoformat(timespec="seconds"),
+                "source": "accounts-cpa",
+                "count": len(added),
+                "files": added,
+                "errors": errors,
+            }
+            zf.writestr("manifest.json", _json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+        if not added:
+            return jsonify({"ok": False, "error": "没有成功从 CPA 下载任何凭证", "errors": errors}), 502
+        now = _dt.now()
+        dl_name = f"accounts-cpa-bulk-{now.strftime('%Y%m%d-%H%M%S')}.zip"
+        buf.seek(0)
+        return Response(
+            buf.getvalue(),
+            mimetype="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+        )
+
     # ----------------------------------------------------------
     # 邮箱池
     # ----------------------------------------------------------
