@@ -29,6 +29,7 @@ from core.roxy_registration import (
     _clear_otp_inputs,
     _email_otp_page_state,
     _is_email_verification_page,
+    _click_passwordless_signup_if_present,
 )
 
 _base_logger = logging.getLogger(__name__)
@@ -173,6 +174,41 @@ def _click_if_present(driver, selectors: list[str], timeout: int = 3) -> bool:
         return False
 
 
+def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18) -> None:
+    """
+    Codex OAuth 提交邮箱后也可能跳到 /log-in/password 或 /create-account/password。
+    优先点击“使用一次性验证码/one-time code”入口，进入邮箱验证码页。
+    """
+    end = time.time() + timeout
+    last_url = ""
+    clicked = False
+    while time.time() < end:
+        try:
+            if _is_email_verification_page(driver):
+                if clicked:
+                    logger.info("[Codex][Browser] 一次性验证码入口已进入邮箱验证码页")
+                return
+            url = str(driver.current_url or "")
+            if url != last_url:
+                logger.info("[Codex][Browser] 提交邮箱后检测密码/OTP 跳转：url=%s", url or "-")
+                last_url = url
+            lower = url.lower()
+            if any(x in lower for x in ("phone", "workspace", "consent", "authorize", "localhost:1455")):
+                return
+            if "/password" in lower or "auth.openai.com" in lower:
+                result = _click_passwordless_signup_if_present(driver)
+                if result.get("ok"):
+                    clicked = True
+                    logger.info("[Codex][Browser] 已点击一次性验证码入口：email=%s detail=%s", email, result)
+                    human_delay("form")
+                    continue
+        except Exception as exc:
+            logger.debug("[Codex][Browser] 密码页一次性验证码入口探测失败：%s", str(exc)[:140])
+        time.sleep(0.5)
+    if clicked:
+        logger.info("[Codex][Browser] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
+
+
 def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None:
     otp_after_ts = time.time()
     logger.info("[Codex][Browser] 打开授权地址")
@@ -190,6 +226,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
         human_delay("form")
         _submit_email_step(driver)
         logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
+        _maybe_click_passwordless_after_email(driver, email, timeout=18)
     except Exception as exc:
         logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", str(exc)[:120])
         return
@@ -213,6 +250,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             human_delay("form")
             _submit_email_step(driver)
             logger.info("[Codex][Browser] 已重新提交邮箱触发 OTP")
+            _maybe_click_passwordless_after_email(driver, email, timeout=12)
         except Exception as exc:
             # 如果重进授权地址后已经停在验证码/下一步页面，就不要再强行提交。
             if not _is_email_verification_page(driver):

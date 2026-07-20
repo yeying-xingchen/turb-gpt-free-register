@@ -21,6 +21,7 @@ from core.browser_use_registration import (
     _type_otp,
     _clear_otp_inputs,
     _wait_after_otp,
+    _click_passwordless_signup_if_present,
 )
 from core.humanize import delay as human_delay
 
@@ -613,6 +614,40 @@ def _wait_after_email_submit(page, timeout: int = 45, dead_tracker: dict | None 
     return "unknown"
 
 
+def _maybe_click_passwordless_after_email(page, email: str, timeout: int = 18) -> None:
+    """
+    Codex OAuth 提交邮箱后也可能跳到 /log-in/password 或 /create-account/password。
+    优先点击“使用一次性验证码/one-time code”入口，进入邮箱验证码页。
+    """
+    end = time.time() + timeout
+    last_url = ""
+    clicked = False
+    while time.time() < end:
+        try:
+            if _looks_email_otp_page(page):
+                if clicked:
+                    logger.info("[Codex][BrowserUse] 一次性验证码入口已进入邮箱验证码页")
+                return
+            if _looks_next_step_after_login(page):
+                return
+            url = _page_url(page)
+            if url != last_url:
+                logger.info("[Codex][BrowserUse] 提交邮箱后检测密码/OTP 跳转：url=%s", url or "-")
+                last_url = url
+            lower = str(url or "").lower()
+            if "/password" in lower or "auth.openai.com" in lower:
+                if _click_passwordless_signup_if_present(page):
+                    clicked = True
+                    logger.info("[Codex][BrowserUse] 已点击一次性验证码入口：email=%s", email)
+                    _bu_delay("form")
+                    continue
+        except Exception as exc:
+            logger.debug("[Codex][BrowserUse] 密码页一次性验证码入口探测失败：%s", str(exc)[:140])
+        time.sleep(0.4)
+    if clicked:
+        logger.info("[Codex][BrowserUse] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
+
+
 def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_tracker: dict | None = None) -> None:
     otp_after_ts = time.time()
     logger.info("[Codex][BrowserUse] 打开授权地址")
@@ -633,6 +668,7 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
         _fill_email_for_codex(page, email)
         _t_email.done()
         logger.info("[Codex][BrowserUse] 已提交邮箱：%s", email)
+        _maybe_click_passwordless_after_email(page, email, timeout=18)
     except Exception as exc:
         if _looks_next_step_after_login(page):
             logger.info("[Codex][BrowserUse] 未检测到邮箱输入框，但页面已进入后续授权步骤：%s", _current_state_for_log(page))
@@ -656,6 +692,7 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
                 return
             _fill_email_for_codex(page, email)
             logger.info("[Codex][BrowserUse] 已重新提交邮箱触发 OTP")
+            _maybe_click_passwordless_after_email(page, email, timeout=12)
         except Exception as exc:
             logger.warning("[Codex][BrowserUse] 重新提交邮箱失败，继续按当前页面轮询：%s", str(exc)[:180])
         _bu_delay("api")
