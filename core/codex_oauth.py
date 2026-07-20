@@ -1194,9 +1194,27 @@ def run_codex_oauth(
         _submit_email(session, email)
         human_delay("form")
 
-        # 4. 收邮箱 OTP + 提交
-        logger.info(f"[Codex] 等待邮箱 OTP：{email}")
-        email_otp = otp_provider(email, after_ts=otp_after_ts)
+        # 4. 收邮箱 OTP + 提交；若一直未收到，协议模式下重新提交邮箱触发重发。
+        email_otp = None
+        max_email_otp_attempts = 3
+        for email_otp_attempt in range(1, max_email_otp_attempts + 1):
+            logger.info(f"[Codex] 等待邮箱 OTP：{email}（第 {email_otp_attempt}/{max_email_otp_attempts} 次）")
+            try:
+                email_otp = otp_provider(email, after_ts=otp_after_ts)
+                break
+            except Exception as exc:
+                if email_otp_attempt >= max_email_otp_attempts:
+                    raise
+                logger.warning(
+                    "[Codex] 一直未收到邮箱 OTP，重新提交邮箱触发重发后继续等待（下一轮 %s/%s）：%s: %s",
+                    email_otp_attempt + 1,
+                    max_email_otp_attempts,
+                    type(exc).__name__,
+                    str(exc)[:180],
+                )
+                otp_after_ts = time.time()
+                _submit_email(session, email)
+                human_delay("api")
         logger.info(f"[Codex] 邮箱 OTP 收到：{email_otp}")
         human_delay("otp_input")
         _submit_email_otp(session, email_otp)

@@ -420,6 +420,52 @@ def _is_email_verification_page(page) -> bool:
     return loc is not None
 
 
+def _click_passwordless_signup_if_present(page) -> bool:
+    """在注册密码页优先点击“使用一次性验证码注册”，进入邮箱 OTP 流。"""
+    selectors = [
+        "button[name='intent'][value='passwordless_signup_send_otp']",
+        "input[type='submit'][name='intent'][value='passwordless_signup_send_otp']",
+        "button:has-text('使用一次性验证码注册')",
+        "button:has-text('使用一次性驗證碼註冊')",
+        "button:has-text('Use a one-time code')",
+        "button:has-text('one-time code')",
+        "[role='button']:has-text('使用一次性验证码注册')",
+        "[role='button']:has-text('one-time code')",
+    ]
+    if _click_first(page, selectors, timeout_ms=1500):
+        return True
+    try:
+        return bool(page.evaluate(
+            """() => {
+              const visible = el => {
+                if (!el) return false;
+                const st = getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+                return st.visibility !== 'hidden' && st.display !== 'none' && r.width > 0 && r.height > 0;
+              };
+              const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+              const norm = s => String(s || '').replace(/\\s+/g, '').toLowerCase();
+              const btn = [...document.querySelectorAll('button,input[type="submit"],[role="button"]')]
+                .filter(el => visible(el) && enabled(el))
+                .find(el => {
+                  const name = String(el.getAttribute('name') || '').toLowerCase();
+                  const value = String(el.getAttribute('value') || '').toLowerCase();
+                  const text = norm(el.textContent || el.getAttribute('value') || '');
+                  return (name === 'intent' && value === 'passwordless_signup_send_otp')
+                    || text.includes('使用一次性验证码注册')
+                    || text.includes('使用一次性驗證碼註冊')
+                    || text.includes('one-timecode');
+                });
+              if (!btn) return false;
+              btn.scrollIntoView({block:'center'});
+              btn.click();
+              return true;
+            }"""
+        ))
+    except Exception:
+        return False
+
+
 def _fill_password_if_present(page, email: str, timeout: int = 25, context=None) -> str | None:
     started = time.time()
     end = time.time() + timeout
@@ -456,6 +502,22 @@ def _fill_password_if_present(page, email: str, timeout: int = 25, context=None)
                 return None
             time.sleep(0.15 if _fast_mode() else 0.4)
             continue
+        if _click_passwordless_signup_if_present(page):
+            logger.info("[BrowserUse] 检测到密码页，已点击一次性验证码注册：%s", email)
+            wait_end = time.time() + 20
+            while time.time() < wait_end:
+                state_after = _quick_auth_state(page)
+                if state_after.get("state") == "email_verification":
+                    logger.info("[BrowserUse] 一次性验证码注册已进入邮箱验证码页")
+                    return None
+                if state_after.get("state") == "chatgpt":
+                    logger.info("[BrowserUse] 一次性验证码注册后已进入 ChatGPT")
+                    return None
+                if state_after.get("state") != "password":
+                    return None
+                time.sleep(0.2 if _fast_mode() else 0.5)
+            logger.info("[BrowserUse] 已点击一次性验证码注册，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
+            return None
         password = _registration_password()
         logger.info("[BrowserUse] 检测到密码页，设置密码（%s 位）：%s", len(password), email)
         ok = _fill_first(
@@ -597,6 +659,7 @@ def _click_resend_otp(page) -> bool:
                 el.getAttribute('title'),
                 el.getAttribute('href'),
                 el.getAttribute('type'),
+                el.getAttribute('value'),
               ].filter(Boolean).join(' ').toLowerCase();
 
               const otpInputs = Array.from(document.querySelectorAll('input, textarea'))
@@ -617,7 +680,7 @@ def _click_resend_otp(page) -> bool:
               const inputLeft = inputRects.length ? Math.min(...inputRects.map(r => r.left)) : 0;
               const inputRight = inputRects.length ? Math.max(...inputRects.map(r => r.right)) : window.innerWidth;
 
-              const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"]'))
+              const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]'))
                 .filter(visible)
                 .filter(el => !disabled(el));
 
@@ -629,14 +692,17 @@ def _click_resend_otp(page) -> bool:
                 const b = attrBlob(el);
                 const tag = el.tagName.toLowerCase();
                 const type = String(el.getAttribute('type') || '').toLowerCase();
+                const name = String(el.getAttribute('name') || '').toLowerCase();
+                const value = String(el.getAttribute('value') || '').toLowerCase();
                 let score = 0;
 
                 // 属性启发，不读 visible innerText，不依赖页面语言文案。
+                if (name === 'intent' && value === 'resend') score += 80;
                 if (/resend|send.?again|again|retry|otp|verification|verify|email.?code|code/.test(b)) score += 20;
                 if (/continue|submit|next|primary|login|signup|create|authorize|consent/.test(b)) score -= 8;
                 if (tag === 'a') score += 4;
                 if (tag === 'button' && type && type !== 'submit') score += 6;
-                if (tag === 'button' && type === 'submit') score -= 10;
+                if (tag === 'button' && type === 'submit' && !(name === 'intent' && value === 'resend')) score -= 10;
 
                 // 位置启发：重发入口通常在 OTP 输入框下方或附近；主提交按钮通常更靠下/更大。
                 if (inputRects.length) {

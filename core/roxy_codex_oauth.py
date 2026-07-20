@@ -201,13 +201,31 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
     max_otp_attempts = 3
     for otp_attempt in range(1, max_otp_attempts + 1):
         logger.info("[Codex][Browser] 等待邮箱 OTP：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
-        code = _wait_for_fresh_email_otp(
-            otp_provider,
-            email,
-            after_ts=otp_after_ts,
-            used_codes=used_codes,
-            timeout=90,
-        )
+        try:
+            code = _wait_for_fresh_email_otp(
+                otp_provider,
+                email,
+                after_ts=otp_after_ts,
+                used_codes=used_codes,
+                timeout=90,
+            )
+        except Exception as exc:
+            if otp_attempt >= max_otp_attempts:
+                raise
+            logger.warning(
+                "[Codex][Browser] 一直未收到邮箱 OTP，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
+                otp_attempt + 1,
+                max_otp_attempts,
+                type(exc).__name__,
+                str(exc)[:180],
+            )
+            otp_after_ts = time.time()
+            try:
+                _click_resend_email_otp(driver, timeout=25)
+            except Exception as resend_exc:
+                logger.warning("[Codex][Browser] 点击重新发送邮箱验证码失败，仍将继续轮询最新验证码：%s", str(resend_exc)[:200])
+            human_delay("api")
+            continue
         used_codes.add(str(code))
         logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", code)
         _clear_otp_inputs(driver)

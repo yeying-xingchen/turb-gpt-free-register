@@ -513,11 +513,14 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
               if (!enabled(el)) return false;
               const attrs = [el.id, el.getAttribute('name'), el.getAttribute('value'), el.getAttribute('data-dd-action-name'), el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('data-testid')]
                 .join(' ').toLowerCase();
+              const name = String(el.getAttribute('name') || '').toLowerCase();
+              const value = String(el.getAttribute('value') || '').toLowerCase();
+              if (name === 'intent' && value === 'resend') return true;
               return /resend|send.*new|new.*code|again/.test(attrs);
             });
             if (attrHit) return attrHit;
             // 兜底：多语言文本，避免因页面没有稳定属性时卡死。
-            return candidates.find(el => enabled(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
+            return candidates.find(el => enabled(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
             """)
             if btn:
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
@@ -920,6 +923,51 @@ def _is_signup_password_page(driver) -> bool:
     )
 
 
+def _click_passwordless_signup_if_present(driver) -> dict:
+    """
+    新版注册流在 /create-account/password 上可能默认要求设置密码。
+    如果页面提供“使用一次性验证码注册”按钮，优先点击进入邮箱 OTP 页面。
+    """
+    try:
+        return driver.execute_script(r"""
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
+        const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
+        const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
+        const candidates = [...document.querySelectorAll('button,input[type="submit"],[role="button"]')].filter(el => visible(el) && enabled(el));
+        const btn = candidates.find(el => {
+          const name = String(el.getAttribute('name') || '').toLowerCase();
+          const value = String(el.getAttribute('value') || '').toLowerCase();
+          const attrs = [
+            el.id, name, value, el.getAttribute('aria-label'), el.getAttribute('title'),
+            el.getAttribute('data-testid'), el.textContent
+          ].join(' ').toLowerCase();
+          const text = norm(el.textContent || el.getAttribute('value') || '');
+          return (
+            (name === 'intent' && value === 'passwordless_signup_send_otp') ||
+            attrs.includes('passwordless_signup_send_otp') ||
+            text.includes('使用一次性验证码注册') ||
+            text.includes('使用一次性驗證碼註冊') ||
+            text.includes('useonetimeregistrationcode') ||
+            text.includes('useaone-timecodetosignup') ||
+            text.includes('useaone-timecodetoregister')
+          );
+        });
+        if (!btn) return {ok:false, reason:'missing_passwordless_button'};
+        btn.scrollIntoView({block:'center'});
+        btn.click();
+        return {
+          ok:true,
+          reason:'clicked_passwordless_signup_send_otp',
+          name: btn.getAttribute('name') || '',
+          value: btn.getAttribute('value') || '',
+          text: (btn.textContent || '').trim().slice(0, 80)
+        };
+        """) or {"ok": False, "reason": "empty_result"}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str | None:
     """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。"""
     end = time.time() + timeout
@@ -933,6 +981,20 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         if not _is_signup_password_page(driver):
             time.sleep(0.5)
             continue
+        passwordless = _click_passwordless_signup_if_present(driver)
+        if passwordless.get('ok'):
+            logger.info("[Roxy注册] 检测到 create-account/password，已点击一次性验证码注册：email=%s detail=%s", email, passwordless)
+            wait_end = time.time() + 20
+            while time.time() < wait_end:
+                if _is_email_verification_page(driver):
+                    logger.info("[Roxy注册] 一次性验证码注册已进入邮箱验证码页")
+                    return None
+                if _has_access_token(driver):
+                    logger.info("[Roxy注册] 一次性验证码注册后已检测到登录态")
+                    return None
+                time.sleep(0.5)
+            logger.info("[Roxy注册] 已点击一次性验证码注册，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
+            return None
         password = _registration_password()
         logger.info("[Roxy注册] 检测到 create-account/password，准备设置密码（%s 位）：email=%s", len(password), email)
         result = driver.execute_script(r"""
@@ -1281,7 +1343,23 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         for otp_attempt in range(1, max_otp_attempts + 1):
             if current_otp is None:
                 logger.info("[Roxy注册][OTP] 等待验证码：%s（第 %s/%s 次）", email, otp_attempt, max_otp_attempts)
-                current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                try:
+                    current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                except Exception as exc:
+                    if otp_attempt >= max_otp_attempts:
+                        raise
+                    logger.warning(
+                        "[Roxy注册][OTP] 一直未收到验证码，点击“重新发送电子邮件”后继续等待（下一轮 %s/%s）：%s: %s",
+                        otp_attempt + 1,
+                        max_otp_attempts,
+                        type(exc).__name__,
+                        str(exc)[:180],
+                    )
+                    otp_after_ts = time.time()
+                    _click_resend_email_otp(driver, timeout=25)
+                    human_delay("api")
+                    current_otp = None
+                    continue
             logger.info("[Roxy注册][OTP] 收到验证码：%s", current_otp)
             _clear_otp_inputs(driver)
             _type_otp(driver, current_otp)

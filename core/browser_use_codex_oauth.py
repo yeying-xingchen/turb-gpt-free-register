@@ -650,8 +650,24 @@ def _fill_email_and_otp(page, email: str, otp_provider, auth_url: str, dead_trac
             time.sleep(0.4)
         logger.info("[Codex][BrowserUse] 等待邮箱 OTP：%s（%s/3）", email, attempt)
         _t_otp_wait = _StepTimer("等待邮箱 OTP")
-        code = _wait_for_fresh_email_otp(otp_provider, email, after_ts=otp_after_ts, used_codes=used_codes, timeout=90)
-        _t_otp_wait.done()
+        try:
+            code = _wait_for_fresh_email_otp(otp_provider, email, after_ts=otp_after_ts, used_codes=used_codes, timeout=90)
+            _t_otp_wait.done()
+        except Exception as exc:
+            _t_otp_wait.done(f"failed={type(exc).__name__}: {str(exc)[:160]}")
+            if attempt >= 3:
+                raise
+            logger.warning(
+                "[Codex][BrowserUse] 一直未收到邮箱 OTP，点击“重新发送电子邮件”后继续等待（下一轮 %s/3）：%s: %s",
+                attempt + 1,
+                type(exc).__name__,
+                str(exc)[:180],
+            )
+            otp_after_ts = time.time()
+            resent = _click_resend_otp(page)
+            logger.info("[Codex][BrowserUse] 重发按钮点击结果：%s", "ok" if resent else "not_found")
+            _bu_delay("api")
+            continue
         used_codes.add(str(code))
         logger.info("[Codex][BrowserUse] 邮箱 OTP 收到：%s", code)
         _t_otp_submit = _StepTimer("提交邮箱 OTP")
