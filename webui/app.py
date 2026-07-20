@@ -301,7 +301,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         import json as _json
         import zipfile
         from datetime import datetime as _dt
-        from core.codex_oauth import download_cpa_codex_auth_text
+        from core.codex_oauth import download_cpa_codex_auth_text, list_cpa_codex_auth_files
 
         data = request.get_json(silent=True) or {}
         ids = data.get("account_ids") or data.get("ids") or []
@@ -309,6 +309,38 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
         if len(ids) > 1000:
             return jsonify({"ok": False, "error": "单次最多下载 1000 个账号"}), 400
+
+        try:
+            cpa_files = list_cpa_codex_auth_files()
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"读取 CPA auth-files 失败: {type(exc).__name__}: {exc}"}), 502
+
+        def _match_cpa_file(email: str, local_filename: str = "") -> dict | None:
+            """在已缓存的 CPA 文件列表中匹配，避免每个账号都重新请求 auth-files。"""
+            email_l = str(email or "").strip().lower()
+            local_name_l = str(local_filename or "").strip().lower()
+            local_stem_l = local_name_l[:-5] if local_name_l.endswith(".json") else local_name_l
+
+            def score(item: dict) -> int:
+                name_l = str(item.get("name") or "").lower()
+                item_email_l = str(item.get("email") or "").lower()
+                s = 0
+                if local_name_l and name_l == local_name_l:
+                    s = max(s, 100)
+                if local_stem_l and name_l.startswith(local_stem_l):
+                    s = max(s, 80)
+                if email_l and item_email_l == email_l:
+                    s = max(s, 70)
+                if email_l and email_l in name_l:
+                    s = max(s, 60)
+                if local_stem_l.endswith("-cpa-callback"):
+                    base = local_stem_l[:-len("-cpa-callback")]
+                    if base and name_l.startswith(base + "-"):
+                        s = max(s, 75)
+                return s
+
+            ranked = sorted(((score(item), item) for item in cpa_files), key=lambda x: x[0], reverse=True)
+            return ranked[0][1] if ranked and ranked[0][0] > 0 else None
 
         # 建立 email -> 本地 codex 文件名索引；有本地文件名时传给 CPA 匹配逻辑可提升命中率。
         local_by_email: dict[str, str] = {}
@@ -348,9 +380,12 @@ def create_app(auth_code: str | None = None) -> Flask:
 
                 local_filename = local_by_email.get(email.lower(), "")
                 try:
+                    meta = _match_cpa_file(email=email, local_filename=local_filename)
+                    cpa_name_hint = str((meta or {}).get("name") or "").strip()
+                    if not cpa_name_hint:
+                        raise RuntimeError(f"[Codex][CPA] 未在 CPA auth-files 中找到匹配的 Codex 凭证: {email}")
                     cpa_text, cpa_name, meta = download_cpa_codex_auth_text(
-                        email=email,
-                        local_filename=local_filename,
+                        cpa_name=cpa_name_hint,
                     )
                     arcname = cpa_name
                     if arcname in used_names:
@@ -387,10 +422,16 @@ def create_app(auth_code: str | None = None) -> Flask:
         now = _dt.now()
         dl_name = f"accounts-cpa-bulk-{now.strftime('%Y%m%d-%H%M%S')}.zip"
         buf.seek(0)
+        zip_bytes = buf.getvalue()
         return Response(
-            buf.getvalue(),
+            zip_bytes,
             mimetype="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{dl_name}"',
+                "Content-Length": str(len(zip_bytes)),
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     # ----------------------------------------------------------

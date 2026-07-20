@@ -1395,7 +1395,8 @@ async function downloadSelectedCpa() {
       } catch(e) {}
       throw new Error(msg);
     }
-    const blob = await resp.blob();
+    const rawBlob = await resp.blob();
+    const blob = new Blob([rawBlob], {type: 'application/zip'});
     const cd = resp.headers.get('Content-Disposition') || '';
     let filename = 'accounts-cpa-bulk.zip';
     const m = cd.match(/filename\*=UTF-8''([^;]+)|filename="([^"]+)"|filename=([^;]+)/i);
@@ -1406,8 +1407,9 @@ async function downloadSelectedCpa() {
     a.download = filename;
     document.body.appendChild(a);
     a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    // 不要立刻 remove/revoke：Chrome 对 blob URL 下载仍在异步接管时过早释放，
+    // 可能出现文件已落盘但下载任务一直显示“未确认/进行中”。
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 60000);
     showToast(`已生成下载：${filename}`);
     loadCodex();
   } catch(err) {

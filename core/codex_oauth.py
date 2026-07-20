@@ -336,10 +336,9 @@ def download_cpa_codex_auth_text(*, cpa_name: str | None = None, email: str = ""
     meta = None
     name = str(cpa_name or "").strip()
     if name:
-        for item in list_cpa_codex_auth_files():
-            if str(item.get("name") or "") == name:
-                meta = item
-                break
+        # 已经拿到 CPA 文件名时直接下载，不再额外拉取一次 auth-files 列表。
+        # 账号列表批量下载会先统一列一次列表；这里重复列会导致选中多账号时浏览器长时间等待下载确认。
+        meta = {"name": name}
     else:
         meta = find_cpa_codex_auth_file(email=email, local_filename=local_filename)
         name = str((meta or {}).get("name") or "").strip()
