@@ -1613,6 +1613,32 @@ def run_browser_use_registration(
                 raise
             _check_manual_stop()
 
+            def _restart_email_otp_flow(reason: str) -> None:
+                """
+                OpenAI 验证码页直接点 resend 偶发跳 chrome-error/500。
+                这里改为重新打开注册入口、重新提交同一个邮箱来触发新 OTP，保持页面回到可输入验证码的状态。
+                """
+                nonlocal page, otp_after_ts, openai_password
+                logger.info("[BrowserUse][OTP] 重新触发邮箱 OTP：%s", reason)
+                try:
+                    page = _pick_live_page(context, page) or page
+                    otp_after_ts = time.time()
+                    page.goto(start_url, wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
+                    _bu_delay("navigate")
+                    _maybe_accept_cookies(page)
+                    _type_email(page, email)
+                    logger.info("[BrowserUse][OTP] 已重新提交邮箱：%s", email)
+                    _assert_not_external_idp(page, "重新提交邮箱后")
+                    try:
+                        pwd = _fill_password_if_present(page, email, timeout=6 if _fast_mode() else 10, context=context)
+                        if pwd:
+                            openai_password = pwd
+                    except Exception as pwd_exc:
+                        logger.info("[BrowserUse][OTP] 重启 OTP 流后密码页处理跳过/失败，继续等待验证码页：%s", str(pwd_exc)[:140])
+                    _bu_delay("api")
+                except Exception as restart_exc:
+                    logger.warning("[BrowserUse][OTP] 重新触发邮箱 OTP 失败，继续按当前页面处理：%s: %s", type(restart_exc).__name__, str(restart_exc)[:180])
+
             current_otp = otp_code
             max_otp_attempts = 3
             for otp_attempt in range(1, max_otp_attempts + 1):
@@ -1645,16 +1671,13 @@ def run_browser_use_registration(
                         if otp_attempt >= max_otp_attempts:
                             raise
                         logger.warning(
-                            "[BrowserUse][OTP] 本次未收到邮箱验证码，尝试点击重发后继续等待（%s/%s）：%s: %s",
+                            "[BrowserUse][OTP] 本次未收到邮箱验证码，重新触发 OTP 后继续等待（%s/%s）：%s: %s",
                             otp_attempt + 1,
                             max_otp_attempts,
                             type(exc).__name__,
                             str(exc)[:180],
                         )
-                        otp_after_ts = time.time()
-                        resent = _click_resend_otp(page)
-                        logger.info("[BrowserUse][OTP] 重发按钮点击结果：%s", "ok" if resent else "not_found")
-                        _bu_delay("api")
+                        _restart_email_otp_flow("等待验证码超时，避免点击 resend 导致 500/chrome-error")
                         current_otp = None
                         continue
                 logger.info("[BrowserUse][OTP] 收到验证码：%s", current_otp)
@@ -1675,10 +1698,8 @@ def run_browser_use_registration(
                     break
                 if otp_attempt >= max_otp_attempts:
                     raise RuntimeError("邮箱验证码连续错误/过期")
-                logger.warning("[BrowserUse][OTP] 验证码可能无效，尝试重发（%s/%s）", otp_attempt + 1, max_otp_attempts)
-                otp_after_ts = time.time()
-                _click_resend_otp(page)
-                _bu_delay("api")
+                logger.warning("[BrowserUse][OTP] 验证码可能无效，重新触发 OTP（%s/%s）", otp_attempt + 1, max_otp_attempts)
+                _restart_email_otp_flow("验证码错误/过期或页面未跳转，避免点击 resend 导致 500/chrome-error")
                 current_otp = None
 
             logger.info("[BrowserUse] 处理资料页/登录态")
