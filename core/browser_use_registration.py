@@ -292,8 +292,10 @@ def _quick_auth_state(page) -> dict:
                 qv("input[name='password']") ||
                 qv("input[autocomplete='new-password']");
               let state = 'other';
-              if (hasOtp) state = 'email_verification';
-              else if (url.includes('/log-in/password')) state = 'login_password';
+              // /log-in/password 代表该邮箱已走登录密码分支；即便页面 DOM 里有 code/otp 字样，
+              // 注册流程也按不可用邮箱处理，不能误判成邮箱验证码页。
+              if (url.includes('/log-in/password')) state = 'login_password';
+              else if (hasOtp) state = 'email_verification';
               else if (hasPassword) state = 'password';
               else if (url.includes('about-you') || url.includes('profile') || url.includes('create-account/about')) state = 'profile';
               else if (url.includes('chatgpt.com') && !url.includes('/auth/')) state = 'chatgpt';
@@ -398,6 +400,8 @@ def _wait_after_email_submit_transition(page, context=None, timeout: int = 14) -
         url = str(info.get("url") or _page_url(page) or "")
         last_state, last_url = state, url
         lower = url.lower()
+        if "/log-in/password" in lower:
+            return "login_password"
         if state in ("email_verification", "password", "login_password", "profile", "chatgpt"):
             return state
         if any(x in lower for x in ("email-verification", "/password", "about-you", "profile")):
@@ -456,6 +460,8 @@ def _is_password_page(page) -> bool:
 
 def _is_email_verification_page(page) -> bool:
     try:
+        if "/log-in/password" in (_page_url(page) or "").lower():
+            return False
         return _quick_auth_state(page).get("state") == "email_verification"
     except Exception:
         raise
@@ -1773,6 +1779,8 @@ def run_browser_use_registration(
                     page = _browser_use_heartbeat(page, context=context, label="wait-email-verification")
                     state_info = _quick_auth_state(page)
                     state = str(state_info.get("state") or "other")
+                    if "/log-in/password" in str(state_info.get("url") or _page_url(page) or "").lower() or state == "login_password":
+                        raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={state_info.get('url') or _page_url(page) or 'https://auth.openai.com/log-in/password'}")
                     if state == "email_verification":
                         logger.info("[BrowserUse][OTP] 已检测到验证码页：url=%s", state_info.get("url") or "-")
                         break

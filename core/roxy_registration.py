@@ -371,10 +371,10 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 12) -> str:
     while time.time() < end:
         if _has_access_token(driver):
             return "logged_in"
-        if _is_email_verification_page(driver):
-            return "otp"
         if _is_login_password_page(driver):
             return "login_password"
+        if _is_email_verification_page(driver):
+            return "otp"
         if _is_signup_password_page(driver):
             return "password"
         state = _email_input_value_state(driver)
@@ -477,6 +477,8 @@ def _is_email_verification_page(driver) -> bool:
         url = str(driver.current_url or '').lower()
     except Exception:
         url = ''
+    if '/log-in/password' in url:
+        return False
     if 'email-verification' in url:
         return True
     state = _email_otp_page_state(driver)
