@@ -144,6 +144,24 @@
     .status-partial_success { color: #9a6700; background: #fff7d6; }
     .status-running { color: var(--amber); background: #fff7e6; }
     .status-success { color: var(--green); background: #e9f7ef; }
+    .extract-link-cell {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin-top: 4px; max-width: 100%;
+    }
+    .extract-link-cell .pill { min-width: auto; padding: 4px 10px; }
+    .extract-link-btn {
+      min-height: 26px; border: 1px solid #cfe7dc; border-radius: 999px;
+      padding: 0 10px; font-size: 12px; font-weight: 800; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+      cursor: pointer; white-space: nowrap; transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+    }
+    .extract-link-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(22,128,60,.10); }
+    .extract-copy { color: #166534; background: linear-gradient(180deg, #f0fbf5, #e3f5ea); border-color: #b9dfc9; }
+    .extract-qr { color: #1d4ed8; background: linear-gradient(180deg, #f3f7ff, #e8f0ff); border-color: #bdd0ff; }
+    .extract-link-expire {
+      flex-basis: 100%; margin-top: 1px; color: #667085; font-size: 12px;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
     .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
     .jobs-table td.actions-cell { text-align: center; vertical-align: middle; overflow: visible; }
     .job-actions { justify-content: center; flex-wrap: nowrap; width: 100%; }
@@ -1165,10 +1183,10 @@ function _extractLinkCell(r) {
     const link = r.extract_link_long_url || r.extract_link_copy_paste || '';
     const qr = r.extract_link_image_url_png || r.extract_link_image_url_svg || '';
     const expire = _fmtExtractExpire(r.extract_link_expires_at || '');
-    const copy = link ? ` ${cbtn('复制提链', link, 'good')}` : '';
-    const qrBtn = qr ? ` <button data-qr-url="${esc(qr)}" title="打开支付二维码图片">查看二维码</button>` : '';
-    const expireHtml = expire ? `<span class="muted" title="支付链接过期时间">支付到期: ${esc(expire)}</span>` : '';
-    return `<span class="pill status-success" title="${title || esc(link)}">提链成功${typ ? '(' + esc(typ) + ')' : ''}</span>${copy}${qrBtn}${expireHtml ? `<div class="sub-cell">${expireHtml}</div>` : ''}`;
+    const copy = link ? cbtn('复制提链', link, 'extract-link-btn extract-copy') : '';
+    const qrBtn = qr ? `<button class="extract-link-btn extract-qr" data-qr-url="${esc(qr)}" title="打开支付二维码图片">查看二维码</button>` : '';
+    const expireHtml = expire ? `<div class="extract-link-expire" title="支付链接过期时间">支付到期：${esc(expire)}</div>` : '';
+    return `<div class="extract-link-cell"><span class="pill status-success" title="${title || esc(link)}">提链成功${typ ? '(' + esc(typ) + ')' : ''}</span>${copy}${qrBtn}${expireHtml}</div>`;
   }
   if (s === 'failed') return `<span class="pill status-failed" title="${title}">提链失败</span>`;
   return '';
