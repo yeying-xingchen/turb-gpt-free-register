@@ -112,6 +112,10 @@ def _check_manual_stop() -> None:
         return
 
 
+def _is_manual_stop_exception(exc: Exception) -> bool:
+    return type(exc).__name__ == "StopRequested" or "手动停止" in str(exc)
+
+
 def _generate_password(length: int = 14) -> str:
     upper = string.ascii_uppercase
     lower = string.ascii_lowercase
@@ -302,7 +306,7 @@ def _quick_auth_state(page) -> dict:
         return {"state": "other", "url": _page_url(page), "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _type_email(page, email: str) -> None:
+def _type_email(page, email: str, timeout_ms: int | None = None) -> None:
     # 有的登录页要先点 “Continue with email”
     _click_first(
         page,
@@ -327,6 +331,7 @@ def _type_email(page, email: str) -> None:
     )
     _assert_not_external_idp(page, "邮箱入口")
 
+    fill_timeout_ms = timeout_ms if timeout_ms is not None else min(_timeout_ms(), 20000)
     ok = _fill_first(
         page,
         [
@@ -349,7 +354,7 @@ def _type_email(page, email: str) -> None:
             "input[placeholder*='電子郵件']",
         ],
         email,
-        timeout_ms=_timeout_ms(),
+        timeout_ms=fill_timeout_ms,
     )
     if not ok:
         raise RuntimeError("找不到邮箱输入框")
@@ -374,6 +379,55 @@ def _type_email(page, email: str) -> None:
         # 回车提交
         page.keyboard.press("Enter")
     _bu_delay("form")
+
+
+def _wait_after_email_submit_transition(page, context=None, timeout: int = 14) -> str:
+    """提交邮箱后确认页面真的离开邮箱输入页，避免直接空等 OTP。"""
+    end = time.time() + timeout
+    last_state = "other"
+    last_url = ""
+    while time.time() < end:
+        _check_manual_stop()
+        try:
+            page = _browser_use_heartbeat(page, context=context, label="email-submit-transition")
+        except Exception as exc:
+            if _is_target_closed_error(exc):
+                raise
+        info = _quick_auth_state(page)
+        state = str(info.get("state") or "other")
+        url = str(info.get("url") or _page_url(page) or "")
+        last_state, last_url = state, url
+        lower = url.lower()
+        if state in ("email_verification", "password", "login_password", "profile", "chatgpt"):
+            return state
+        if any(x in lower for x in ("email-verification", "/password", "about-you", "profile")):
+            return state
+        if "chatgpt.com" in lower and "/auth/" not in lower:
+            return "chatgpt"
+        time.sleep(0.25 if _fast_mode() else 0.5)
+    if "chatgpt.com/auth/login" in last_url.lower():
+        return "email_page"
+    return last_state
+
+
+def _submit_email_until_transition(page, context, email: str, *, attempts: int = 2, timeout_ms: int | None = None) -> str:
+    """
+    填写并提交邮箱，并确认进入 password/OTP/后续页面。
+    若仍停留 chatgpt.com/auth/login?email=...，重试一次，避免无效等待邮箱验证码。
+    """
+    last_state = "other"
+    for attempt in range(1, max(1, attempts) + 1):
+        _check_manual_stop()
+        logger.info("[BrowserUse] 提交邮箱尝试 %s/%s：%s", attempt, attempts, email)
+        _type_email(page, email, timeout_ms=timeout_ms)
+        _check_manual_stop()
+        last_state = _wait_after_email_submit_transition(page, context=context, timeout=10 if _fast_mode() else 16)
+        logger.info("[BrowserUse] 邮箱提交后状态：%s url=%s", last_state, _page_url(page) or "-")
+        if last_state != "email_page":
+            return last_state
+        if attempt < attempts:
+            logger.warning("[BrowserUse] 邮箱提交后仍停留登录页，准备重试提交：%s", _page_url(page) or "-")
+    raise RuntimeError(f"邮箱提交后仍停留登录页，未触发密码/验证码页面：state={last_state} url={_page_url(page) or '-'}")
 
 
 def _is_password_page(page) -> bool:
@@ -1618,7 +1672,7 @@ def run_browser_use_registration(
             # OpenAI 可能在点击提交后立刻发 OTP，甚至邮件 ReceivedDateTime 早于 Playwright
             # 点击函数返回的本地时间；先记录时间戳，配合 _is_after 的时钟容忍，避免过滤掉首次验证码。
             otp_after_ts = time.time()
-            _type_email(page, email)
+            _submit_email_until_transition(page, context, email, attempts=2, timeout_ms=20000)
             _t_email.done()
             logger.info("[BrowserUse] 已提交邮箱：%s", email)
             _assert_not_external_idp(page, "提交邮箱后")
@@ -1641,22 +1695,37 @@ def run_browser_use_registration(
                 nonlocal page, otp_after_ts, openai_password
                 logger.info("[BrowserUse][OTP] 重新触发邮箱 OTP：%s", reason)
                 try:
+                    _check_manual_stop()
                     page = _pick_live_page(context, page) or page
                     otp_after_ts = time.time()
                     page.goto(start_url, wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
+                    _check_manual_stop()
                     _bu_delay("navigate")
                     _maybe_accept_cookies(page)
-                    _type_email(page, email)
+                    _check_manual_stop()
+                    _submit_email_until_transition(
+                        page,
+                        context,
+                        email,
+                        attempts=2,
+                        timeout_ms=12000 if _fast_mode() else 18000,
+                    )
+                    _check_manual_stop()
                     logger.info("[BrowserUse][OTP] 已重新提交邮箱：%s", email)
                     _assert_not_external_idp(page, "重新提交邮箱后")
                     try:
                         pwd = _fill_password_if_present(page, email, timeout=6 if _fast_mode() else 10, context=context)
+                        _check_manual_stop()
                         if pwd:
                             openai_password = pwd
                     except Exception as pwd_exc:
+                        if _is_manual_stop_exception(pwd_exc):
+                            raise
                         logger.info("[BrowserUse][OTP] 重启 OTP 流后密码页处理跳过/失败，继续等待验证码页：%s", str(pwd_exc)[:140])
                     _bu_delay("api")
                 except Exception as restart_exc:
+                    if _is_manual_stop_exception(restart_exc):
+                        raise
                     logger.warning("[BrowserUse][OTP] 重新触发邮箱 OTP 失败，继续按当前页面处理：%s: %s", type(restart_exc).__name__, str(restart_exc)[:180])
 
             current_otp = otp_code
@@ -1688,6 +1757,8 @@ def run_browser_use_registration(
                         _t_otp_wait.done()
                     except Exception as exc:
                         _t_otp_wait.done(f"failed={type(exc).__name__}: {str(exc)[:160]}")
+                        if _is_manual_stop_exception(exc):
+                            raise
                         if otp_attempt >= max_otp_attempts:
                             raise
                         logger.warning(
