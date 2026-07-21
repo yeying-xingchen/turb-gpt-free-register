@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,30 +23,46 @@ from core import db
 logger = logging.getLogger(__name__)
 
 
+def _runtime_setting(name: str, default=None):
+    """
+    提链配置多数保存在 .env。服务模块会在 WebUI 启动时较早 import，
+    因此每次实际读取时都重新加载 .env，避免“页面已保存但当前进程仍读到空值”。
+    """
+    try:
+        from config.env_loader import load_env
+        load_env(override=True)
+    except Exception:
+        pass
+    raw = os.getenv(name)
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip()
+    return getattr(cfg, name, default)
+
+
 def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
     try:
-        value = int(getattr(cfg, name, default) or default)
+        value = int(_runtime_setting(name, default) or default)
     except (TypeError, ValueError):
         value = default
     return max(lower, min(upper, value))
 
 
 def _link_type(value: str | None = None) -> str:
-    t = str(value or getattr(cfg, "EXTRACT_LINK_TYPE", "pix") or "pix").strip().lower()
+    t = str(value or _runtime_setting("EXTRACT_LINK_TYPE", "pix") or "pix").strip().lower()
     if t not in {"pix", "upi"}:
         raise ValueError("提链类型无效，仅支持 pix / upi")
     return t
 
 
 def _api_base() -> str:
-    base = str(getattr(cfg, "EXTRACT_LINK_API_BASE", "") or "").strip().rstrip("/")
+    base = str(_runtime_setting("EXTRACT_LINK_API_BASE", "") or "").strip().rstrip("/")
     if not base:
         raise ValueError("EXTRACT_LINK_API_BASE 为空")
     return base
 
 
 def _cdk(value: str | None = None) -> str:
-    cdk = str(value or getattr(cfg, "EXTRACT_LINK_CDK", "") or "").strip()
+    cdk = str(value or _runtime_setting("EXTRACT_LINK_CDK", "") or "").strip()
     if not cdk:
         raise ValueError("EXTRACT_LINK_CDK/CDK 为空")
     return cdk
