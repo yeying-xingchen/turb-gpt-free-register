@@ -148,6 +148,36 @@ def _release_unconsumed_job_email(email: str | None, reason: str) -> None:
         logger.exception("[Service] 回收未消耗邮箱失败: %s", email)
 
 
+def _is_final_session_access_token_timeout(error: object) -> bool:
+    """
+    识别注册最后一步已经返回 /api/auth/session 200 但没有 accessToken 的失败。
+    这种邮箱后续继续注册通常会卡在同一状态，按要求直接停用邮箱池条目。
+    """
+    text = str(error or "")
+    if not text:
+        return False
+    return (
+        "等待 /api/auth/session accessToken 超时" in text
+        and "WARNING_BANNER" in text
+        and "'_http_status': 200" in text
+    )
+
+
+def _disable_job_email(email: str | None, reason: str) -> bool:
+    """把本次任务邮箱停用，避免后续再次领取。"""
+    if not email:
+        return False
+    try:
+        from core.email_provider import release_email
+
+        source = release_email(email, status="disabled", note=f"自动停用: {reason[:180]}")
+        logger.warning("[Service] 已自动停用邮箱: source=%s email=%s reason=%s", source, email, reason[:220])
+        return True
+    except Exception:
+        logger.exception("[Service] 自动停用邮箱失败: %s", email)
+        return False
+
+
 def _normalize_workers(max_workers: int | None) -> int:
     if max_workers is None:
         return _DEFAULT_MAX_WORKERS
@@ -288,15 +318,20 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             else:
                 # 注意：失败也可能伴随 account_id（如 Codex 失败但账号已注册成功）
                 err = (result or {}).get("error") if isinstance(result, dict) else "unknown"
+                result_email = (result or {}).get("email") if isinstance(result, dict) else None
                 db.update_job(
                     job_id,
                     status="failed",
-                    email=(result or {}).get("email") if isinstance(result, dict) else None,
+                    email=result_email,
                     account_id=(result or {}).get("account_id") if isinstance(result, dict) else None,
                     error=str(err)[:500],
                     completed_at=datetime.now().isoformat(timespec="seconds"),
                 )
-                _release_unconsumed_job_email(email, str(err))
+                email_to_handle = str(result_email or email or "").strip()
+                if _is_final_session_access_token_timeout(err):
+                    _disable_job_email(email_to_handle, str(err))
+                else:
+                    _release_unconsumed_job_email(email_to_handle, str(err))
                 log_logger.error(f"[Job {job_id}] 失败: {err}")
     except StopRequested as exc:
         _release_unconsumed_job_email(email, str(exc))
@@ -308,7 +343,11 @@ def _run_one_job(job_id: int, log_file: str) -> None:
             completed_at=datetime.now().isoformat(timespec="seconds"),
         )
     except Exception as exc:
-        _release_unconsumed_job_email(email, f"{type(exc).__name__}: {exc}")
+        err_text = f"{type(exc).__name__}: {exc}"
+        if _is_final_session_access_token_timeout(err_text):
+            _disable_job_email(email, err_text)
+        else:
+            _release_unconsumed_job_email(email, err_text)
         if is_stop_requested(job_id):
             log_logger.warning(f"[Job {job_id}] 停止中捕获异常，按停止处理: {type(exc).__name__}: {exc}")
             db.update_job(
