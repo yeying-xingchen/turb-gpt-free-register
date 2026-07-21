@@ -373,7 +373,9 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 12) -> str:
             return "logged_in"
         if _is_email_verification_page(driver):
             return "otp"
-        if _is_signup_password_page(driver) or _is_login_password_page(driver):
+        if _is_login_password_page(driver):
+            return "login_password"
+        if _is_signup_password_page(driver):
             return "password"
         state = _email_input_value_state(driver)
         last = state
@@ -406,6 +408,8 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         _submit_email_step(driver)
         logger.info("[Roxy注册] 已提交邮箱，等待进入密码页或验证码页（%s/%s）", attempt, attempts)
         state_name = _wait_email_submit_next_state(driver, email, timeout=12)
+        if state_name == "login_password":
+            raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
         if state_name in ("password", "otp", "logged_in"):
             logger.info("[Roxy注册] 邮箱提交后已进入下一步：%s", state_name)
             return state_name

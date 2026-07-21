@@ -163,6 +163,19 @@ def _is_final_session_access_token_timeout(error: object) -> bool:
     )
 
 
+def _should_disable_failed_registration_email(error: object) -> bool:
+    """需要直接停用邮箱的注册失败类型。"""
+    text = str(error or "")
+    if not text:
+        return False
+    return (
+        _is_final_session_access_token_timeout(text)
+        or "邮箱提交后进入登录密码页" in text
+        or "auth.openai.com/log-in/password" in text
+        or "/log-in/password" in text
+    )
+
+
 def _disable_job_email(email: str | None, reason: str) -> bool:
     """把本次任务邮箱停用，避免后续再次领取。"""
     if not email:
@@ -328,7 +341,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     completed_at=datetime.now().isoformat(timespec="seconds"),
                 )
                 email_to_handle = str(result_email or email or "").strip()
-                if _is_final_session_access_token_timeout(err):
+                if _should_disable_failed_registration_email(err):
                     _disable_job_email(email_to_handle, str(err))
                 else:
                     _release_unconsumed_job_email(email_to_handle, str(err))
@@ -344,7 +357,7 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         )
     except Exception as exc:
         err_text = f"{type(exc).__name__}: {exc}"
-        if _is_final_session_access_token_timeout(err_text):
+        if _should_disable_failed_registration_email(err_text):
             _disable_job_email(email, err_text)
         else:
             _release_unconsumed_job_email(email, err_text)

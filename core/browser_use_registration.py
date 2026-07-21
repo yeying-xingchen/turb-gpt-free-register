@@ -423,6 +423,8 @@ def _submit_email_until_transition(page, context, email: str, *, attempts: int =
         _check_manual_stop()
         last_state = _wait_after_email_submit_transition(page, context=context, timeout=10 if _fast_mode() else 16)
         logger.info("[BrowserUse] 邮箱提交后状态：%s url=%s", last_state, _page_url(page) or "-")
+        if last_state == "login_password":
+            raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={_page_url(page) or 'https://auth.openai.com/log-in/password'}")
         if last_state != "email_page":
             return last_state
         if attempt < attempts:
