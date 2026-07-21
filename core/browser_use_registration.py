@@ -481,6 +481,8 @@ def _click_passwordless_signup_if_present(page) -> bool:
         "input[type='submit'][name='intent'][value='passwordless_signup_send_otp']",
         "button[name='intent'][value='passwordless_login_send_otp']",
         "input[type='submit'][name='intent'][value='passwordless_login_send_otp']",
+        "button[name='intent'][value*='passwordless'][value*='otp']",
+        "input[type='submit'][name='intent'][value*='passwordless'][value*='otp']",
         "button[name='intent'][value*='passwordless'][value*='send_otp']",
         "input[type='submit'][name='intent'][value*='passwordless'][value*='send_otp']",
         "button:has-text('使用一次性验证码注册')",
@@ -490,12 +492,20 @@ def _click_passwordless_signup_if_present(page) -> bool:
         "button:has-text('使用一次性驗證碼登入')",
         "button:has-text('Use a one-time code')",
         "button:has-text('one-time code')",
+        "button:has-text('Continue with a one-time code')",
+        "button:has-text('Log in with a one-time code')",
+        "button:has-text('Sign up with a one-time code')",
+        "button:has-text('ワンタイムコード')",
+        "button:has-text('認証コード')",
         "a:has-text('使用一次性验证码')",
         "a:has-text('使用一次性驗證碼')",
         "a:has-text('Use a one-time code')",
         "a:has-text('one-time code')",
+        "a:has-text('ワンタイムコード')",
+        "a:has-text('認証コード')",
         "[role='button']:has-text('使用一次性验证码注册')",
         "[role='button']:has-text('使用一次性验证码登录')",
+        "[role='button']:has-text('Continue with a one-time code')",
         "[role='button']:has-text('one-time code')",
     ]
     if _click_first(page, selectors, timeout_ms=1500):
@@ -516,20 +526,43 @@ def _click_passwordless_signup_if_present(page) -> bool:
                 .find(el => {
                   const name = String(el.getAttribute('name') || '').toLowerCase();
                   const value = String(el.getAttribute('value') || '').toLowerCase();
+                  const attrs = [
+                    el.id, name, value, el.getAttribute('aria-label'), el.getAttribute('title'),
+                    el.getAttribute('data-testid'), el.getAttribute('data-dd-action-name'), el.className, el.textContent
+                  ].join(' ').toLowerCase();
                   const text = norm(el.textContent || el.getAttribute('value') || '');
                   return (name === 'intent' && value.includes('passwordless') && value.includes('send_otp'))
+                    || (name === 'intent' && value.includes('passwordless') && value.includes('otp'))
                     || (name === 'intent' && value === 'passwordless_signup_send_otp')
                     || (name === 'intent' && value === 'passwordless_login_send_otp')
+                    || /passwordless.*otp|otp.*passwordless|one[-_\\s]?time.*code|code.*one[-_\\s]?time/.test(attrs)
                     || text.includes('使用一次性验证码注册')
                     || text.includes('使用一次性验证码登录')
                     || text.includes('使用一次性验证码')
                     || text.includes('使用一次性驗證碼註冊')
                     || text.includes('使用一次性驗證碼登入')
+                    || text.includes('一次性验证码')
+                    || text.includes('一次性驗證碼')
+                    || text.includes('ワンタイムコード')
+                    || text.includes('認証コード')
+                    || text.includes('continuewithaone-timecode')
+                    || text.includes('loginwithaone-timecode')
+                    || text.includes('signupwithaone-timecode')
                     || text.includes('one-timecode');
                 });
               if (!btn) return false;
               btn.scrollIntoView({block:'center'});
-              btn.click();
+              try {
+                btn.dispatchEvent(new MouseEvent('pointerdown', {bubbles:true, cancelable:true, view:window}));
+                btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+                btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+                btn.click();
+              } catch (e) {
+                const form = btn.closest('form');
+                if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);
+                else if (form) form.submit();
+                else throw e;
+              }
               return true;
             }"""
         ))

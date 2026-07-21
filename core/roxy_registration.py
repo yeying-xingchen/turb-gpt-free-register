@@ -373,7 +373,7 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 12) -> str:
             return "logged_in"
         if _is_email_verification_page(driver):
             return "otp"
-        if _is_signup_password_page(driver):
+        if _is_signup_password_page(driver) or _is_login_password_page(driver):
             return "password"
         state = _email_input_value_state(driver)
         last = state
@@ -947,35 +947,56 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
         const norm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
         const candidates = [...document.querySelectorAll('button,a,input[type="submit"],[role="button"],[role="link"]')].filter(el => visible(el) && enabled(el));
-        const btn = candidates.find(el => {
+        const isPasswordlessOtp = el => {
           const name = String(el.getAttribute('name') || '').toLowerCase();
           const value = String(el.getAttribute('value') || '').toLowerCase();
           const attrs = [
             el.id, name, value, el.getAttribute('aria-label'), el.getAttribute('title'),
-            el.getAttribute('data-testid'), el.textContent
+            el.getAttribute('data-testid'), el.getAttribute('data-dd-action-name'), el.className, el.textContent
           ].join(' ').toLowerCase();
           const text = norm(el.textContent || el.getAttribute('value') || '');
           return (
             (name === 'intent' && value.includes('passwordless') && value.includes('send_otp')) ||
+            (name === 'intent' && value.includes('passwordless') && value.includes('otp')) ||
             (name === 'intent' && value === 'passwordless_signup_send_otp') ||
             (name === 'intent' && value === 'passwordless_login_send_otp') ||
             attrs.includes('passwordless_signup_send_otp') ||
             attrs.includes('passwordless_login_send_otp') ||
+            /passwordless.*otp|otp.*passwordless|one[-_\s]?time.*code|code.*one[-_\s]?time/.test(attrs) ||
             text.includes('使用一次性验证码注册') ||
             text.includes('使用一次性验证码登录') ||
             text.includes('使用一次性验证码') ||
             text.includes('使用一次性驗證碼註冊') ||
             text.includes('使用一次性驗證碼登入') ||
+            text.includes('一次性验证码') ||
+            text.includes('一次性驗證碼') ||
+            text.includes('メールでコード') ||
+            text.includes('ワンタイムコード') ||
+            text.includes('認証コード') ||
             text.includes('useonetimeregistrationcode') ||
             text.includes('useaone-timecodetosignup') ||
             text.includes('useaone-timecodetoregister') ||
             text.includes('useaone-timecodetologin') ||
+            text.includes('continuewithaone-timecode') ||
+            text.includes('loginwithaone-timecode') ||
+            text.includes('signupwithaone-timecode') ||
             text.includes('one-timecode')
           );
-        });
+        };
+        const btn = candidates.find(isPasswordlessOtp);
         if (!btn) return {ok:false, reason:'missing_passwordless_button'};
         btn.scrollIntoView({block:'center'});
-        btn.click();
+        const form = btn.closest('form');
+        try {
+          btn.dispatchEvent(new MouseEvent('pointerdown', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+          btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+          btn.click();
+        } catch (e) {
+          if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);
+          else if (form) form.submit();
+          else throw e;
+        }
         return {
           ok:true,
           reason:'clicked_passwordless_send_otp',

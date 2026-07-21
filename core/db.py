@@ -834,6 +834,115 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
         return True
 
 
+def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str = "pix") -> bool:
+    """原子占用账号提链任务；已有未超时任务时返回 False。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("extract_link_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "extract_link_queued_at" if current_status == "queued" else "extract_link_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["extract_link_status"] = "queued"
+        row["extract_link_ok"] = False
+        row["extract_link_trigger"] = str(trigger or "manual")
+        row["extract_link_type"] = str(link_type or "pix").lower()
+        row["extract_link_queued_at"] = now
+        row["extract_link_started_at"] = None
+        row["extract_link_completed_at"] = None
+        row["extract_link_error"] = None
+        row["extract_link_message"] = "已入队"
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_extract_running(acc_id: int) -> bool:
+    """把提链任务标记为运行中。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("extract_link_status") not in {"queued", "running"}:
+            return False
+        row["extract_link_status"] = "running"
+        row["extract_link_started_at"] = _now()
+        row["extract_link_error"] = None
+        row["extract_link_message"] = "任务运行中"
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def update_account_extract(acc_id: int, result: dict | None = None) -> bool:
+    """更新账号提链任务结果/进度。"""
+    result = result or {}
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        status = str(result.get("status") or ("success" if result.get("ok") else "failed"))
+        ok = bool(result.get("ok")) and status == "success"
+        row["extract_link_status"] = status
+        row["extract_link_ok"] = ok
+        row["extract_link_checked_at"] = result.get("checked_at") or _now()
+        if status in {"success", "failed", "stopped"}:
+            row["extract_link_completed_at"] = _now()
+        row["extract_link_error"] = None if ok or status == "running" else result.get("error")
+        if result.get("message") is not None:
+            row["extract_link_message"] = result.get("message")
+        if result.get("job_id") is not None:
+            row["extract_link_job_id"] = result.get("job_id")
+        if result.get("link_type") is not None:
+            row["extract_link_type"] = result.get("link_type")
+        if result.get("cdk_remaining") is not None:
+            row["extract_link_cdk_remaining"] = result.get("cdk_remaining")
+        payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+        if payload:
+            row["extract_link_long_url"] = payload.get("long_url")
+            row["extract_link_copy_paste"] = payload.get("copy_paste")
+            row["extract_link_image_url_png"] = payload.get("image_url_png")
+            row["extract_link_image_url_svg"] = payload.get("image_url_svg")
+            row["extract_link_payment_method"] = payload.get("payment_method")
+            row["extract_link_payment_link_type"] = payload.get("payment_link_type")
+            row["extract_link_expires_at"] = payload.get("expires_at")
+            if payload.get("cdk_remaining") is not None:
+                row["extract_link_cdk_remaining"] = payload.get("cdk_remaining")
+            row["extract_link_result_json"] = json.dumps(payload, ensure_ascii=False)
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_extract_links() -> int:
+    """服务启动时恢复上次进程中断的提链状态。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("extract_link_status") not in {"queued", "running"}:
+                continue
+            row["extract_link_status"] = "failed"
+            row["extract_link_ok"] = False
+            row["extract_link_error"] = "WebUI 重启导致提链任务中断，请重新提链"
+            row["extract_link_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
 def list_account_plan_check_statuses(limit: int = 5000) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
@@ -842,6 +951,13 @@ def list_account_plan_check_statuses(limit: int = 5000) -> dict:
         "plan_check_started_at", "plan_check_completed_at", "plan_check_ok",
         "plan_check_error", "plan_checked_at", "plan_last_success_at",
         "plus_trial_eligible", "plan_check_network_route",
+        "extract_link_status", "extract_link_ok", "extract_link_type",
+        "extract_link_job_id", "extract_link_message", "extract_link_error",
+        "extract_link_long_url", "extract_link_copy_paste",
+        "extract_link_image_url_png", "extract_link_image_url_svg",
+        "extract_link_expires_at", "extract_link_payment_method",
+        "extract_link_payment_link_type",
+        "extract_link_checked_at", "extract_link_completed_at",
     )
     with _LOCK:
         rows = sorted(_load_accounts(), key=lambda x: int(x.get("id") or 0), reverse=True)[:max(1, int(limit))]

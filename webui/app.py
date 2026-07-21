@@ -15,7 +15,7 @@ import threading
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from core import codex_retry_service, db, plan_check_service
+from core import codex_retry_service, db, plan_check_service, extract_link_service
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
 from webui import config_editor
@@ -48,6 +48,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_plan_checks = db.recover_interrupted_plan_checks()
     if recovered_plan_checks:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的套餐查询状态", recovered_plan_checks)
+    recovered_extract_links = db.recover_interrupted_extract_links()
+    if recovered_extract_links:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的提链状态", recovered_extract_links)
 
     # ----------------------------------------------------------
     # 页面
@@ -273,6 +276,119 @@ def create_app(auth_code: str | None = None) -> Flask:
                 timezone_offset_min=timezone_offset_min,
             )
             item = {"id": acc.get("id"), "email": acc.get("email"), **queued}
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "started": started,
+            "started_count": len(started),
+            "busy": busy,
+            "busy_count": len(busy),
+            "failed": failed,
+            "failed_count": len(failed),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+        }), 202
+
+    @app.get("/api/extract-link/cdk")
+    def api_extract_link_cdk():
+        """查询当前配置或传入 CDK 的剩余次数。"""
+        code = (request.args.get("code") or "").strip() or None
+        try:
+            return jsonify({"ok": True, **extract_link_service.query_cdk(cdk=code)})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    def _is_extract_eligible(acc: dict) -> bool:
+        plan = str(acc.get("current_plan_type") or acc.get("plan_type") or "").lower()
+        return plan == "free" and bool(acc.get("plus_trial_eligible"))
+
+    @app.post("/api/accounts/extract-link")
+    def api_account_extract_link():
+        """单账号提链。Body {account_id|id, link_type?, cdk?}。"""
+        data = request.get_json(silent=True) or {}
+        acc_id = data.get("account_id") or data.get("id")
+        try:
+            acc = db.get_account(int(acc_id))
+        except Exception:
+            acc = None
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if not _is_extract_eligible(acc):
+            return jsonify({"ok": False, "error": "仅支持 free(可Plus试用) 账号提链；请先查询套餐确认资格"}), 400
+        token = (acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号没有 access_token"}), 400
+        try:
+            queued = extract_link_service.enqueue_account_extract(
+                account_id=int(acc.get("id")),
+                email=acc.get("email") or "",
+                access_token=token,
+                trigger="manual",
+                link_type=data.get("link_type"),
+                cdk=data.get("cdk"),
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+        if queued.get("busy"):
+            return jsonify({"ok": False, **queued}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **queued}), 503
+        return jsonify({"ok": True, "started": True, **{k: v for k, v in queued.items() if k != "future"}}), 202
+
+    @app.post("/api/accounts/extract-link-bulk")
+    def api_accounts_extract_link_bulk():
+        """批量提链。Body {account_ids:[...], link_type?, cdk?}。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多提链 500 个账号"}), 400
+
+        started = []
+        busy = []
+        failed = []
+        skipped = []
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except Exception:
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = acc.get("email")
+            if not _is_extract_eligible(acc):
+                skipped.append({"id": acc_id, "email": email, "reason": "不是 free(可Plus试用)"})
+                continue
+            token = (acc.get("access_token") or "").strip()
+            if not token:
+                skipped.append({"id": acc_id, "email": email, "reason": "缺少 access_token"})
+                continue
+            try:
+                queued = extract_link_service.enqueue_account_extract(
+                    account_id=acc_id,
+                    email=email or "",
+                    access_token=token,
+                    trigger="manual_bulk",
+                    link_type=data.get("link_type"),
+                    cdk=data.get("cdk"),
+                )
+            except Exception as exc:
+                failed.append({"id": acc_id, "email": email, "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            item = {"id": acc_id, "email": email, **{k: v for k, v in queued.items() if k != "future"}}
             if queued.get("accepted"):
                 started.append(item)
             elif queued.get("busy"):

@@ -469,6 +469,24 @@ EDITABLE_FIELDS = [
         "key": "PLAN_CHECK_JITTER", "file": "proxy.py", "type": "float", "group": "代理池",
         "label": "套餐请求随机抖动(秒)", "help": "在最小间隔上增加随机延迟，避免请求过于规律",
     },
+    # ---- 提链 ----
+    {
+        "key": "EXTRACT_LINK_API_BASE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "提链服务地址", "help": "默认 https://ple.bzb.qzz.io；公网部署时填你的服务域名",
+    },
+    {
+        "key": "EXTRACT_LINK_CDK", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "提链 CDK", "help": "创建提链任务和监听任务事件使用；成功提链扣 1 次",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "EXTRACT_LINK_TYPE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "提链类型", "help": "pix 或 upi",
+    },
+    {
+        "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "提链并发数", "help": "批量提链后台线程数，建议 1-4",
+    },
     # ---- 接码平台 ----
     # ---- CPA / Codex 授权 ----
     {
