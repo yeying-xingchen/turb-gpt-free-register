@@ -15,7 +15,7 @@ import threading
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from core import codex_retry_service, db, plan_check_service, extract_link_service
+from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
 from webui import config_editor
@@ -51,6 +51,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_extract_links = db.recover_interrupted_extract_links()
     if recovered_extract_links:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的提链状态", recovered_extract_links)
+    recovered_codex_agents = db.recover_interrupted_codex_agents()
+    if recovered_codex_agents:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 Codex Agent Token 状态", recovered_codex_agents)
 
     # ----------------------------------------------------------
     # 页面
@@ -406,6 +409,224 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped": skipped,
             "skipped_count": len(skipped),
         }), 202
+
+    @app.post("/api/accounts/codex-agent")
+    def api_account_codex_agent():
+        """单账号生成 Codex Agent Token。Body {account_id|id, verify_task?}。"""
+        data = request.get_json(silent=True) or {}
+        acc_id = data.get("account_id") or data.get("id")
+        try:
+            acc = db.get_account(int(acc_id))
+        except Exception:
+            acc = None
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        token = (acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号没有 access_token"}), 400
+        try:
+            queued = codex_agent_service.enqueue_account_codex_agent(
+                account_id=int(acc.get("id")),
+                email=acc.get("email") or "",
+                access_token=token,
+                trigger="manual",
+                verify_task=bool(data.get("verify_task", True)),
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+        if queued.get("busy"):
+            return jsonify({"ok": False, **queued}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **queued}), 503
+        return jsonify({"ok": True, "started": True, **{k: v for k, v in queued.items() if k != "future"}}), 202
+
+    @app.post("/api/accounts/codex-agent-bulk")
+    def api_accounts_codex_agent_bulk():
+        """批量生成 Codex Agent Token。Body {account_ids:[...], verify_task?}。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多提交 500 个账号"}), 400
+
+        started = []
+        busy = []
+        failed = []
+        skipped = []
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except Exception:
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            email = acc.get("email")
+            token = (acc.get("access_token") or "").strip()
+            if not token:
+                skipped.append({"id": acc_id, "email": email, "reason": "缺少 access_token"})
+                continue
+            try:
+                queued = codex_agent_service.enqueue_account_codex_agent(
+                    account_id=acc_id,
+                    email=email or "",
+                    access_token=token,
+                    trigger="manual_bulk",
+                    verify_task=bool(data.get("verify_task", True)),
+                )
+            except Exception as exc:
+                failed.append({"id": acc_id, "email": email, "error": f"{type(exc).__name__}: {exc}"})
+                continue
+            item = {"id": acc_id, "email": email, **{k: v for k, v in queued.items() if k != "future"}}
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "started": started,
+            "started_count": len(started),
+            "busy": busy,
+            "busy_count": len(busy),
+            "failed": failed,
+            "failed_count": len(failed),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+        }), 202
+
+    def _codex_agent_auth_for_account(acc: dict) -> tuple[str, str]:
+        """返回账号已生成的 Codex Agent auth.json 文本与下载文件名。"""
+        import json as _json
+        from pathlib import Path as _Path
+
+        email = str(acc.get("email") or "").strip()
+        safe_email = "".join(ch if ch.isalnum() or ch in ("@", ".", "-", "_") else "_" for ch in (email or f"account-{acc.get('id')}"))
+        filename = f"codex-agent-{safe_email}.json"
+        token_text = str(acc.get("codex_agent_token") or "").strip()
+        if token_text:
+            try:
+                payload = _json.loads(token_text)
+                token_text = _json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            except Exception:
+                token_text = token_text + ("\n" if not token_text.endswith("\n") else "")
+            return token_text, filename
+
+        auth_path = str(acc.get("codex_agent_auth_path") or "").strip()
+        if auth_path:
+            p = _Path(auth_path)
+            if p.exists() and p.is_file():
+                return p.read_text(encoding="utf-8"), p.name or filename
+
+        raise RuntimeError("该账号还没有生成 Codex Agent Token")
+
+    @app.get("/api/accounts/<int:acc_id>/codex-agent/download")
+    def api_account_codex_agent_download(acc_id: int):
+        """下载单个账号的 Codex Agent auth.json。"""
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        try:
+            content, filename = _codex_agent_auth_for_account(acc)
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 404
+        data = content.encode("utf-8")
+        return Response(
+            data,
+            mimetype="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(data)),
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    @app.post("/api/accounts/codex-agent/download-bulk")
+    def api_accounts_codex_agent_download_bulk():
+        """下载选中账号已生成的 Codex Agent Token，打包 ZIP。"""
+        import io
+        import json as _json
+        import zipfile
+        from datetime import datetime as _dt
+
+        data = request.get_json(silent=True) or {}
+        if not data and request.form:
+            ids_text = (request.form.get("account_ids") or request.form.get("ids") or "").strip()
+            try:
+                ids = _json.loads(ids_text) if ids_text else []
+            except Exception:
+                ids = [x.strip() for x in ids_text.split(",") if x.strip()]
+        else:
+            ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 1000:
+            return jsonify({"ok": False, "error": "单次最多下载 1000 个账号"}), 400
+
+        added = []
+        errors = []
+        used_names = set()
+        seen = set()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for raw in ids:
+                try:
+                    acc_id = int(raw)
+                except Exception:
+                    errors.append({"id": raw, "error": "ID 非法"})
+                    continue
+                if acc_id in seen:
+                    continue
+                seen.add(acc_id)
+                acc = db.get_account(acc_id)
+                if not acc:
+                    errors.append({"id": acc_id, "error": "账号不存在"})
+                    continue
+                try:
+                    content, filename = _codex_agent_auth_for_account(acc)
+                    arcname = filename
+                    if arcname in used_names:
+                        stem, dot, ext = arcname.rpartition(".")
+                        arcname = f"{stem or arcname}-{len(used_names)+1}{dot}{ext}" if dot else f"{arcname}-{len(used_names)+1}"
+                    used_names.add(arcname)
+                    zf.writestr(arcname, content)
+                    added.append({"id": acc_id, "email": acc.get("email"), "filename": arcname})
+                except Exception as exc:
+                    errors.append({"id": acc_id, "email": acc.get("email"), "error": f"{type(exc).__name__}: {exc}"})
+            manifest = {
+                "exported_at": _dt.now().isoformat(timespec="seconds"),
+                "source": "accounts-codex-agent",
+                "count": len(added),
+                "files": added,
+                "errors": errors,
+            }
+            zf.writestr("manifest.json", _json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+        if not added:
+            return jsonify({"ok": False, "error": "没有可下载的 Codex Agent Token", "errors": errors}), 404
+        now = _dt.now()
+        dl_name = f"accounts-codex-agent-{now.strftime('%Y%m%d-%H%M%S')}.zip"
+        buf.seek(0)
+        zip_bytes = buf.getvalue()
+        return Response(
+            zip_bytes,
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{dl_name}"',
+                "Content-Length": str(len(zip_bytes)),
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.post("/api/accounts/download-cpa-bulk")
     def api_accounts_download_cpa_bulk():

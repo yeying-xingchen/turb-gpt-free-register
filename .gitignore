@@ -18,6 +18,7 @@ H_API.md
 # Codex 授权凭证（含 access/refresh/id token）
 codex_accounts/
 codex_导出状态.json
+codex_agent_accounts
 
 # 任务记录与运行日志
 注册任务.json
