@@ -351,6 +351,139 @@ def generate_auth_json(
 
 
 # ============================================================
+#  sub2api 对接
+# ============================================================
+
+def build_sub2api_account_entry(
+    auth_json: dict[str, Any],
+    *,
+    proxy_key: str | None = None,
+) -> dict[str, Any]:
+    """把 Codex Agent Identity auth.json 转成 sub2api accounts[] 条目。"""
+    identity = auth_json.get("agent_identity") if isinstance(auth_json, dict) else None
+    if not isinstance(identity, dict):
+        raise ValueError("auth_json 缺少 agent_identity")
+
+    agent_runtime_id = str(identity.get("agent_runtime_id") or "").strip()
+    agent_private_key = str(identity.get("agent_private_key") or "").strip()
+    account_id = str(identity.get("account_id") or "").strip()
+    chatgpt_user_id = str(identity.get("chatgpt_user_id") or "").strip()
+    email = str(identity.get("email") or "").strip()
+    plan_type = str(identity.get("plan_type") or "free").strip() or "free"
+    if not agent_runtime_id or not agent_private_key:
+        raise ValueError("agent_identity 缺少 agent_runtime_id/agent_private_key")
+
+    entry = {
+        "name": email.split("@", 1)[0] if email else f"agent-{agent_runtime_id[:8]}",
+        "platform": "openai",
+        "type": "agent_identity",
+        "credentials": {
+            "agent_runtime_id": agent_runtime_id,
+            "agent_private_key": agent_private_key,
+            "account_id": account_id,
+            "chatgpt_account_id": account_id,
+            "chatgpt_user_id": chatgpt_user_id,
+            "email": email,
+            "plan_type": plan_type,
+            "chatgpt_account_is_fedramp": bool(identity.get("chatgpt_account_is_fedramp", False)),
+        },
+        "extra": {
+            "email": email,
+            "account_id": account_id,
+            "chatgpt_account_id": account_id,
+            "chatgpt_user_id": chatgpt_user_id,
+            "agent_runtime_id": agent_runtime_id,
+            "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "source": "codex_agent",
+        },
+        "concurrency": 10,
+        "priority": 1,
+        "rate_multiplier": 1,
+        "auto_pause_on_expired": True,
+    }
+    if proxy_key:
+        entry["proxy_key"] = str(proxy_key)
+    return entry
+
+
+def _sub2api_dedupe_key(entry: dict[str, Any]) -> str:
+    credentials = entry.get("credentials") if isinstance(entry.get("credentials"), dict) else {}
+    extra = entry.get("extra") if isinstance(entry.get("extra"), dict) else {}
+    agent_runtime_id = credentials.get("agent_runtime_id") or extra.get("agent_runtime_id")
+    if agent_runtime_id:
+        return f"agent:{agent_runtime_id}"
+    user_id = credentials.get("chatgpt_user_id") or extra.get("chatgpt_user_id")
+    account_id = credentials.get("chatgpt_account_id") or credentials.get("account_id") or extra.get("chatgpt_account_id") or extra.get("account_id")
+    if user_id and account_id:
+        return f"account-user:{user_id}|{account_id}"
+    email = credentials.get("email") or extra.get("email")
+    if email:
+        return f"email:{email}"
+    return ""
+
+
+def upsert_sub2api_account(
+    auth_json: dict[str, Any],
+    output_path: str | os.PathLike[str],
+    *,
+    proxy_key: str | None = None,
+) -> dict[str, Any]:
+    """把 Agent Token 追加/更新到 sub2api.json。"""
+    path = os.fspath(output_path)
+    data: dict[str, Any]
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError("sub2api 配置文件根节点必须是对象")
+        data = loaded
+    else:
+        data = {}
+
+    accounts = data.setdefault("accounts", [])
+    if not isinstance(accounts, list):
+        raise ValueError("sub2api 配置中的 accounts 必须是数组")
+    proxies = data.setdefault("proxies", [])
+    if not isinstance(proxies, list):
+        raise ValueError("sub2api 配置中的 proxies 必须是数组")
+    if proxy_key and not proxies:
+        data["proxies"] = [{"proxy_key": str(proxy_key)}]
+
+    incoming = build_sub2api_account_entry(auth_json, proxy_key=proxy_key)
+    key = _sub2api_dedupe_key(incoming)
+    updated = False
+    for idx, existing in enumerate(accounts):
+        if isinstance(existing, dict) and key and _sub2api_dedupe_key(existing) == key:
+            merged = dict(existing)
+            merged.update(incoming)
+            # 保留已人工调整的调度参数/代理键。
+            for keep in ("concurrency", "priority", "rate_multiplier", "auto_pause_on_expired", "proxy_key"):
+                if keep in existing and (keep != "proxy_key" or not proxy_key):
+                    merged[keep] = existing[keep]
+            accounts[idx] = merged
+            updated = True
+            break
+    if not updated:
+        accounts.append(incoming)
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    return {
+        "ok": True,
+        "updated": updated,
+        "added": not updated,
+        "path": os.path.abspath(path),
+        "total": len(accounts),
+        "email": incoming.get("extra", {}).get("email"),
+        "dedupe_key": key,
+    }
+
+
+# ============================================================
 #  完整流程
 # ============================================================
 

@@ -487,6 +487,19 @@ EDITABLE_FIELDS = [
         "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",
         "label": "提链并发数", "help": "批量提链后台线程数，建议 1-4",
     },
+    # ---- sub2api ----
+    {
+        "key": "SUB2API_AUTO_EXPORT", "file": "sub2api.py", "type": "bool", "group": "sub2api",
+        "label": "自动同步 sub2api", "help": "生成 Codex Agent Token 成功后自动追加/更新到 sub2api.json",
+    },
+    {
+        "key": "SUB2API_OUTPUT_PATH", "file": "sub2api.py", "type": "str", "group": "sub2api",
+        "label": "sub2api 输出路径", "help": "相对路径按项目根目录解析，例如 sub2api.json",
+    },
+    {
+        "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "sub2api",
+        "label": "sub2api 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
+    },
     # ---- 接码平台 ----
     # ---- CPA / Codex 授权 ----
     {

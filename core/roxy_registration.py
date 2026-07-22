@@ -18,6 +18,23 @@ from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 logger = logging.getLogger(__name__)
 
 
+def _log_prefix(driver=None) -> str:
+    """按当前浏览器实现返回注册日志前缀。
+
+    CloakBrowser 复用 Roxy 的页面操作函数；这些共享函数必须跟随实际 driver
+    输出 `[Cloak注册]`，避免 Cloak 流程里混入 `[Roxy注册]` 日志。
+    """
+    try:
+        explicit = str(getattr(driver, "_registration_log_prefix", "") or "").strip()
+        if explicit:
+            return explicit
+        if driver is not None and driver.__class__.__name__ == "CloakSeleniumDriver":
+            return "[Cloak注册]"
+    except Exception:
+        pass
+    return "[Roxy注册]"
+
+
 def _build_driver(opened: RoxyOpenResult):
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
@@ -219,7 +236,7 @@ def _assert_not_external_idp(driver, label: str = '') -> None:
 def _click_email_entry_option(driver) -> bool:
     """点击“邮箱方式”入口；只看 DOM 技术属性，不看按钮可见文案，并显式排除 Google 等第三方。"""
     if _is_oauth_consent_like(driver):
-        logger.info("[Roxy注册] 当前疑似 OAuth 授权页，跳过邮箱入口兜底点击")
+        logger.info("%s 当前疑似 OAuth 授权页，跳过邮箱入口兜底点击", _log_prefix(driver))
         return False
     clicked = driver.execute_script(r"""
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -274,7 +291,7 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
 
 def _submit_nearest_form_for_active_input(driver) -> bool:
     if _is_oauth_consent_like(driver):
-        logger.info("[Roxy注册] 当前疑似 OAuth 授权页，禁止执行邮箱提交")
+        logger.info("%s 当前疑似 OAuth 授权页，禁止执行邮箱提交", _log_prefix(driver))
         return False
     result = driver.execute_script(r"""
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -302,7 +319,12 @@ def _submit_nearest_form_for_active_input(driver) -> bool:
       return `${own} ${desc}`.toLowerCase();
     };
     const inputRect = input.getBoundingClientRect();
-    const rawButtons = [...form.querySelectorAll('button,input[type="submit"]')]
+    const formId = form.getAttribute('id') || '';
+    const scopedButtons = [
+      ...form.querySelectorAll('button,input[type="submit"]'),
+      ...(formId ? [...document.querySelectorAll(`button[form="${CSS.escape(formId)}"],input[type="submit"][form="${CSS.escape(formId)}"]`)] : [])
+    ].filter((el, idx, arr) => arr.indexOf(el) === idx);
+    const rawButtons = scopedButtons
       .filter(visible)
       .map((el, idx) => {
         const r = el.getBoundingClientRect();
@@ -311,29 +333,40 @@ def _submit_nearest_form_for_active_input(driver) -> bool:
         const isBad = bad.test(attrs) || hasLogo;
         const belowInput = r.top >= inputRect.bottom - 10;
         const distance = Math.max(0, r.top - inputRect.bottom) + Math.abs((r.left + r.right) / 2 - (inputRect.left + inputRect.right) / 2) / 10;
-        return {el, idx, attrs, isBad, hasLogo, belowInput, distance, tag: el.tagName, type: el.getAttribute('type') || ''};
+        const cls = String(el.className || '').toLowerCase();
+        const type = String(el.getAttribute('type') || '').toLowerCase();
+        // ChatGPT 新版邮箱页的主按钮形如：
+        // <button class="... btn-primary ... w-full ..." type="submit"><div>続行</div></button>
+        // 优先选择同 form 下的 primary submit，而不是因为多个按钮距离接近误判歧义。
+        const isPrimarySubmit = (el.tagName === 'BUTTON' || el.tagName === 'INPUT') && type === 'submit'
+          && (/\bbtn-primary\b/.test(cls) || /\b_primary_/.test(cls) || /\bw-full\b/.test(cls));
+        const score = (isPrimarySubmit ? 1000 : 0) + (type === 'submit' ? 100 : 0) - distance;
+        return {el, idx, attrs, isBad, hasLogo, belowInput, distance, score, isPrimarySubmit, tag: el.tagName, type};
       });
     const safe = rawButtons.filter(x => !x.isBad && x.belowInput)
-      .sort((a,b) => a.distance - b.distance || a.idx - b.idx);
+      .sort((a,b) => b.score - a.score || a.distance - b.distance || a.idx - b.idx);
     if (!safe.length) {
-      return {ok:false, reason:'no_safe_submit', buttons: rawButtons.map(x => ({idx:x.idx, isBad:x.isBad, hasLogo:x.hasLogo, belowInput:x.belowInput, attrs:x.attrs.slice(0,160), type:x.type}))};
+      return {ok:false, reason:'no_safe_submit', buttons: rawButtons.map(x => ({idx:x.idx, isBad:x.isBad, hasLogo:x.hasLogo, belowInput:x.belowInput, primary:x.isPrimarySubmit, attrs:x.attrs.slice(0,160), type:x.type}))};
     }
-    // 多个安全按钮时，只点离邮箱输入框最近的；但如果距离接近，认为页面歧义，拒绝点击。
-    if (safe.length > 1 && Math.abs(safe[0].distance - safe[1].distance) < 8) {
-      return {ok:false, reason:'ambiguous_submit', buttons: safe.slice(0,3).map(x => ({idx:x.idx, distance:x.distance, attrs:x.attrs.slice(0,160), type:x.type}))};
+    // 多个安全按钮时，若没有明确 primary submit，且距离接近，才认为页面歧义。
+    if (!safe[0].isPrimarySubmit && safe.length > 1 && Math.abs(safe[0].distance - safe[1].distance) < 8) {
+      return {ok:false, reason:'ambiguous_submit', buttons: safe.slice(0,3).map(x => ({idx:x.idx, distance:x.distance, score:x.score, primary:x.isPrimarySubmit, attrs:x.attrs.slice(0,160), type:x.type}))};
     }
     const target = safe[0].el;
     target.scrollIntoView({block:'center'});
-    window.__roxy_email_submit_debug = {at: Date.now(), targetAttrs: safe[0].attrs.slice(0,240), buttonCount: rawButtons.length};
+    window.__roxy_email_submit_debug = {at: Date.now(), targetAttrs: safe[0].attrs.slice(0,240), buttonCount: rawButtons.length, primary:safe[0].isPrimarySubmit};
+    target.dispatchEvent(new MouseEvent('pointerdown', {bubbles:true, cancelable:true, view:window}));
+    target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+    target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
     target.click();
-    return {ok:true, reason:'clicked_safe_submit', targetAttrs:safe[0].attrs.slice(0,160)};
+    return {ok:true, reason:safe[0].isPrimarySubmit ? 'clicked_primary_submit' : 'clicked_safe_submit', targetAttrs:safe[0].attrs.slice(0,160), primary:safe[0].isPrimarySubmit};
     """) or {}
     if result.get("ok"):
-        logger.info("[Roxy注册] 邮箱表单安全提交：%s", result)
+        logger.info("%s 邮箱表单安全提交：%s", _log_prefix(driver), result)
         time.sleep(0.8)
         _assert_not_external_idp(driver, "提交邮箱后")
         return True
-    logger.warning("[Roxy注册] 未执行邮箱提交：%s", result)
+    logger.warning("%s 未执行邮箱提交：%s", _log_prefix(driver), result)
     return False
 
 
@@ -364,10 +397,21 @@ def _is_email_login_page_still_present(driver) -> bool:
     return bool(state.get("inputs"))
 
 
-def _wait_email_submit_next_state(driver, email: str, timeout: int = 12) -> str:
-    """邮箱提交后等待进入 password / otp / logged_in；仍停留邮箱页则返回 email_page。"""
+def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
+    """邮箱提交后等待进入 password / otp / logged_in；仍停留邮箱页则返回 email_page。
+
+    Cloak/Playwright 路径里，点击 submit 后页面经常先发生一次 SPA 导航：
+    `chatgpt.com/auth/login?email=...`，同时 React 会短暂把 email input 清空。
+    旧逻辑一看到空 input 就立刻返回 `email_cleared`，导致在真正跳到
+    `auth.openai.com/...` 前过早重填，形成“提交 -> 清空 -> 重填”的循环。
+    这里对 email_cleared 做去抖：只记录并继续观察几秒；若期间进入
+    password/otp/login_password/logged_in 则按真实状态返回，持续清空才让上层重试。
+    """
     end = time.time() + timeout
     last = None
+    cleared_seen_at: float | None = None
+    cleared_last_log_at = 0.0
+    expected_email = str(email or "").strip().lower()
     while time.time() < end:
         if _has_access_token(driver):
             return "logged_in"
@@ -382,12 +426,28 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 12) -> str:
         inputs = state.get("inputs") or []
         if inputs:
             values = [str(i.get("value") or "") for i in inputs]
-            # 页面已清空邮箱框，说明提交没真正进入下一步/被前端重置。
-            if any(v == "" for v in values):
-                return "email_cleared"
+            url = str(state.get("url") or "")
+            has_blank = any(v == "" for v in values)
+            has_expected = any(v.strip().lower() == expected_email for v in values)
+            if has_blank and not has_expected:
+                now = time.time()
+                if cleared_seen_at is None:
+                    cleared_seen_at = now
+                # URL 已带 email 查询参数时更像是提交后的中间态，给它更长观察窗口。
+                debounce = 6.0 if ("/auth/login" in url and "email=" in url) else 3.5
+                if now - cleared_last_log_at > 2.0:
+                    logger.info(
+                        "%s 邮箱提交后检测到输入框短暂清空，继续等待跳转：elapsed=%.1fs debounce=%.1fs url=%s",
+                        _log_prefix(driver), now - cleared_seen_at, debounce, url[:180],
+                    )
+                    cleared_last_log_at = now
+                if now - cleared_seen_at >= debounce:
+                    return "email_cleared"
+            else:
+                cleared_seen_at = None
             # 仍是当前邮箱页，继续短等。
         time.sleep(0.8)
-    logger.info("[Roxy注册] 邮箱提交后等待下一步超时，最后邮箱页状态=%s", last)
+    logger.info("%s 邮箱提交后等待下一步超时，最后邮箱页状态=%s", _log_prefix(driver), last)
     return "email_page" if _is_email_login_page_still_present(driver) else "unknown"
 
 
@@ -400,20 +460,20 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
         last_state = state
         values = [str(i.get("value") or "") for i in (state.get("inputs") or [])]
         if not any(v.strip().lower() == email.strip().lower() for v in values):
-            logger.warning("[Roxy注册] 邮箱写入校验失败，准备重试：attempt=%s/%s state=%s", attempt, attempts, state)
+            logger.warning("%s 邮箱写入校验失败，准备重试：attempt=%s/%s state=%s", _log_prefix(driver), attempt, attempts, state)
             time.sleep(0.8)
             continue
-        logger.info("[Roxy注册] 已填写邮箱并校验通过：%s", email)
+        logger.info("%s 已填写邮箱并校验通过：%s", _log_prefix(driver), email)
         human_delay("form")
         _submit_email_step(driver)
-        logger.info("[Roxy注册] 已提交邮箱，等待进入密码页或验证码页（%s/%s）", attempt, attempts)
-        state_name = _wait_email_submit_next_state(driver, email, timeout=12)
+        logger.info("%s 已提交邮箱，等待进入密码页或验证码页（%s/%s）", _log_prefix(driver), attempt, attempts)
+        state_name = _wait_email_submit_next_state(driver, email, timeout=20)
         if state_name == "login_password":
             raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
         if state_name in ("password", "otp", "logged_in"):
-            logger.info("[Roxy注册] 邮箱提交后已进入下一步：%s", state_name)
+            logger.info("%s 邮箱提交后已进入下一步：%s", _log_prefix(driver), state_name)
             return state_name
-        logger.warning("[Roxy注册] 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", state_name, _email_input_value_state(driver))
+        logger.warning("%s 邮箱提交后仍未进入下一步：%s，准备重填重试 state=%s", _log_prefix(driver), state_name, _email_input_value_state(driver))
         time.sleep(1.0)
     raise RuntimeError(f"邮箱提交后未进入密码页/验证码页，最后状态={last_state}")
 
@@ -533,7 +593,7 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
                 time.sleep(0.4)
                 text = str(btn.text or btn.get_attribute('value') or btn.get_attribute('data-dd-action-name') or '').strip()
                 btn.click()
-                logger.info("[Roxy注册][OTP] 已点击重新发送验证码按钮：%s", text or '-')
+                logger.info("%s[OTP] 已点击重新发送验证码按钮：%s", _log_prefix(driver), text or '-')
                 time.sleep(1.5)
                 return {"ok": True, "text": text}
         except Exception as exc:
@@ -555,7 +615,7 @@ def _wait_after_email_otp_submit(driver, timeout: int = 10) -> str:
         if invalid or (last.get('errors') or []):
             return 'invalid'
     if _is_email_verification_page(driver):
-        logger.warning("[Roxy注册][OTP] 提交后仍停留验证码页，按验证码无效/过期处理 snapshot=%s", _email_otp_page_state(driver))
+        logger.warning("%s[OTP] 提交后仍停留验证码页，按验证码无效/过期处理 snapshot=%s", _log_prefix(driver), _email_otp_page_state(driver))
         return 'invalid'
     return 'accepted'
 
@@ -718,7 +778,7 @@ def _select_or_type(driver, selectors: list[str], value: str, timeout: int = 3) 
             _set_element_value(driver, el, str(value))
         return True
     except Exception as exc:
-        logger.debug('[Roxy注册] 填写字段失败 selectors=%s value=%s err=%s', selectors, value, exc)
+        logger.debug('%s 填写字段失败 selectors=%s value=%s err=%s', _log_prefix(driver), selectors, value, exc)
         return False
 
 
@@ -860,7 +920,7 @@ def _fill_birthday_or_age(driver, birthday: str, age: int) -> str | None:
         """, birthday)
         return 'spinbutton'
     except Exception as exc:
-        logger.debug('[Roxy注册] spinbutton 生日填写失败：%s', exc)
+        logger.debug('%s spinbutton 生日填写失败：%s', _log_prefix(driver), exc)
         return None
 
 
@@ -1032,23 +1092,23 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
             continue
         passwordless = _click_passwordless_signup_if_present(driver)
         if passwordless.get('ok'):
-            logger.info("[Roxy注册] 检测到 password 页，已点击一次性验证码入口：email=%s detail=%s", email, passwordless)
+            logger.info("%s 检测到 password 页，已点击一次性验证码入口：email=%s detail=%s", _log_prefix(driver), email, passwordless)
             wait_end = time.time() + 20
             while time.time() < wait_end:
                 if _is_email_verification_page(driver):
-                    logger.info("[Roxy注册] 一次性验证码入口已进入邮箱验证码页")
+                    logger.info("%s 一次性验证码入口已进入邮箱验证码页", _log_prefix(driver))
                     return None
                 if _has_access_token(driver):
-                    logger.info("[Roxy注册] 一次性验证码入口后已检测到登录态")
+                    logger.info("%s 一次性验证码入口后已检测到登录态", _log_prefix(driver))
                     return None
                 time.sleep(0.5)
-            logger.info("[Roxy注册] 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理")
+            logger.info("%s 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理", _log_prefix(driver))
             return None
         if is_login_password:
-            logger.info("[Roxy注册] 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：state=%s", last)
+            logger.info("%s 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：state=%s", _log_prefix(driver), last)
             return None
         password = _registration_password()
-        logger.info("[Roxy注册] 检测到 create-account/password，准备设置密码（%s 位）：email=%s", len(password), email)
+        logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
         result = driver.execute_script(r"""
         const password = String(arguments[0]);
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
@@ -1084,21 +1144,21 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         """, password) or {}
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
-        logger.info("[Roxy注册] 已填写并提交密码页")
+        logger.info("%s 已填写并提交密码页", _log_prefix(driver))
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
         wait_end = time.time() + 20
         while time.time() < wait_end:
             if _is_email_verification_page(driver):
-                logger.info("[Roxy注册] 密码提交后已进入邮箱验证码页")
+                logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
                 return password
             if _has_access_token(driver):
-                logger.info("[Roxy注册] 密码提交后已检测到登录态")
+                logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
                 return password
             if not _is_signup_password_page(driver):
                 return password
             time.sleep(0.5)
         return password
-    logger.info("[Roxy注册] 未检测到密码页，继续后续流程 last=%s", last)
+    logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
     return None
 
 
@@ -1152,10 +1212,10 @@ def _accept_profile_consents(driver) -> int:
         """) or {}
         count = int(result.get('count') or 0)
         if count:
-            logger.info("[Roxy注册] 已勾选 about-you/profile 同意协议复选框：%s", result.get('names'))
+            logger.info("%s 已勾选 about-you/profile 同意协议复选框：%s", _log_prefix(driver), result.get('names'))
         return count
     except Exception as exc:
-        logger.debug('[Roxy注册] 勾选 profile consent 失败：%s', exc)
+        logger.debug('%s 勾选 profile consent 失败：%s', _log_prefix(driver), exc)
         return 0
 
 
@@ -1170,15 +1230,15 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
     while time.time() < end:
         time.sleep(1)
         if _has_access_token(driver):
-            logger.info('[Roxy注册] 已检测到登录态，资料页可能已跳过')
+            logger.info('%s 已检测到登录态，资料页可能已跳过', _log_prefix(driver))
             return False
         snap = _page_snapshot(driver)
         last_snapshot = snap
         if not _is_profile_like(snap):
-            logger.info('[Roxy注册] 等待资料页中：url=%s', snap.get('url'))
+            logger.info('%s 等待资料页中：url=%s', _log_prefix(driver), snap.get('url'))
             continue
 
-        logger.info('[Roxy注册] 检测到资料页，开始填写姓名生日：url=%s inputs=%s', snap.get('url'), snap.get('inputs'))
+        logger.info('%s 检测到资料页，开始填写姓名生日：url=%s inputs=%s', _log_prefix(driver), snap.get('url'), snap.get('inputs'))
         name_ok = False
         # 常见单姓名字段
         for selectors in [
@@ -1186,7 +1246,7 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
             ["input[placeholder*='Name']", "input[placeholder*='name']", "input[aria-label*='Name']", "input[aria-label*='name']"],
         ]:
             if _select_or_type(driver, selectors, name, timeout=3):
-                logger.info("[Roxy注册] 已填写姓名字段：%s", name)
+                logger.info("%s 已填写姓名字段：%s", _log_prefix(driver), name)
                 name_ok = True
                 break
         # 兼容 first/last 分开
@@ -1202,22 +1262,22 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
         birth_ok = bool(birth_mode)
         if birth_ok:
             if birth_mode == 'age':
-                logger.info("[Roxy注册] 已填写年龄字段：%s", age)
+                logger.info("%s 已填写年龄字段：%s", _log_prefix(driver), age)
             else:
-                logger.info("[Roxy注册] 已填写生日字段 mode=%s value=%s", birth_mode, birthday)
+                logger.info("%s 已填写生日字段 mode=%s value=%s", _log_prefix(driver), birth_mode, birthday)
 
         if not name_ok or not birth_ok:
-            logger.warning('[Roxy注册] 资料页字段未填完整 name_ok=%s birth_ok=%s snapshot=%s', name_ok, birth_ok, snap)
+            logger.warning('%s 资料页字段未填完整 name_ok=%s birth_ok=%s snapshot=%s', _log_prefix(driver), name_ok, birth_ok, snap)
             continue
 
         _accept_profile_consents(driver)
         human_delay('form')
         for _ in range(3):
             if _click_if_enabled_submit(driver):
-                logger.info('[Roxy注册] 已点击资料页提交按钮，等待 OAuth 跳转')
+                logger.info('%s 已点击资料页提交按钮，等待 OAuth 跳转', _log_prefix(driver))
                 return True
             time.sleep(1)
-        logger.warning('[Roxy注册] 找不到可点击的资料页提交按钮 snapshot=%s', _page_snapshot(driver))
+        logger.warning('%s 找不到可点击的资料页提交按钮 snapshot=%s', _log_prefix(driver), _page_snapshot(driver))
     raise RuntimeError(f'等待/填写资料页超时，最后页面：{last_snapshot}')
 
 
@@ -1272,9 +1332,9 @@ def _read_chatgpt_session_once(driver) -> dict | None:
     if result and result.get("ok"):
         data = result.get("data") or {}
         if data.get("accessToken"):
-            logger.info("[Roxy注册] /api/auth/session 已返回 accessToken")
+            logger.info("%s /api/auth/session 已返回 accessToken", _log_prefix(driver))
             return data
-        logger.info("[Roxy注册] 等待 ChatGPT session 写入 accessToken，当前响应 keys=%s", list(data.keys()))
+        logger.info("%s 等待 ChatGPT session 写入 accessToken，当前响应 keys=%s", _log_prefix(driver), list(data.keys()))
     return None
 
 
@@ -1327,7 +1387,7 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
                 current = str(getattr(driver, "current_url", "") or "")
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
-                    logger.info("[Roxy注册] 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", int(auto_jump_wait or 15))
+                    logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
                     driver.get("https://chatgpt.com/")
                     forced_chatgpt_open = True
                     time.sleep(3)

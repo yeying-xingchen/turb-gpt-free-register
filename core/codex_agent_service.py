@@ -156,14 +156,36 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         if not isinstance(auth_json, dict):
             raise RuntimeError(f"Codex Agent 生成未返回 auth_json: {last_exc}")
         identity = auth_json.get("agent_identity") if isinstance(auth_json, dict) else {}
+        sub2api_result = None
+        try:
+            from config import sub2api as sub2api_cfg
+            if bool(getattr(sub2api_cfg, "SUB2API_AUTO_EXPORT", True)):
+                from core.codex_agent import upsert_sub2api_account
+                output = str(getattr(sub2api_cfg, "SUB2API_OUTPUT_PATH", "sub2api.json") or "sub2api.json").strip()
+                sub2api_output_path = Path(output)
+                if not sub2api_output_path.is_absolute():
+                    sub2api_output_path = _PROJECT_ROOT / sub2api_output_path
+                proxy_key = str(getattr(sub2api_cfg, "SUB2API_PROXY_KEY", "") or "").strip() or None
+                sub2api_result = upsert_sub2api_account(auth_json, sub2api_output_path, proxy_key=proxy_key)
+                logger.info(
+                    "[CodexAgent] 已同步 sub2api: %s path=%s action=%s total=%s",
+                    email,
+                    sub2api_result.get("path"),
+                    "updated" if sub2api_result.get("updated") else "added",
+                    sub2api_result.get("total"),
+                )
+        except Exception as sub_exc:
+            logger.warning("[CodexAgent] 同步 sub2api 失败（不影响 Agent Token）: %s: %s", type(sub_exc).__name__, str(sub_exc)[:180])
         result = {
             "ok": True,
             "status": "success",
             "checked_at": datetime.now().isoformat(timespec="seconds"),
-            "message": "Codex Agent Token 已生成",
+            "message": "Codex Agent Token 已生成" + ("，已同步 sub2api" if sub2api_result else ""),
             "agent_runtime_id": (identity or {}).get("agent_runtime_id"),
             "auth_path": str(output_path),
             "auth_json": auth_json,
+            "sub2api_path": (sub2api_result or {}).get("path"),
+            "sub2api_total": (sub2api_result or {}).get("total"),
             "network_route": route_meta.get("network_route"),
             "proxy_mode": route_meta.get("proxy_mode"),
             "proxy_used": route_meta.get("proxy_used"),

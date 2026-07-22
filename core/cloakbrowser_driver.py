@@ -463,5 +463,8 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
         page = context.new_page()
 
     driver = CloakSeleniumDriver(browser=browser, context=context, page=page)
+    # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
+    # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
+    driver._registration_log_prefix = "[Cloak注册]"
     driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
     return driver, CloakOpenResult(raw={"driver": "cloakbrowser", "proxy": proxy_url, "locale": locale_opts, "options": {k: v for k, v in opts.items() if k != "license_key"}})
