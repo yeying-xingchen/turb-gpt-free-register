@@ -19,18 +19,18 @@ PROXY_POOL = [
     "socks5://127.0.0.1:7897",
 ]
 
-# 套餐/Plus 试用资格查询使用独立网络策略，避免批量查询被注册代理池中的
-# 临时本地代理拖垮，也避免无条件直连造成出口策略失控。
+# 套餐/Plus 试用资格查询与 Codex Agent Token 生成共用这组独立网络策略，
+# 避免批量请求被注册代理池中的临时本地代理拖垮，也避免无条件直连造成出口策略失控。
 #   auto   = 优先使用 PLAN_CHECK_PROXY 或代理池；本地代理端口未监听时回退直连
 #   proxy  = 强制使用 PLAN_CHECK_PROXY 或代理池，失败直接报错
 #   direct = 始终直连
 PLAN_CHECK_PROXY_MODE = "auto"
 
-# 套餐查询专用代理。留空时 auto/proxy 模式从 PROXY_POOL 选择。
+# 套餐查询 / Codex Agent Token 生成专用代理。留空时 auto/proxy 模式从 PROXY_POOL 选择。
 # 代理可能包含账号密码，因此 WebUI 会把它保存到 .env。
 PLAN_CHECK_PROXY = ""
 
-# 套餐查询使用独立的短超时和有限重试，避免注册成功后长时间卡在权益查询。
+# 查套餐 / 生成 Codex Agent Token 使用独立的短超时和有限重试，避免后台任务长时间卡住。
 PLAN_CHECK_TIMEOUT = 15.0
 PLAN_CHECK_MAX_ATTEMPTS = 2
 PLAN_CHECK_RETRY_DELAY = 1.5
@@ -39,8 +39,8 @@ PLAN_CHECK_RETRY_DELAY = 1.5
 # Plus 试用资格时，等待该秒数后再复查一次；设为 0 可关闭复查。
 PLAN_CHECK_REGISTRATION_RECHECK_DELAY = 2.0
 
-# 自动、手动和批量套餐查询共用同一个后台队列，限制并发和请求启动频率，
-# 避免批量注册时同时打满 accounts/check 接口。
+# 自动、手动和批量套餐查询共用同一个后台队列；Codex Agent Token 使用独立队列，
+# 但复用这里的网络模式、请求启动间隔与随机抖动，避免批量后台请求过于集中。
 PLAN_CHECK_WORKERS = 3
 PLAN_CHECK_QUEUE_LIMIT = 500
 PLAN_CHECK_MIN_INTERVAL = 0.4

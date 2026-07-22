@@ -1079,7 +1079,12 @@ function _codexAgentCell(r) {
   const s = r.codex_agent_status || '';
   const err = r.codex_agent_error || '';
   const msg = r.codex_agent_message || '';
-  const title = esc(err || msg || r.codex_agent_runtime_id || '');
+  const routeInfo = [
+    r.codex_agent_network_route ? `网络:${r.codex_agent_network_route}` : '',
+    r.codex_agent_proxy_used ? `代理:${r.codex_agent_proxy_used}` : '',
+    r.codex_agent_device_id ? `did:${r.codex_agent_device_id}` : '',
+  ].filter(Boolean).join('；');
+  const title = esc([err || msg || r.codex_agent_runtime_id || '', routeInfo].filter(Boolean).join('；'));
   if (s === 'queued') return `<div class="agent-token-cell"><span class="pill status-running" title="${title}">排队中</span></div>`;
   if (s === 'running') return `<div class="agent-token-cell"><span class="pill status-running" title="${title}">生成中</span></div>`;
   if (s === 'success') {
@@ -1088,7 +1093,7 @@ function _codexAgentCell(r) {
     const copy = token ? cbtn('复制Agent Token', token, '') : '';
     const download = `<button class="agent-download" data-codex-agent-download="${esc(r.id)}" title="下载该账号 Codex Agent auth.json">下载Agent</button>`;
     const regen = `<button data-codex-agent="${esc(r.id)}" title="重新生成 Codex Agent Token">重生成</button>`;
-    return `<div class="agent-token-cell"><span class="pill status-success" title="${esc(r.codex_agent_runtime_id || '')}">${esc(rid)}</span>${copy}${download}${regen}</div>`;
+    return `<div class="agent-token-cell"><span class="pill status-success" title="${title}">${esc(rid)}</span>${copy}${download}${regen}</div>`;
   }
   const gen = (r.access_token || '').trim() ? `<button data-codex-agent="${esc(r.id)}" title="生成 Codex CLI agent_identity auth.json/token">生成Agent</button>` : '';
   if (s === 'failed') return `<div class="agent-token-cell"><span class="pill status-failed" title="${title}">失败</span>${gen}</div>`;

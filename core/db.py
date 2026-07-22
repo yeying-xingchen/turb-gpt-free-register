@@ -750,6 +750,20 @@ def update_account_codex_agent(acc_id: int, result: dict | None = None) -> bool:
             row["codex_agent_auth_path"] = result.get("auth_path")
         if isinstance(result.get("auth_json"), dict):
             row["codex_agent_token"] = json.dumps(result.get("auth_json"), ensure_ascii=False)
+        for _k in (
+            "codex_agent_network_route",
+            "codex_agent_proxy_mode",
+            "codex_agent_proxy_used",
+            "codex_agent_proxy_fallback_reason",
+            "codex_agent_device_id",
+            "codex_agent_oai_session_id",
+            "codex_agent_attempt_count",
+            "codex_agent_max_attempts",
+            "codex_agent_request_timeout",
+        ):
+            src_key = _k.replace("codex_agent_", "", 1)
+            if result.get(src_key) is not None:
+                row[_k] = result.get(src_key)
         row["updated_at"] = _now()
         _save_accounts(accounts)
         return True
@@ -1057,6 +1071,9 @@ def list_account_plan_check_statuses(limit: int = 5000) -> dict:
         "codex_agent_status", "codex_agent_ok", "codex_agent_message",
         "codex_agent_error", "codex_agent_runtime_id", "codex_agent_token",
         "codex_agent_auth_path", "codex_agent_checked_at", "codex_agent_completed_at",
+        "codex_agent_network_route", "codex_agent_proxy_mode", "codex_agent_proxy_used",
+        "codex_agent_proxy_fallback_reason", "codex_agent_device_id", "codex_agent_oai_session_id",
+        "codex_agent_attempt_count", "codex_agent_max_attempts", "codex_agent_request_timeout",
     )
     with _LOCK:
         rows = sorted(_load_accounts(), key=lambda x: int(x.get("id") or 0), reverse=True)[:max(1, int(limit))]

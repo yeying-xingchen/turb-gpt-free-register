@@ -14,7 +14,9 @@ by 久雾
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import logging
 import os
 import sys
 import time
@@ -57,29 +59,28 @@ RUNNING_LOCATION = "local"
 #  日志
 # ============================================================
 
-_COLORS = {
-    "INFO": "\033[36m",
-    "WARN": "\033[33m",
-    "ERROR": "\033[31m",
-    "OK": "\033[32m",
-}
-_RESET = "\033[0m"
-_DIM = "\033[2m"
-_BOLD = "\033[1m"
+logger = logging.getLogger(__name__)
 
 
 def _log(step: str, msg: str, level: str = "INFO") -> None:
-    ts = time.strftime("%H:%M:%S")
-    color = _COLORS.get(level, _COLORS["INFO"])
-    lvl = f"{color}{level:<5}{_RESET}"
-    print(f"{_DIM}{ts}{_RESET} {lvl} {step:<16} │ {msg}")
+    """统一走 logging，避免 WebUI/任务日志里混入 ANSI 彩色 stdout。"""
+    text = f"[CodexAgent][{step}] {msg}"
+    if level in {"WARN", "WARNING"}:
+        logger.warning(text)
+    elif level == "ERROR":
+        logger.error(text)
+    else:
+        logger.info(text)
 
 
 def _banner(title: str) -> None:
-    line = "─" * 52
-    print(f"\n{_BOLD}{_COLORS['INFO']}┌{line}┐{_RESET}")
-    print(f"{_BOLD}{_COLORS['INFO']}│ {title:^50} │{_RESET}")
-    print(f"{_BOLD}{_COLORS['INFO']}└{line}┘{_RESET}\n")
+    logger.info("[CodexAgent] %s", title)
+
+
+def _fingerprint(value: str, length: int = 12) -> str:
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:length]
 
 
 # ============================================================
@@ -190,6 +191,41 @@ def get_session_from_access_token(access_token: str) -> dict[str, Any]:
     }
 
 
+def _agent_headers(access_token: str, env: Any | None = None) -> dict[str, str]:
+    """构造 Agent API 请求头；有 BrowserSession 时使用该账号独立指纹画像。"""
+    if env is not None and hasattr(env, "_get_common_headers"):
+        headers = env._get_common_headers()
+    else:
+        headers = {"User-Agent": USER_AGENT}
+    headers.update({
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "Origin": "https://chatgpt.com",
+        "Referer": "https://chatgpt.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+    })
+    if env is not None:
+        try:
+            headers["oai-device-id"] = env.device_id
+            headers["oai-language"] = env.navigator_language()
+            if hasattr(env, "_attach_auth_rum_headers"):
+                env._attach_auth_rum_headers(headers)
+        except Exception:
+            pass
+    return headers
+
+
+def _agent_post(url: str, *, access_token: str, payload: dict[str, Any], env: Any | None = None, timeout: int = 15):
+    """使用独立 BrowserSession 或默认 curl_cffi 发起 Agent API POST。"""
+    headers = _agent_headers(access_token, env=env)
+    if env is not None and hasattr(env, "session"):
+        return env.session.post(url, headers=headers, json=payload, timeout=timeout)
+    return requests.post(url, headers=headers, json=payload, impersonate=IMPERSONATE, timeout=timeout)
+
+
 # ============================================================
 #  Agent 注册
 # ============================================================
@@ -197,6 +233,8 @@ def get_session_from_access_token(access_token: str) -> dict[str, Any]:
 def register_agent(
     access_token: str,
     public_key_ssh: str,
+    env: Any | None = None,
+    timeout: int = 15,
 ) -> str:
     """
     在 auth.openai.com 注册 agent。
@@ -205,13 +243,12 @@ def register_agent(
     :param public_key_ssh: SSH 格式的 Ed25519 公钥
     :return: agent_runtime_id
     """
-    r = requests.post(
+    r = _agent_post(
         f"{AUTHAPI_BASE}/v1/agent/register",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        },
-        json={
+        access_token=access_token,
+        env=env,
+        timeout=timeout,
+        payload={
             "abom": {
                 "agent_version": AGENT_VERSION,
                 "agent_harness_id": AGENT_HARNESS_ID,
@@ -219,8 +256,6 @@ def register_agent(
             },
             "agent_public_key": public_key_ssh,
         },
-        impersonate=IMPERSONATE,
-        timeout=15,
     )
 
     if r.status_code != 200:
@@ -242,6 +277,8 @@ def register_task(
     access_token: str,
     agent_runtime_id: str,
     private_key_pkcs8_b64: str,
+    env: Any | None = None,
+    timeout: int = 15,
 ) -> str:
     """
     在 auth.openai.com 注册 task（验证密钥对可用性）。
@@ -263,18 +300,15 @@ def register_task(
     signature = private_key.sign(payload.encode())
     signature_b64 = base64.b64encode(signature).decode()
 
-    r = requests.post(
+    r = _agent_post(
         f"{AUTHAPI_BASE}/v1/agent/{agent_runtime_id}/task/register",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        },
-        json={
+        access_token=access_token,
+        env=env,
+        timeout=timeout,
+        payload={
             "timestamp": timestamp,
             "signature": signature_b64,
         },
-        impersonate=IMPERSONATE,
-        timeout=15,
     )
 
     if r.status_code != 200:
@@ -324,6 +358,8 @@ def create_codex_agent_identity(
     access_token: str,
     output_path: str | None = None,
     verify_task: bool = True,
+    env: Any | None = None,
+    timeout: int = 15,
 ) -> dict[str, Any]:
     """
     完整流程：从 ChatGPT session JWT 创建 Codex Agent Identity auth.json。
@@ -333,7 +369,7 @@ def create_codex_agent_identity(
     :param verify_task: 是否验证 task 注册（可选）
     :return: auth.json dict
     """
-    _banner("Codex Agent Identity 注册  ·  by 久雾")
+    _banner("Codex Agent Identity 注册开始")
 
     # Step 1: 解码 JWT 获取账号信息
     _log("Step 1", "解码 JWT 获取账号信息...")
@@ -354,20 +390,20 @@ def create_codex_agent_identity(
     # Step 2: 生成 Ed25519 密钥对
     _log("Step 2", "生成 Ed25519 密钥对...")
     private_key_b64, public_key_ssh = generate_ed25519_keypair()
-    _log("Step 2", f"private_key={private_key_b64[:40]}...", "OK")
-    _log("Step 2", f"public_key={public_key_ssh[:50]}...", "OK")
+    _log("Step 2", "Ed25519 私钥已生成（不输出私钥内容）", "OK")
+    _log("Step 2", f"public_key_fingerprint={_fingerprint(public_key_ssh)}", "OK")
 
     # Step 3: 注册 agent
     _log("Step 3", "在 auth.openai.com 注册 agent...")
-    agent_runtime_id = register_agent(access_token, public_key_ssh)
+    agent_runtime_id = register_agent(access_token, public_key_ssh, env=env, timeout=timeout)
     _log("Step 3", f"agent_runtime_id={agent_runtime_id}", "OK")
 
     # Step 4: 验证 task 注册（可选）
     if verify_task:
         _log("Step 4", "验证 task 注册...")
         try:
-            task_id = register_task(access_token, agent_runtime_id, private_key_b64)
-            _log("Step 4", f"task_id={task_id[:40]}...", "OK")
+            task_id = register_task(access_token, agent_runtime_id, private_key_b64, env=env, timeout=timeout)
+            _log("Step 4", f"task_id_fingerprint={_fingerprint(task_id)}", "OK")
         except Exception as e:
             _log("Step 4", f"验证失败（不影响 auth.json）: {e}", "WARN")
 
@@ -413,6 +449,9 @@ def main() -> None:
     """
 
     import argparse
+
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 
     parser = argparse.ArgumentParser(description="Codex Agent Identity 自动注册")
     parser.add_argument("--token", type=str, help="ChatGPT session JWT (accessToken)")
