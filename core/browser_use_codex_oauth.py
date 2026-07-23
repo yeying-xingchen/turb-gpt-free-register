@@ -1306,15 +1306,23 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
     context = None
     page = None
     try:
-        if proto._codex_auth_url_source() == "cpa":
+        auth_source = proto._codex_auth_url_source()
+        if auth_source == "cpa":
             cpa_auth = proto._request_cpa_authorize_url()
             auth_url = cpa_auth["auth_url"]
             state = cpa_auth["state"]
             code_verifier = ""
-        else:
+        elif auth_source == "sub2":
+            sub2_auth = proto._request_sub2_authorize_url()
+            auth_url = sub2_auth["auth_url"]
+            state = sub2_auth["state"]
+            code_verifier = ""
+        elif auth_source == "local":
             code_verifier, code_challenge = proto._generate_pkce()
             state = proto._generate_state()
             auth_url = proto._build_authorize_url(state, code_challenge, prompt="login")
+        else:
+            raise RuntimeError(f"[Codex][BrowserUse] 不支持的 CODEX_AUTH_URL_SOURCE={auth_source!r}")
 
         logger.info(
             "[Codex][%s] 开始授权：%s proxyCountry=%s profileId=%s local_proxy_arg=%s",
@@ -1346,7 +1354,7 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
             code = proto._extract_code(callback_url, state)
             logger.info("[Codex][BrowserUse] 已捕获 callback code：%s...", code[:24])
 
-            if proto._codex_auth_url_source() == "cpa":
+            if auth_source == "cpa":
                 submit_payload = proto._submit_cpa_callback(callback_url)
                 file_path = proto._save_cpa_local_record(
                     email=email,
@@ -1356,6 +1364,30 @@ def _run_browser_use_codex_oauth_once(email: str, otp_provider=None, proxy: str 
                     submit_payload=submit_payload,
                 )
                 msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
+                _t_all.done("success")
+                return proto._codex_result(
+                    status="success",
+                    ok=True,
+                    email=email,
+                    file_path=str(file_path) if file_path else None,
+                    callback_url=callback_url,
+                    message=str(msg),
+                )
+
+            if auth_source == "sub2":
+                submit_payload = proto._submit_sub2_callback(
+                    callback_url,
+                    session_id=(sub2_auth or {}).get("session_id", ""),
+                    redirect_uri=(proto.parse_qs(proto.urlparse(auth_url or "").query).get("redirect_uri") or [""])[0],
+                )
+                file_path = proto._save_sub2_local_record(
+                    email=email,
+                    callback_url=callback_url,
+                    auth_url=auth_url,
+                    state=state,
+                    submit_payload=submit_payload,
+                )
+                msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
                 _t_all.done("success")
                 return proto._codex_result(
                     status="success",

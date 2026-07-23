@@ -483,6 +483,90 @@ def upsert_sub2api_account(
     }
 
 
+def upload_sub2api_account(
+    auth_json: dict[str, Any],
+    api_url: str,
+    *,
+    api_token: str | None = None,
+    auth_header: str = "Authorization",
+    auth_prefix: str = "Bearer",
+    payload_mode: str = "accounts",
+    proxy_key: str | None = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    """通过 sub2api HTTP API 直接上传/导入 Agent Token。
+
+    标准 Wei-Shaw/sub2api 使用：
+      POST /api/v1/admin/accounts/import/codex-session
+      {"contents":["<auth.json>"],"update_existing":true,...}
+
+    payload_mode:
+      - codex_session_import: sub2api 原生 Codex Session/Agent Identity 导入接口
+      - account:  直接 POST 单个 account 对象
+      - accounts: POST {"accounts": [account]}
+      - config:   POST {"accounts": [account], "proxies": [...]}
+    """
+    url = str(api_url or "").strip()
+    if not url:
+        raise ValueError("SUB2API_API_BASE 为空，无法上传到 sub2api")
+
+    mode = str(payload_mode or "accounts").strip().lower()
+    incoming: dict[str, Any] | None = None
+    if mode in {"codex_session_import", "codex-session-import", "import_codex_session"}:
+        payload = {
+            "contents": [json.dumps(auth_json, ensure_ascii=False)],
+            "update_existing": True,
+            "concurrency": 3,
+            "priority": 50,
+            "confirm_mixed_channel_risk": True,
+        }
+    elif mode == "config":
+        incoming = build_sub2api_account_entry(auth_json, proxy_key=proxy_key)
+        payload = {"accounts": [incoming], "proxies": ([{"proxy_key": str(proxy_key)}] if proxy_key else [])}
+    elif mode == "account":
+        incoming = build_sub2api_account_entry(auth_json, proxy_key=proxy_key)
+        payload = incoming
+    else:
+        incoming = build_sub2api_account_entry(auth_json, proxy_key=proxy_key)
+        payload = {"accounts": [incoming]}
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "turb-gpt-free-register/sub2api",
+    }
+    token = str(api_token or "").strip()
+    header_name = str(auth_header or "Authorization").strip() or "Authorization"
+    prefix = str(auth_prefix or "").strip()
+    if token:
+        headers[header_name] = f"{prefix} {token}".strip() if prefix else token
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    status = int(getattr(resp, "status_code", 0) or 0)
+    text = getattr(resp, "text", "") or ""
+    try:
+        body = resp.json()
+    except Exception:
+        body = {"text": text[:1000]}
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"sub2api 上传失败 HTTP {status}: {text[:800]}")
+
+    return {
+        "ok": True,
+        "uploaded": True,
+        "url": url,
+        "status_code": status,
+        "payload_mode": mode,
+        "email": (incoming or {}).get("extra", {}).get("email") or (
+            (auth_json.get("agent_identity") or {}).get("email") if isinstance(auth_json, dict) else None
+        ),
+        "dedupe_key": _sub2api_dedupe_key(incoming) if incoming else (
+            (auth_json.get("agent_identity") or {}).get("account_id") if isinstance(auth_json, dict) else None
+        ),
+        "response": body,
+    }
+
+
 # ============================================================
 #  完整流程
 # ============================================================

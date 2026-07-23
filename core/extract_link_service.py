@@ -228,7 +228,44 @@ def _iter_sse_events(*, job_id: str, cdk: str):
             pass
 
 
+def _extract_error_message(data) -> str:
+    """尽量从提链服务返回的任意错误结构中提取用户可读原因。"""
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data.strip()
+    if not isinstance(data, dict):
+        return str(data)
+    err = data.get("error")
+    if isinstance(err, dict):
+        for key in ("message", "detail", "reason", "error", "msg", "description"):
+            value = err.get(key)
+            if value:
+                return str(value).strip()
+        return json.dumps(err, ensure_ascii=False)[:500]
+    if err:
+        return str(err).strip()
+    for key in ("message", "detail", "reason", "msg", "description", "raw"):
+        value = data.get(key)
+        if value:
+            return str(value).strip()
+    return json.dumps(data, ensure_ascii=False)[:500]
+
+
+def _format_failure_reason(exc: Exception, logs: list[str] | None = None, last_event: dict | None = None) -> str:
+    reason = f"{type(exc).__name__}: {str(exc)}".strip()
+    if (not str(exc).strip()) and logs:
+        reason = str(logs[-1])
+    if last_event and "提链事件流结束但未返回 result" in reason:
+        extracted = _extract_error_message(last_event.get("data"))
+        if extracted:
+            reason = f"提链事件流结束但未返回 result；最后事件 {last_event.get('event')}: {extracted}"
+    return reason[:500]
+
+
 def _run_extract(*, account_id: int, email: str, access_token: str, link_type: str, cdk: str, trigger: str) -> dict:
+    logs: list[str] = []
+    last_event = None
     try:
         if not db.mark_account_extract_running(account_id):
             return {"ok": False, "error": "账号已删除或提链状态已被重置"}
@@ -242,8 +279,6 @@ def _run_extract(*, account_id: int, email: str, access_token: str, link_type: s
             "message": "提链任务已创建，等待结果",
             "cdk_remaining": job.get("cdk_remaining"),
         })
-        logs = []
-        last_event = None
         for event, data in _iter_sse_events(job_id=job_id, cdk=cdk):
             last_event = {"event": event, "data": data}
             if event == "log":
@@ -266,18 +301,19 @@ def _run_extract(*, account_id: int, email: str, access_token: str, link_type: s
                 logger.info("[提链] 成功: %s type=%s job=%s", email, link_type, job_id)
                 return final
             elif event == "error":
-                err_obj = (data or {}).get("error") if isinstance(data, dict) else None
-                msg = err_obj.get("message") if isinstance(err_obj, dict) else None
+                msg = _extract_error_message(data)
                 raise RuntimeError(msg or "提链任务失败")
             elif event == "done":
                 break
         raise RuntimeError(f"提链事件流结束但未返回 result: {last_event}")
     except Exception as exc:
+        reason = _format_failure_reason(exc, logs=logs, last_event=last_event)
         result = {
             "ok": False,
             "status": "failed",
             "checked_at": datetime.now().isoformat(timespec="seconds"),
-            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            "error": reason,
+            "message": reason,
         }
         try:
             db.update_account_extract(account_id, result)

@@ -53,17 +53,20 @@ def reserve(email: str) -> bool:
             thread_id = _RUNNING_THREADS.get(key)
             alive = _thread_alive(thread_id)
             age = time.time() - float(_RESERVED_AT.get(key) or 0)
+            stop_req = key in _STOP_REQUESTED
             try:
                 acc = db.get_account_by_email(email)
                 status = str((acc or {}).get("codex_status") or "").lower()
             except Exception:
                 status = ""
             # 修复“实际已停止/线程已结束，但进程内占位未释放”导致无法再次补跑。
-            # 有运行线程时仍拒绝；无运行线程且状态已不是 retrying，或占位过久，则视作脏占位清理。
-            if (not alive) and (status != "retrying" or age > 15 * 60):
+            # 用户点停止后，部分浏览器/短信等待步骤可能不会立刻退出，UI 已是 stopped 但进程占位仍在。
+            # 这种场景允许清理占位后重新补跑；旧线程仍保留 stop_requested，会在检查点退出。
+            terminal_status = status in {"stopped", "failed", "success", "deactivated", "skipped", "cancelled"}
+            if ((not alive) and (status != "retrying" or age > 15 * 60)) or (terminal_status and (stop_req or age > 30)):
                 logger.warning(
-                    "[Codex 补跑] 清理脏占位：email=%s status=%s thread_id=%s alive=%s age=%.1fs",
-                    email, status or "-", thread_id or "-", alive, age,
+                    "[Codex 补跑] 清理脏占位：email=%s status=%s thread_id=%s alive=%s stop_requested=%s age=%.1fs",
+                    email, status or "-", thread_id or "-", alive, stop_req, age,
                 )
                 _clear_state_locked(key)
             else:
@@ -131,6 +134,23 @@ def request_stop(email: str) -> dict:
     with _RETRYING_LOCK:
         if not _thread_alive(thread_id):
             _clear_state_locked(key)
+    if injected:
+        # 异常注入通常会很快让线程进入 finally/release；若浏览器/CDP/短信等待阻塞导致线程
+        # 短时间内仍未退出，延迟清理占位，避免 UI 已显示“已停止”但再次补跑仍 409。
+        def _delayed_release() -> None:
+            time.sleep(5)
+            with _RETRYING_LOCK:
+                if key in _RETRYING and key in _STOP_REQUESTED:
+                    try:
+                        acc = db.get_account_by_email(email)
+                        status = str((acc or {}).get("codex_status") or "").lower()
+                    except Exception:
+                        status = ""
+                    if status == "stopped":
+                        logger.warning("[Codex 补跑] 停止后延迟释放占位：email=%s thread_id=%s", email, thread_id or "-")
+                        _clear_state_locked(key)
+
+        threading.Thread(target=_delayed_release, name=f"codex-stop-release-{key}", daemon=True).start()
     try:
         p = log_path(email)
         p.parent.mkdir(parents=True, exist_ok=True)

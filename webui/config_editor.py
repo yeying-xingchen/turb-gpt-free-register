@@ -247,7 +247,7 @@ EDITABLE_FIELDS = [
         "label": "删除接口路径", "help": "默认 /browser/delete；如 Roxy 版本不同可调整",
     },
     {
-        "key": "CODEX_OAUTH_DRIVER", "file": "codex.py", "type": "str", "group": "CPA / Codex",
+        "key": "CODEX_OAUTH_DRIVER", "file": "codex.py", "type": "str", "group": "Codex",
         "label": "Codex授权驱动", "help": "protocol=原协议授权；roxy=用 RoxyBrowser；cloak=用 CloakBrowser；browser_use=用 Browser Use Cloud；skyvern=用 Skyvern；same_as_registration=跟随注册驱动",
     },
     {
@@ -487,40 +487,56 @@ EDITABLE_FIELDS = [
         "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",
         "label": "提链并发数", "help": "批量提链后台线程数，建议 1-4",
     },
-    # ---- sub2api ----
+    # ---- Codex 配置 ----
     {
-        "key": "SUB2API_AUTO_EXPORT", "file": "sub2api.py", "type": "bool", "group": "sub2api",
-        "label": "自动同步 sub2api", "help": "生成 Codex Agent Token 成功后自动追加/更新到 sub2api.json",
+        "key": "SUB2API_AUTO_EXPORT", "file": "sub2api.py", "type": "bool", "group": "Codex",
+        "label": "Agent sub2 自动同步", "help": "生成 Codex Agent Token 成功后自动同步到 sub2api",
     },
     {
-        "key": "SUB2API_OUTPUT_PATH", "file": "sub2api.py", "type": "str", "group": "sub2api",
-        "label": "sub2api 输出路径", "help": "相对路径按项目根目录解析，例如 sub2api.json",
+        "key": "SUB2API_SYNC_MODE", "file": "sub2api.py", "type": "str", "group": "Codex",
+        "label": "Agent sub2 同步模式", "help": "api=直接上传接口；file=写本地json；both=接口+本地json",
     },
     {
-        "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "sub2api",
-        "label": "sub2api 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
+        "key": "SUB2API_API_BASE", "file": "sub2api.py", "type": "str", "group": "Codex",
+        "label": "sub2 API基址", "help": "sub2api 服务地址；Agent Token 上传和 Codex OAuth 共用，例如 http://127.0.0.1:8080",
+    },
+    {
+        "key": "SUB2API_API_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
+        "label": "sub2 API Key", "help": "sub2api 管理接口 API Key；请求头使用 x-api-key；为空则不带鉴权头", "storage": "env", "secret": True,
+    },
+    {
+        "key": "SUB2API_API_TIMEOUT", "file": "sub2api.py", "type": "int", "group": "Codex",
+        "label": "sub2 超时", "help": "sub2api 请求超时秒数",
+    },
+    {
+        "key": "SUB2API_OUTPUT_PATH", "file": "sub2api.py", "type": "str", "group": "Codex",
+        "label": "Agent sub2 本地路径", "help": "仅 SUB2API_SYNC_MODE=file/both 时使用；相对路径按项目根目录解析",
+    },
+    {
+        "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
+        "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
     },
     # ---- 接码平台 ----
-    # ---- CPA / Codex 授权 ----
+    # ---- Codex：基础 / CPA / sub2api 配置 ----
     {
-        "key": "CODEX_AUTH_URL_SOURCE", "file": "codex.py", "type": "str", "group": "CPA / Codex",
-        "label": "授权地址来源", "help": "cpa=由 CPA 管理接口生成授权地址；local=旧版本地生成 PKCE 授权地址",
+        "key": "CODEX_AUTH_URL_SOURCE", "file": "codex.py", "type": "str", "group": "Codex",
+        "label": "授权地址来源", "help": "cpa=CPA生成并上传CPA；sub2=sub2生成并上传sub2；local=本地PKCE",
     },
     {
-        "key": "CPA_MANAGEMENT_URL", "file": "codex.py", "type": "str", "group": "CPA / Codex",
+        "key": "CPA_MANAGEMENT_URL", "file": "codex.py", "type": "str", "group": "Codex",
         "label": "CPA 管理地址", "help": "例如 http://localhost:8317/admin/oauth；程序会取 origin 调用 /v0/management/*",
     },
     {
-        "key": "CPA_MANAGEMENT_KEY", "file": "codex.py", "type": "str", "group": "CPA / Codex",
+        "key": "CPA_MANAGEMENT_KEY", "file": "codex.py", "type": "str", "group": "Codex",
         "label": "管理密钥", "help": "保存在 .env（CPA_MANAGEMENT_KEY），不写回 config/*.py",
         "storage": "env", "secret": True,
     },
     {
-        "key": "CPA_REQUEST_TIMEOUT", "file": "codex.py", "type": "int", "group": "CPA / Codex",
+        "key": "CPA_REQUEST_TIMEOUT", "file": "codex.py", "type": "int", "group": "Codex",
         "label": "CPA 超时(秒)", "help": "请求 CPA 管理接口的超时时间",
     },
     {
-        "key": "CPA_SAVE_CALLBACK_RECEIPT", "file": "codex.py", "type": "bool", "group": "CPA / Codex",
+        "key": "CPA_SAVE_CALLBACK_RECEIPT", "file": "codex.py", "type": "bool", "group": "Codex",
         "label": "保存CPA回执", "help": "CPA 未返回完整授权文件时，本地仍保存一份回调提交记录",
     },
 

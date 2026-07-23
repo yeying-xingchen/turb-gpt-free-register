@@ -536,6 +536,21 @@ def _decorate_account(row: dict) -> dict:
     return out
 
 
+def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> bool:
+    """账号套餐过滤。plus 表示已开通 Plus（兼容 plus/chatgpt_plus/plus_trial 等标记）。"""
+    f = str(plan_filter or "").strip().lower()
+    if not f or f in {"all", "any"}:
+        return True
+    plan = str(row.get("current_plan_type") or row.get("plan_type") or "").strip().lower()
+    if f == "plus":
+        # “free(可Plus试用)”/plus_trial_eligible 只是可试用，不算已开通 Plus。
+        # 只有套餐字段本身是 Plus/ChatGPT Plus/plus_* 且不含 free 时才命中。
+        return "plus" in plan and "free" not in plan
+    if f == "free":
+        return plan == "free"
+    return plan == f
+
+
 def _decorate_outlook(row: dict, account_by_email: dict[str, dict] | None = None) -> dict:
     out = dict(row)
     out["copy_line"] = _outlook_line(out)
@@ -761,6 +776,8 @@ def update_account_codex_agent(acc_id: int, result: dict | None = None) -> bool:
             "codex_agent_max_attempts",
             "codex_agent_request_timeout",
             "codex_agent_sub2api_path",
+            "codex_agent_sub2api_url",
+            "codex_agent_sub2api_mode",
             "codex_agent_sub2api_total",
         ):
             src_key = _k.replace("codex_agent_", "", 1)
@@ -1055,10 +1072,10 @@ def recover_interrupted_extract_links() -> int:
         return recovered
 
 
-def list_account_plan_check_statuses(limit: int = 5000) -> dict:
+def list_account_plan_check_statuses(limit: int = 5000, archived: str | bool | None = False, plan_filter: str | None = None) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
-        "id", "email", "updated_at", "plan_type", "current_plan_type",
+        "id", "email", "updated_at", "archived", "archived_at", "plan_type", "current_plan_type",
         "plan_check_status", "plan_check_trigger", "plan_check_queued_at",
         "plan_check_started_at", "plan_check_completed_at", "plan_check_ok",
         "plan_check_error", "plan_checked_at", "plan_last_success_at",
@@ -1076,22 +1093,39 @@ def list_account_plan_check_statuses(limit: int = 5000) -> dict:
         "codex_agent_network_route", "codex_agent_proxy_mode", "codex_agent_proxy_used",
         "codex_agent_proxy_fallback_reason", "codex_agent_device_id", "codex_agent_oai_session_id",
         "codex_agent_attempt_count", "codex_agent_max_attempts", "codex_agent_request_timeout",
-        "codex_agent_sub2api_path", "codex_agent_sub2api_total",
+        "codex_agent_sub2api_path", "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
     )
     with _LOCK:
-        rows = sorted(_load_accounts(), key=lambda x: int(x.get("id") or 0), reverse=True)[:max(1, int(limit))]
+        all_rows = _load_accounts()
+        if archived in (True, "1", "true", "yes", "only"):
+            all_rows = [r for r in all_rows if bool(r.get("archived"))]
+        elif archived in ("all", "include"):
+            pass
+        else:
+            all_rows = [r for r in all_rows if not bool(r.get("archived"))]
+        decorated_rows = [_decorate_account(r) for r in all_rows]
+        decorated_rows = [r for r in decorated_rows if _account_matches_plan_filter(r, plan_filter)]
+        rows = sorted(decorated_rows, key=lambda x: int(x.get("id") or 0), reverse=True)[:max(1, int(limit))]
         items = []
         for row in rows:
-            decorated = _decorate_account(row)
-            items.append({key: decorated.get(key) for key in fields})
+            items.append({key: row.get(key) for key in fields})
         latest = max((str(row.get("updated_at") or "") for row in rows), default="")
         return {"items": items, "revision": f"{len(rows)}:{latest}"}
 
 
-def list_accounts(limit: int = 500, offset: int = 0) -> list[dict]:
+def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None) -> list[dict]:
     with _LOCK:
-        rows = sorted(_load_accounts(), key=lambda x: int(x.get("id") or 0), reverse=True)
-        return [_decorate_account(r) for r in rows[offset: offset + limit]]
+        rows = _load_accounts()
+        if archived in (True, "1", "true", "yes", "only"):
+            rows = [r for r in rows if bool(r.get("archived"))]
+        elif archived in ("all", "include"):
+            pass
+        else:
+            rows = [r for r in rows if not bool(r.get("archived"))]
+        decorated = [_decorate_account(r) for r in rows]
+        decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
+        rows = sorted(decorated, key=lambda x: int(x.get("id") or 0), reverse=True)
+        return rows[offset: offset + limit]
 
 
 def get_account(acc_id: int) -> dict | None:
@@ -1142,6 +1176,46 @@ def update_accounts_note(account_ids: list[int] | None, note: str) -> tuple[list
             row["note_updated_at"] = now
             row["updated_at"] = now
             updated.append({"id": row_id, "email": row.get("email"), "note": text, "note_updated_at": now})
+            seen_ids.add(row_id)
+        for item in ids - seen_ids:
+            skipped.append({"id": item, "reason": "账号不存在"})
+        if updated:
+            _save_accounts(rows)
+    return updated, skipped
+
+
+def archive_account(acc_id: int, archived: bool = True) -> bool:
+    """归档/取消归档单个已注册账号。归档不会删除 token，只影响默认账号列表查询。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        now = _now()
+        row["archived"] = bool(archived)
+        row["archived_at"] = now if archived else None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def archive_accounts(account_ids: list[int] | None, archived: bool = True) -> tuple[list[dict], list[dict]]:
+    """批量归档/取消归档账号。返回 (updated, skipped)。"""
+    ids = {int(x) for x in (account_ids or []) if str(x).strip().lstrip("-").isdigit()}
+    updated: list[dict] = []
+    skipped: list[dict] = []
+    with _LOCK:
+        rows = _load_accounts()
+        seen_ids: set[int] = set()
+        now = _now()
+        for row in rows:
+            row_id = int(row.get("id") or 0)
+            if row_id not in ids:
+                continue
+            row["archived"] = bool(archived)
+            row["archived_at"] = now if archived else None
+            row["updated_at"] = now
+            updated.append({"id": row_id, "email": row.get("email"), "archived": bool(archived), "archived_at": row.get("archived_at")})
             seen_ids.add(row_id)
         for item in ids - seen_ids:
             skipped.append({"id": item, "reason": "账号不存在"})

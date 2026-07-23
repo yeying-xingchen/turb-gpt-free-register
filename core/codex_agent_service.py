@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from config import proxy as proxy_cfg
 from core import db
@@ -17,6 +18,26 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _OUTPUT_DIR = _PROJECT_ROOT / "codex_agent_accounts"
+
+
+def _join_sub2_url(base: str, path: str) -> str:
+    base = str(base or "").strip().rstrip("/")
+    path = str(path or "").strip()
+    if not base or not path:
+        return ""
+    parsed = urlparse(path)
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return path
+    return f"{base}/{path.lstrip('/')}"
+
+
+def _sub2_codex_session_import_url() -> str:
+    from config import sub2api as sub2api_cfg
+    api_base = str(getattr(sub2api_cfg, "SUB2API_API_BASE", "") or "").strip()
+    if api_base:
+        return _join_sub2_url(api_base, "/api/v1/admin/accounts/import/codex-session")
+    # 兼容旧配置：之前 SUB2API_API_URL 是完整上传接口 URL。
+    return str(getattr(sub2api_cfg, "SUB2API_API_URL", "") or "").strip()
 
 
 def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
@@ -160,20 +181,63 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         try:
             from config import sub2api as sub2api_cfg
             if bool(getattr(sub2api_cfg, "SUB2API_AUTO_EXPORT", True)):
-                from core.codex_agent import upsert_sub2api_account
-                output = str(getattr(sub2api_cfg, "SUB2API_OUTPUT_PATH", "sub2api.json") or "sub2api.json").strip()
-                sub2api_output_path = Path(output)
-                if not sub2api_output_path.is_absolute():
-                    sub2api_output_path = _PROJECT_ROOT / sub2api_output_path
+                from core.codex_agent import upsert_sub2api_account, upload_sub2api_account
+                mode = str(getattr(sub2api_cfg, "SUB2API_SYNC_MODE", "api") or "api").strip().lower()
+                if mode not in {"api", "file", "both"}:
+                    logger.warning("[CodexAgent] SUB2API_SYNC_MODE=%s 不合法，已按 api 处理", mode)
+                    mode = "api"
                 proxy_key = str(getattr(sub2api_cfg, "SUB2API_PROXY_KEY", "") or "").strip() or None
-                sub2api_result = upsert_sub2api_account(auth_json, sub2api_output_path, proxy_key=proxy_key)
-                logger.info(
-                    "[CodexAgent] 已同步 sub2api: %s path=%s action=%s total=%s",
-                    email,
-                    sub2api_result.get("path"),
-                    "updated" if sub2api_result.get("updated") else "added",
-                    sub2api_result.get("total"),
-                )
+
+                results: list[dict] = []
+                if mode in ("api", "both"):
+                    api_url = _sub2_codex_session_import_url()
+                    api_token = str(getattr(sub2api_cfg, "SUB2API_API_KEY", "") or getattr(sub2api_cfg, "SUB2API_API_TOKEN", "") or "").strip()
+                    auth_header = str(getattr(sub2api_cfg, "SUB2API_API_AUTH_HEADER", "x-api-key") or "x-api-key").strip()
+                    auth_prefix = str(getattr(sub2api_cfg, "SUB2API_API_AUTH_PREFIX", "") or "").strip()
+                    payload_mode = "codex_session_import"
+                    api_timeout = float(getattr(sub2api_cfg, "SUB2API_API_TIMEOUT", 20) or 20)
+                    api_result = upload_sub2api_account(
+                        auth_json,
+                        api_url,
+                        api_token=api_token,
+                        auth_header=auth_header,
+                        auth_prefix=auth_prefix,
+                        payload_mode=payload_mode,
+                        proxy_key=proxy_key,
+                        timeout=api_timeout,
+                    )
+                    results.append({"mode": "api", **api_result})
+                    logger.info(
+                        "[CodexAgent] 已通过 API 上传 sub2api: %s url=%s status=%s payload=%s",
+                        email,
+                        api_result.get("url"),
+                        api_result.get("status_code"),
+                        api_result.get("payload_mode"),
+                    )
+
+                if mode in ("file", "both"):
+                    output = str(getattr(sub2api_cfg, "SUB2API_OUTPUT_PATH", "sub2api.json") or "sub2api.json").strip()
+                    sub2api_output_path = Path(output)
+                    if not sub2api_output_path.is_absolute():
+                        sub2api_output_path = _PROJECT_ROOT / sub2api_output_path
+                    file_result = upsert_sub2api_account(auth_json, sub2api_output_path, proxy_key=proxy_key)
+                    results.append({"mode": "file", **file_result})
+                    logger.info(
+                        "[CodexAgent] 已同步本地 sub2api: %s path=%s action=%s total=%s",
+                        email,
+                        file_result.get("path"),
+                        "updated" if file_result.get("updated") else "added",
+                        file_result.get("total"),
+                    )
+
+                sub2api_result = {
+                    "ok": True,
+                    "mode": mode,
+                    "results": results,
+                    "path": next((r.get("path") for r in results if r.get("path")), None),
+                    "url": next((r.get("url") for r in results if r.get("url")), None),
+                    "total": next((r.get("total") for r in results if r.get("total") is not None), None),
+                }
         except Exception as sub_exc:
             logger.warning("[CodexAgent] 同步 sub2api 失败（不影响 Agent Token）: %s: %s", type(sub_exc).__name__, str(sub_exc)[:180])
         result = {
@@ -185,6 +249,8 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
             "auth_path": str(output_path),
             "auth_json": auth_json,
             "sub2api_path": (sub2api_result or {}).get("path"),
+            "sub2api_url": (sub2api_result or {}).get("url"),
+            "sub2api_mode": (sub2api_result or {}).get("mode"),
             "sub2api_total": (sub2api_result or {}).get("total"),
             "network_route": route_meta.get("network_route"),
             "proxy_mode": route_meta.get("proxy_mode"),

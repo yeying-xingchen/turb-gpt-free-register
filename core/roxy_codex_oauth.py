@@ -1231,6 +1231,11 @@ def _run_roxy_codex_oauth_once(
             state = cpa_auth["state"]
             auth_url = cpa_auth["auth_url"]
             logger.info("[Codex][Browser] 当前使用 CPA 授权地址: %s", auth_url)
+        elif auth_source == "sub2":
+            sub2_auth = proto._request_sub2_authorize_url()
+            state = sub2_auth["state"]
+            auth_url = sub2_auth["auth_url"]
+            logger.info("[Codex][Browser] 当前使用 sub2 授权地址: %s", auth_url)
         elif auth_source == "local":
             code_verifier, code_challenge = proto._generate_pkce()
             state = proto._generate_state()
@@ -1266,6 +1271,29 @@ def _run_roxy_codex_oauth_once(
                 submit_payload=submit_payload,
             )
             msg = submit_payload.get("message") or submit_payload.get("status_message") or "CPA callback submitted"
+            return proto._codex_result(
+                status="success",
+                ok=True,
+                email=email,
+                file_path=str(path) if path else None,
+                callback_url=callback_url,
+                message=f"{_codex_driver_name()}: {msg}",
+            )
+
+        if auth_source == "sub2":
+            submit_payload = proto._submit_sub2_callback(
+                callback_url,
+                session_id=(sub2_auth or {}).get("session_id", ""),
+                redirect_uri=(proto.parse_qs(proto.urlparse(auth_url or "").query).get("redirect_uri") or [""])[0],
+            )
+            path = proto._save_sub2_local_record(
+                email=email,
+                callback_url=callback_url,
+                auth_url=auth_url,
+                state=state,
+                submit_payload=submit_payload,
+            )
+            msg = submit_payload.get("message") or submit_payload.get("status_message") or "sub2 callback uploaded"
             return proto._codex_result(
                 status="success",
                 ok=True,
