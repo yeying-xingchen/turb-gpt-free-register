@@ -18,6 +18,8 @@ import hashlib
 import json
 import logging
 import os
+import random
+import string
 import sys
 import time
 import uuid
@@ -235,6 +237,7 @@ def register_agent(
     public_key_ssh: str,
     env: Any | None = None,
     timeout: int = 15,
+    display_name: str | None = None,
 ) -> str:
     """
     在 auth.openai.com 注册 agent。
@@ -243,20 +246,47 @@ def register_agent(
     :param public_key_ssh: SSH 格式的 Ed25519 公钥
     :return: agent_runtime_id
     """
+    name = str(display_name or "").strip() or _random_agent_display_name()
+    payload = {
+        "abom": {
+            "agent_version": AGENT_VERSION,
+            "agent_harness_id": AGENT_HARNESS_ID,
+            "running_location": RUNNING_LOCATION,
+            # OpenAI Agent 场景也使用本轮随机名称，避免固定同一个展示名。
+            "display_name": name,
+            "agent_name": name,
+        },
+        "agent_public_key": public_key_ssh,
+        "display_name": name,
+        "agent_name": name,
+        "name": name,
+    }
+
     r = _agent_post(
         f"{AUTHAPI_BASE}/v1/agent/register",
         access_token=access_token,
         env=env,
         timeout=timeout,
-        payload={
-            "abom": {
-                "agent_version": AGENT_VERSION,
-                "agent_harness_id": AGENT_HARNESS_ID,
-                "running_location": RUNNING_LOCATION,
-            },
-            "agent_public_key": public_key_ssh,
-        },
+        payload=payload,
     )
+
+    # 兼容 OpenAI 接口严格校验未知字段的情况：如果命名字段不被接受，回退到原始协议。
+    if r.status_code == 400 and any(x in (r.text or "").lower() for x in ("unknown", "unrecognized", "extra", "invalid")):
+        _log("Step 3", f"OpenAI Agent 注册接口不接受名称字段，回退原始 payload: {r.text[:180]}", "WARN")
+        r = _agent_post(
+            f"{AUTHAPI_BASE}/v1/agent/register",
+            access_token=access_token,
+            env=env,
+            timeout=timeout,
+            payload={
+                "abom": {
+                    "agent_version": AGENT_VERSION,
+                    "agent_harness_id": AGENT_HARNESS_ID,
+                    "running_location": RUNNING_LOCATION,
+                },
+                "agent_public_key": public_key_ssh,
+            },
+        )
 
     if r.status_code != 200:
         raise RuntimeError(f"Agent registration failed: {r.status_code} {r.text}")
@@ -322,6 +352,22 @@ def register_task(
 #  auth.json 生成
 # ============================================================
 
+def _random_agent_display_name() -> str:
+    """生成随机 Agent 名称，避免 sub2api 账号名直接暴露邮箱前缀。"""
+    adjectives = [
+        "Amber", "Blue", "Cedar", "Delta", "Echo", "Falcon", "Golden", "Harbor",
+        "Ivory", "Jade", "Lunar", "Nova", "Orion", "Pine", "Quartz", "River",
+        "Silver", "Summit", "Vertex", "Willow",
+    ]
+    nouns = [
+        "Agent", "Bridge", "Comet", "Drift", "Field", "Garden", "Harbor", "Island",
+        "Kernel", "Lantern", "Matrix", "Node", "Orbit", "Pilot", "Relay", "Signal",
+        "Stone", "Tower", "Vector", "Worker",
+    ]
+    suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    return f"{random.choice(adjectives)} {random.choice(nouns)} {suffix}"
+
+
 def generate_auth_json(
     agent_runtime_id: str,
     private_key_pkcs8_b64: str,
@@ -330,6 +376,7 @@ def generate_auth_json(
     email: str,
     plan_type: str = "free",
     chatgpt_account_is_fedramp: bool = False,
+    display_name: str | None = None,
 ) -> dict[str, Any]:
     """
     生成 Codex CLI 的 auth.json。
@@ -344,6 +391,7 @@ def generate_auth_json(
             "account_id": account_id,
             "chatgpt_user_id": chatgpt_user_id,
             "email": email,
+            "name": email,
             "plan_type": plan_type,
             "chatgpt_account_is_fedramp": chatgpt_account_is_fedramp,
         },
@@ -369,12 +417,13 @@ def build_sub2api_account_entry(
     account_id = str(identity.get("account_id") or "").strip()
     chatgpt_user_id = str(identity.get("chatgpt_user_id") or "").strip()
     email = str(identity.get("email") or "").strip()
+    display_name = email or str(identity.get("name") or identity.get("display_name") or "").strip() or f"agent-{agent_runtime_id[:8]}"
     plan_type = str(identity.get("plan_type") or "free").strip() or "free"
     if not agent_runtime_id or not agent_private_key:
         raise ValueError("agent_identity 缺少 agent_runtime_id/agent_private_key")
 
     entry = {
-        "name": email.split("@", 1)[0] if email else f"agent-{agent_runtime_id[:8]}",
+        "name": display_name,
         "platform": "openai",
         "type": "agent_identity",
         "credentials": {
@@ -384,6 +433,7 @@ def build_sub2api_account_entry(
             "chatgpt_account_id": account_id,
             "chatgpt_user_id": chatgpt_user_id,
             "email": email,
+            "name": email,
             "plan_type": plan_type,
             "chatgpt_account_is_fedramp": bool(identity.get("chatgpt_account_is_fedramp", False)),
         },
@@ -513,8 +563,10 @@ def upload_sub2api_account(
     mode = str(payload_mode or "accounts").strip().lower()
     incoming: dict[str, Any] | None = None
     if mode in {"codex_session_import", "codex-session-import", "import_codex_session"}:
+        identity = auth_json.get("agent_identity") if isinstance(auth_json, dict) else {}
         payload = {
             "contents": [json.dumps(auth_json, ensure_ascii=False)],
+            "name": str((identity or {}).get("email") or "").strip() or str((identity or {}).get("name") or "").strip() or _random_agent_display_name(),
             "update_existing": True,
             "concurrency": 3,
             "priority": 50,
@@ -611,8 +663,9 @@ def create_codex_agent_identity(
     _log("Step 2", f"public_key_fingerprint={_fingerprint(public_key_ssh)}", "OK")
 
     # Step 3: 注册 agent
-    _log("Step 3", "在 auth.openai.com 注册 agent...")
-    agent_runtime_id = register_agent(access_token, public_key_ssh, env=env, timeout=timeout)
+    agent_display_name = _random_agent_display_name()
+    _log("Step 3", f"在 auth.openai.com 注册 agent，display_name={agent_display_name}...")
+    agent_runtime_id = register_agent(access_token, public_key_ssh, env=env, timeout=timeout, display_name=agent_display_name)
     _log("Step 3", f"agent_runtime_id={agent_runtime_id}", "OK")
 
     # Step 4: 验证 task 注册（可选）
@@ -634,6 +687,7 @@ def create_codex_agent_identity(
         email=email,
         plan_type=plan_type,
         chatgpt_account_is_fedramp=False,
+        display_name=email,
     )
 
     if output_path is None:
