@@ -1692,30 +1692,22 @@ async function downloadSelectedCpa() {
   btn.disabled = true;
   btn.textContent = '下载中…';
   try {
-    // 用原生表单 POST 触发 attachment 下载，避免 fetch -> blob/objectURL 被浏览器标记为“不安全下载”。
-    // 返回的是同源 HTTP 响应，浏览器会按普通文件下载处理。
-    const frameName = 'accountsCpaDownloadFrame';
-    let iframe = document.querySelector(`iframe[name="${frameName}"]`);
-    if (!iframe) {
-      iframe = document.createElement('iframe');
-      iframe.name = frameName;
-      iframe.style.display = 'none';
-      document.body.appendChild(iframe);
-    }
-    const form = document.createElement('form');
-    form.method = 'POST';
-    form.action = '/api/accounts/download-cpa-bulk';
-    form.target = frameName;
-    form.style.display = 'none';
-    const input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = 'account_ids';
-    input.value = JSON.stringify(ids);
-    form.appendChild(input);
-    document.body.appendChild(form);
-    form.submit();
-    setTimeout(() => form.remove(), 30000);
-    showToast('已提交下载，浏览器会直接保存 ZIP');
+    // 先由服务端准备 ZIP，再用同源 GET 顶层下载。
+    // 这样比隐藏 iframe / blob URL 更像普通用户点击下载，Chrome 不容易挂起或标记“不安全下载”。
+    const r = await api('/api/accounts/download-cpa-bulk', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids, prepare: true}),
+    });
+    if (!r.download_url) throw new Error('服务端未返回下载地址');
+    const a = document.createElement('a');
+    a.href = r.download_url;
+    a.download = r.filename || '';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 1000);
+    showToast(`已生成 ZIP，开始下载${r.error_count ? `（${r.error_count} 个失败见 manifest）` : ''}`);
     setTimeout(loadCodex, 1200);
   } catch(err) {
     showToast('下载 CPA 失败: ' + err.message);

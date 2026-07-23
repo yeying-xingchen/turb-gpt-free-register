@@ -12,6 +12,8 @@ Flask 本地控制台。
 """
 import logging
 import threading
+import time
+import uuid
 from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -44,6 +46,44 @@ def _with_pool_source(rows: list[dict], source: str) -> list[dict]:
 
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
+    _prepared_downloads: dict[str, dict] = {}
+
+    def _put_prepared_download(content: bytes, filename: str, mimetype: str = "application/zip") -> str:
+        now = time.time()
+        # 顺手清理 10 分钟前的临时下载，避免内存堆积。
+        for k, v in list(_prepared_downloads.items()):
+            if now - float(v.get("created_at") or 0) > 600:
+                _prepared_downloads.pop(k, None)
+        download_id = uuid.uuid4().hex
+        _prepared_downloads[download_id] = {
+            "content": bytes(content),
+            "filename": filename,
+            "mimetype": mimetype,
+            "created_at": now,
+        }
+        return download_id
+
+    @app.get("/api/downloads/<download_id>")
+    def api_prepared_download(download_id: str):
+        item = _prepared_downloads.pop(str(download_id or ""), None)
+        if not item:
+            return jsonify({"ok": False, "error": "下载已过期或不存在，请重新生成"}), 404
+        content = item.get("content") or b""
+        filename = item.get("filename") or "download.zip"
+        mimetype = item.get("mimetype") or "application/octet-stream"
+        return Response(
+            content,
+            mimetype=mimetype,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(content)),
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+                "X-Download-Options": "noopen",
+            },
+        )
+
     init_auth(app, auth_code=auth_code)
     register_auth_routes(app)
     recovered_plan_checks = db.recover_interrupted_plan_checks()
@@ -926,14 +966,27 @@ def create_app(auth_code: str | None = None) -> Flask:
         dl_name = f"accounts-cpa-bulk-{now.strftime('%Y%m%d-%H%M%S')}.zip"
         buf.seek(0)
         zip_bytes = buf.getvalue()
+        if isinstance(data, dict) and data.get("prepare"):
+            download_id = _put_prepared_download(zip_bytes, dl_name, "application/zip")
+            return jsonify({
+                "ok": True,
+                "prepared": True,
+                "download_id": download_id,
+                "download_url": f"/api/downloads/{download_id}",
+                "filename": dl_name,
+                "added_count": len(added),
+                "error_count": len(errors),
+            })
         return Response(
             zip_bytes,
             mimetype="application/zip",
             headers={
                 "Content-Disposition": f'attachment; filename="{dl_name}"',
                 "Content-Length": str(len(zip_bytes)),
-                "Cache-Control": "no-store",
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
                 "X-Content-Type-Options": "nosniff",
+                "X-Download-Options": "noopen",
             },
         )
 
