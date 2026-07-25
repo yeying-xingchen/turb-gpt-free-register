@@ -1278,7 +1278,8 @@ function _planCell(r) {
   const lower = plan.toLowerCase();
 
   if (lower === 'free') {
-    if (!r.plan_checked_at && ok !== true) {
+    const checkedOk = ok === true || r.plan_check_status === 'success';
+    if (!checkedOk) {
       return `<span class="pill status-running" title="${title}">${esc(plan)}（待查资格）</span>`;
     }
     const text = r.plus_trial_eligible ? 'free(可Plus试用)' : 'free';
