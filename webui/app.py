@@ -44,6 +44,128 @@ def _with_pool_source(rows: list[dict], source: str) -> list[dict]:
     return out
 
 
+
+
+def _matches_query(row: dict, q: str | None) -> bool:
+    q = str(q or "").strip().lower()
+    if not q:
+        return True
+    try:
+        return q in "\n".join(str(v) for v in row.values()).lower()
+    except Exception:
+        return False
+
+
+def _paginate_items(items: list[dict], *, page: int, page_size: int) -> dict:
+    page = max(1, int(page or 1))
+    page_size = max(1, min(500, int(page_size or 50)))
+    total = len(items)
+    offset = (page - 1) * page_size
+    return {
+        "ok": True,
+        "items": items[offset:offset + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "offset": offset,
+        "limit": page_size,
+    }
+
+
+def _compact_account_for_list(row: dict) -> dict:
+    """账号列表轻量对象：只返回当前表格渲染和按钮判断必需字段。
+
+    原则：
+    - 不返回完整 Token / Token 预览 / TOTP Secret / Agent Token。
+    - 时间戳、错误原因、提链详情等只在前端确实要展示时返回；空值不返回。
+    - 复制/下载敏感内容时再通过 /secret 接口按需读取。
+    """
+    out = {
+        "id": row.get("id"),
+        "email": row.get("email"),
+        "has_access_token": bool(str(row.get("access_token") or "").strip()),
+        "totp_enabled": bool(row.get("totp_secret")),
+        "codex_agent_has_token": bool(str(row.get("codex_agent_token") or "").strip()),
+    }
+
+    # 这些是列表固定列直接展示字段。
+    for key in (
+        "user_name", "email_source", "note", "archived", "created_at",
+        "plan_type", "current_plan_type", "plus_trial_eligible",
+        "plan_check_status", "codex_status", "codex_agent_status",
+    ):
+        if key in row:
+            out[key] = row.get(key)
+
+    if row.get("plan_check_status") in ("queued", "running") or row.get("plan_check_ok") is False:
+        out["plan_check_ok"] = row.get("plan_check_ok")
+
+    # 下面字段仅在有值时返回，避免每行堆满 null/空字符串/内部状态。
+    optional_keys = (
+        # 套餐展示补充：付费到期/折扣/失败原因。
+        "plan_check_error", "plan_expires_at", "plan_renews_at", "renews_at",
+        "billing_period", "billing_currency", "discount_amount", "discount_type",
+        "discount_expires_at", "discount_promo_campaign_id",
+        # 提链成功/失败时才需要。
+        "extract_link_status", "extract_link_type", "extract_link_message", "extract_link_error",
+        "extract_link_long_url", "extract_link_copy_paste", "extract_link_image_url_png",
+        "extract_link_image_url_svg", "extract_link_expires_at",
+        # Codex / Agent 状态提示。
+        "codex_error", "codex_agent_message", "codex_agent_runtime_id",
+        "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
+    )
+    for key in optional_keys:
+        value = row.get(key)
+        if value is not None and value != "":
+            out[key] = value
+    plan = str(row.get("current_plan_type") or row.get("plan_type") or "").lower()
+    if any(x in plan for x in ("plus", "pro", "team", "go")):
+        expire = row.get("expires_at")
+        if expire:
+            out["expires_at"] = expire
+    return out
+
+
+def _account_secret_value(row: dict, field: str) -> str:
+    field = (field or "").strip()
+    if field == "access_token":
+        return str(row.get("access_token") or "")
+    if field == "copy_line":
+        return str(row.get("copy_line") or "")
+    if field == "codex_agent_token":
+        return str(row.get("codex_agent_token") or "")
+    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token")
+
+
+def _compact_job_for_list(row: dict) -> dict:
+    """注册任务列表轻量对象：只返回表格展示和按钮判断需要的字段。"""
+    out = {
+        "id": row.get("id"),
+        "status": row.get("status"),
+    }
+    for key in (
+        "parent_job_id", "retry_attempt", "email", "started_at", "completed_at",
+        "display_status", "retryable", "retry_action", "retry_label",
+        "manual_otp_required",
+    ):
+        value = row.get(key)
+        if value is not None and value != "" and value is not False:
+            out[key] = value
+    err = str(row.get("error_message") or "").strip()
+    if err:
+        # 列表只需要摘要；完整错误和堆栈看“补跑日志”。
+        out["error_message"] = err[:240] + ("…" if len(err) > 240 else "")
+    return out
+
+
+def _job_status_counts(rows: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    counts["active"] = sum(int(counts.get(s, 0) or 0) for s in ("pending", "running", "stopping"))
+    return counts
+
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     _prepared_downloads: dict[str, dict] = {}
@@ -143,7 +265,20 @@ def create_app(auth_code: str | None = None) -> Flask:
         limit = request.args.get("limit", default=500, type=int)
         archived = str(request.args.get("archived", default="0") or "0").lower()
         plan_filter = str(request.args.get("plan", default="") or "").lower()
-        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter))
+        q = str(request.args.get("q", default="") or "").strip()
+        # 新分页接口：传 page/page_size 或 paged=1 时返回 {items,total,page,page_size,...}
+        paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
+        page_arg = request.args.get("page", default=None, type=int)
+        page_size_arg = request.args.get("page_size", default=None, type=int)
+        if paged or page_arg is not None or page_size_arg is not None:
+            page = max(1, int(page_arg or 1))
+            page_size = max(1, min(500, int(page_size_arg or limit or 50)))
+            offset = (page - 1) * page_size
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q)
+            result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
+            result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
+            return jsonify(result)
+        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, q=q))
 
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
@@ -151,9 +286,69 @@ def create_app(auth_code: str | None = None) -> Flask:
         limit = request.args.get("limit", default=5000, type=int)
         archived = str(request.args.get("archived", default="0") or "0").lower()
         plan_filter = str(request.args.get("plan", default="") or "").lower()
-        snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter)
+        q = str(request.args.get("q", default="") or "").strip()
+        page_arg = request.args.get("page", default=None, type=int)
+        page_size_arg = request.args.get("page_size", default=None, type=int)
+        if page_arg is not None or page_size_arg is not None:
+            page = max(1, int(page_arg or 1))
+            page_size = max(1, min(500, int(page_size_arg or limit or 50)))
+            offset = (page - 1) * page_size
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q)
+            snapshot.update({"page": page, "page_size": page_size})
+        else:
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, q=q)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
+
+
+    @app.get("/api/accounts/<int:acc_id>/secret")
+    def api_account_secret(acc_id: int):
+        """按需读取单账号敏感值，避免账号列表一次性下发完整 Token/整行。"""
+        field = str(request.args.get("field") or "").strip()
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        try:
+            value = _account_secret_value(acc, field)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "id": acc_id, "field": field, "value": value})
+
+    @app.post("/api/accounts/secret-bulk")
+    def api_accounts_secret_bulk():
+        """按需批量读取账号敏感值。Body {account_ids:[...], field}."""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        field = str(data.get("field") or "").strip()
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 5000:
+            return jsonify({"ok": False, "error": "单次最多读取 5000 个账号"}), 400
+        values = []
+        skipped = []
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            try:
+                value = _account_secret_value(acc, field)
+            except ValueError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 400
+            if value:
+                values.append({"id": acc_id, "email": acc.get("email"), "value": value})
+            else:
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "值为空"})
+        return jsonify({"ok": True, "field": field, "values": values, "count": len(values), "skipped": skipped})
 
     @app.post("/api/accounts/<int:acc_id>/archive")
     def api_account_archive(acc_id: int):
@@ -998,18 +1193,30 @@ def create_app(auth_code: str | None = None) -> Flask:
         status = request.args.get("status") or None
         limit = request.args.get("limit", default=500, type=int)
         source = _pool_source_arg()
+        q = str(request.args.get("q", default="") or "").strip()
+        paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
+        page_arg = request.args.get("page", default=None, type=int)
+        page_size_arg = request.args.get("page_size", default=None, type=int)
+        fetch_limit = 1_000_000 if (paged or q) else limit
         if source == "all":
             rows = []
-            rows += _with_pool_source(db.list_outlook_pool(status=status, limit=limit), "outlook")
-            rows += _with_pool_source(db.list_generic_api_email_pool(status=status, limit=limit), "generic_api")
-            rows += _with_pool_source(db.list_domain_email_pool(status=status, limit=limit), "cloudflare_domain")
+            rows += _with_pool_source(db.list_outlook_pool(status=status, limit=fetch_limit), "outlook")
+            rows += _with_pool_source(db.list_generic_api_email_pool(status=status, limit=fetch_limit), "generic_api")
+            rows += _with_pool_source(db.list_domain_email_pool(status=status, limit=fetch_limit), "cloudflare_domain")
             rows = sorted(rows, key=lambda x: str(x.get("created_at") or x.get("imported_at") or x.get("used_at") or ""), reverse=True)
-            return jsonify(rows[:limit])
-        if source == "generic_api":
-            return jsonify(_with_pool_source(db.list_generic_api_email_pool(status=status, limit=limit), "generic_api"))
-        if source == "cloudflare_domain":
-            return jsonify(_with_pool_source(db.list_domain_email_pool(status=status, limit=limit), "cloudflare_domain"))
-        return jsonify(_with_pool_source(db.list_outlook_pool(status=status, limit=limit), "outlook"))
+        elif source == "generic_api":
+            rows = _with_pool_source(db.list_generic_api_email_pool(status=status, limit=fetch_limit), "generic_api")
+        elif source == "cloudflare_domain":
+            rows = _with_pool_source(db.list_domain_email_pool(status=status, limit=fetch_limit), "cloudflare_domain")
+        else:
+            rows = _with_pool_source(db.list_outlook_pool(status=status, limit=fetch_limit), "outlook")
+        if q:
+            rows = [r for r in rows if _matches_query(r, q)]
+        if paged or page_arg is not None or page_size_arg is not None:
+            page = max(1, int(page_arg or 1))
+            page_size = max(1, min(500, int(page_size_arg or limit or 50)))
+            return jsonify(_paginate_items(rows, page=page, page_size=page_size))
+        return jsonify(rows[:limit])
 
     @app.post("/api/outlook/import")
     def api_outlook_import():
@@ -1240,9 +1447,24 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     @app.get("/api/codex")
     def api_codex_list():
+        rows = db.list_codex_accounts()
+        q = str(request.args.get("q", default="") or "").strip()
+        if q:
+            rows = [r for r in rows if _matches_query(r, q)]
+        limit = request.args.get("limit", default=500, type=int)
+        paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
+        page_arg = request.args.get("page", default=None, type=int)
+        page_size_arg = request.args.get("page_size", default=None, type=int)
+        if paged or page_arg is not None or page_size_arg is not None:
+            page = max(1, int(page_arg or 1))
+            page_size = max(1, min(500, int(page_size_arg or limit or 50)))
+            result = _paginate_items(rows, page=page, page_size=page_size)
+            result["accounts"] = result.pop("items")
+            result["summary"] = db.codex_accounts_summary()
+            return jsonify(result)
         return jsonify({
             "summary": db.codex_accounts_summary(),
-            "accounts": db.list_codex_accounts(),
+            "accounts": rows[:limit],
         })
 
     @app.get("/api/codex/download/<path:filename>")
@@ -1709,12 +1931,24 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/api/jobs")
     def api_jobs():
         limit = request.args.get("limit", default=100, type=int)
+        paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
+        page_arg = request.args.get("page", default=None, type=int)
+        page_size_arg = request.args.get("page_size", default=None, type=int)
+        fetch_limit = 1_000_000 if (paged or page_arg is not None or page_size_arg is not None) else limit
         from config import email as _email_cfg
         manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
-        rows = db.list_jobs(limit=limit)
+        rows = db.list_jobs(limit=fetch_limit)
         for row in rows:
             row["manual_otp_required"] = manual_otp_required
             row.update(svc.get_retry_info(row))
+        if paged or page_arg is not None or page_size_arg is not None:
+            page = max(1, int(page_arg or 1))
+            page_size = max(1, min(500, int(page_size_arg or limit or 50)))
+            result = _paginate_items(rows, page=page, page_size=page_size)
+            result["items"] = [_compact_job_for_list(r) for r in (result.get("items") or [])]
+            result["status_counts"] = _job_status_counts(rows)
+            result["compact"] = True
+            return jsonify(result)
         return jsonify(rows)
 
     @app.post("/api/jobs")

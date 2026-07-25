@@ -463,6 +463,7 @@
             <label class="inline-num" title="只查询/显示已开通 Plus 的账号">
               <input id="showPlusAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 已开通Plus
             </label>
+            <button class="btn" id="btnRefreshAccounts" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
           </div>
         </div>
         <div class="accounts-actionbar">
@@ -654,11 +655,15 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 let copySeq = 0;
 const copyStore = new Map();
 let ACCOUNTS = [], OUTLOOK = [], CONFIG = [];
+let ACCOUNTS_TOTAL = 0;
+let OUTLOOK_TOTAL = 0;
 let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
+let JOBS_TOTAL = 0;
+let JOB_STATUS_COUNTS = {};
 let jobsRenderSignature = '';
 const JOB_SELECTED = new Set();
 let activeLogJob = null, logTimer = null, jobsTimer = null;
@@ -689,14 +694,17 @@ function _renderPager(id, total) {
     ).join('')}</select>`;
 }
 
+function _reloadPagedList(id) {
+  ({ jobs: refreshJobs, accounts: loadAccounts, outlook: loadOutlook, codex: loadCodex })[id]?.();
+}
 function pagerGo(id, dir) {
   PAGERS[id].page = Math.max(1, PAGERS[id].page + dir);
-  ({ jobs: renderJobs, accounts: renderAccounts, outlook: renderOutlook, codex: renderCodex })[id]?.();
+  _reloadPagedList(id);
 }
 function pagerSetSize(id, val) {
   PAGERS[id].size = parseInt(val, 10) || 20;
   PAGERS[id].page = 1;
-  ({ jobs: renderJobs, accounts: renderAccounts, outlook: renderOutlook, codex: renderCodex })[id]?.();
+  _reloadPagedList(id);
 }
 
 // ---------- 工具 ----------
@@ -734,6 +742,10 @@ async function api(url, opts) {
   if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
   return j;
 }
+function debounce(fn, wait=250) {
+  let t = null;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
+}
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
@@ -767,11 +779,11 @@ async function loadSummary() {
 $('#btnStart').addEventListener('click', async () => {
   const count = parseInt($('#regCount').value || '1', 10);
   const workers = parseInt($('#regWorkers').value || '3', 10);
-  const active = JOBS.filter(j => ['pending','running','stopping'].includes(j.status));
-  if (active.length > 0) {
+  const activeCount = Number(JOB_STATUS_COUNTS.active || 0);
+  if (activeCount > 0) {
     const ok = confirm(
-      `当前任务表里已有 ${active.length} 个任务在跑或排队，` +
-      `这次会再加 ${count} 个，合计 ${active.length + count} 个，确定继续？\n\n` +
+      `当前任务表里已有 ${activeCount} 个任务在跑或排队，` +
+      `这次会再加 ${count} 个，合计 ${activeCount + count} 个，确定继续？\n\n` +
       `（如果只是想跑这 ${count} 个，建议先点"取消所有排队"清掉残留再提交）`
     );
     if (!ok) return;
@@ -787,9 +799,7 @@ $('#btnStart').addEventListener('click', async () => {
 });
 $('#btnRefreshJobs').addEventListener('click', refreshJobs);
 $('#jobsSelectAll').addEventListener('change', (e) => {
-  const p = PAGERS.jobs;
-  const pageRows = JOBS.slice((p.page - 1) * p.size, p.page * p.size)
-    .filter(j => !['running','stopping'].includes(j.status));
+  const pageRows = JOBS.filter(j => !['running','stopping'].includes(j.status));
   if (e.target.checked) pageRows.forEach(j => JOB_SELECTED.add(Number(j.id)));
   else pageRows.forEach(j => JOB_SELECTED.delete(Number(j.id)));
   renderJobs();
@@ -797,9 +807,11 @@ $('#jobsSelectAll').addEventListener('change', (e) => {
 $('#btnDeleteSelectedJobs').addEventListener('click', deleteSelectedJobs);
 $('#btnRetrySelectedJobs').addEventListener('click', retrySelectedJobs);
 $('#btnCancelPending').addEventListener('click', async () => {
-  const pendingCount = JOBS.filter(j => j.status === 'pending').length;
-  if (pendingCount === 0) { showToast('当前没有排队任务'); return; }
-  if (!confirm(`确定取消 ${pendingCount} 个排队中的任务吗？已运行中的任务不受影响。`)) return;
+  const pendingCount = Number(JOB_STATUS_COUNTS.pending || 0);
+  const msg = pendingCount > 0
+    ? `确定取消 ${pendingCount} 个排队中的任务吗？已运行中的任务不受影响。`
+    : '当前页没有排队任务；仍要请求后端取消所有排队任务吗？';
+  if (!confirm(msg)) return;
   $('#btnCancelPending').disabled = true;
   try {
     const r = await api('/api/jobs/cancel-pending', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
@@ -810,13 +822,8 @@ $('#btnCancelPending').addEventListener('click', async () => {
 });
 
 function renderJobs() {
-  const p = PAGERS.jobs;
-  const total = JOBS.length;
-  const rows = JOBS.slice((p.page - 1) * p.size, p.page * p.size);
-  const selectableIdsAll = new Set(JOBS.filter(j => !['running','stopping'].includes(j.status)).map(j => Number(j.id)));
-  for (const id of Array.from(JOB_SELECTED)) {
-    if (!selectableIdsAll.has(Number(id))) JOB_SELECTED.delete(id);
-  }
+  const total = JOBS_TOTAL;
+  const rows = JOBS;
   $('#jobsBody').innerHTML = rows.map(j => `
     <tr>
       <td><input type="checkbox" class="job-row-check" data-job-id="${esc(j.id)}" ${JOB_SELECTED.has(Number(j.id)) ? 'checked' : ''} ${['running','stopping'].includes(j.status) ? 'disabled title="运行中的任务不能选择"' : ''}></td>
@@ -850,14 +857,13 @@ function updateJobsSelectionUi(pageRows = null) {
   if (hint) hint.textContent = `已选 ${JOB_SELECTED.size}`;
   if (bulkBtn) bulkBtn.disabled = JOB_SELECTED.size === 0;
   if (bulkRetryBtn) {
-    bulkRetryBtn.disabled = !Array.from(JOB_SELECTED).some(id => JOBS.find(j => Number(j.id) === Number(id))?.retryable);
+    bulkRetryBtn.disabled = JOB_SELECTED.size === 0;
   }
 
   const cbAll = $('#jobsSelectAll');
   if (!cbAll) return;
   if (!pageRows) {
-    const p = PAGERS.jobs;
-    pageRows = JOBS.slice((p.page - 1) * p.size, p.page * p.size);
+    pageRows = JOBS;
   }
   const selectableIds = pageRows.filter(j => !['running','stopping'].includes(j.status)).map(j => Number(j.id));
   const checkedCount = selectableIds.filter(id => JOB_SELECTED.has(id)).length;
@@ -868,8 +874,14 @@ function updateJobsSelectionUi(pageRows = null) {
 
 async function refreshJobs() {
   try {
-    const nextJobs = await api('/api/jobs?limit=500');
-    const nextSignature = JSON.stringify(nextJobs);
+    const p = PAGERS.jobs;
+    const res = await api(`/api/jobs?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}`);
+    const nextJobs = res.items || [];
+    JOBS_TOTAL = Number(res.total || nextJobs.length || 0);
+    JOB_STATUS_COUNTS = res.status_counts || {};
+    const totalPages = Math.max(1, Math.ceil(JOBS_TOTAL / p.size));
+    if (p.page > totalPages) { p.page = totalPages; return refreshJobs(); }
+    const nextSignature = JSON.stringify({items: nextJobs, total: JOBS_TOTAL, status_counts: JOB_STATUS_COUNTS, page: p.page, size: p.size});
     JOBS = nextJobs;
     if (nextSignature !== jobsRenderSignature) {
       jobsRenderSignature = nextSignature;
@@ -1029,13 +1041,8 @@ async function deleteJob(jobId, btn) {
 async function deleteSelectedJobs() {
   const ids = Array.from(JOB_SELECTED);
   if (ids.length === 0) { showToast('请先选择任务'); return; }
-  const selectedJobs = ids.map(id => JOBS.find(j => Number(j.id) === Number(id))).filter(Boolean);
-  const runningCount = selectedJobs.filter(j => ['running','stopping'].includes(j.status)).length;
-  const deletableCount = selectedJobs.length - runningCount;
-  if (deletableCount <= 0) { showToast('选中的任务都在运行中，不能删除'); return; }
-  const msg = `确定删除选中的 ${deletableCount} 个任务吗？\n\n` +
-              `会同时删除对应日志。排队任务删除后将不会执行。` +
-              (runningCount ? `\n\n另外 ${runningCount} 个运行中任务会自动跳过。` : '');
+  const msg = `确定删除选中的 ${ids.length} 个任务吗？\n\n` +
+              `会同时删除对应日志。排队/运行中的任务会由后端逐条校验，不能删除的会自动跳过。`;
   if (!confirm(msg)) return;
 
   $('#btnDeleteSelectedJobs').disabled = true;
@@ -1079,18 +1086,16 @@ async function retryJob(jobId, btn) {
 
 async function retrySelectedJobs() {
   const ids = Array.from(JOB_SELECTED);
-  const retryable = ids.filter(id => JOBS.find(j => Number(j.id) === Number(id))?.retryable);
-  if (retryable.length === 0) { showToast('选中的任务没有可重试项'); return; }
-  if (!confirm(`确定重试选中的 ${retryable.length} 个任务吗？\n\n已创建账号的任务只补跑 Codex，其余任务重新入队注册。`)) return;
+  if (!confirm(`确定重试选中的 ${ids.length} 个任务吗？\n\n后端会逐条校验；已创建账号的任务只补跑 Codex，其余任务重新入队注册，不能重试的会自动跳过。`)) return;
   const btn = $('#btnRetrySelectedJobs');
   btn.disabled = true;
   try {
     const r = await api('/api/jobs/retry-bulk', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({job_ids: retryable}),
+      body: JSON.stringify({job_ids: ids}),
     });
-    retryable.forEach(id => JOB_SELECTED.delete(Number(id)));
+    ids.forEach(id => JOB_SELECTED.delete(Number(id)));
     const skippedCount = (r.skipped || []).length;
     const reusedCount = r.reused_count || 0;
     showToast(`已提交 ${r.started_count || 0} 个${reusedCount ? `，复用 ${reusedCount} 个` : ''}${skippedCount ? `，跳过 ${skippedCount} 个` : ''}`);
@@ -1134,9 +1139,15 @@ async function loadAccounts() {
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
-    ACCOUNTS = await api(`/api/accounts?limit=2000&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}`);
+    const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
+    const p = PAGERS.accounts;
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&q=${encodeURIComponent(q)}`);
+    ACCOUNTS = res.items || [];
+    ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
+    const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
+    if (p.page > totalPages) { p.page = totalPages; accountsLoading = false; return loadAccounts(); }
     renderAccounts();
-  } catch(e) {}
+  } catch(e) { showToast('加载账号失败: ' + e.message); }
   finally { accountsLoading = false; }
 }
 async function pollAccountPlanStatuses() {
@@ -1145,11 +1156,13 @@ async function pollAccountPlanStatuses() {
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
-    const snapshot = await api(`/api/accounts/plan-check-status?limit=2000&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}`);
+    const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
+    const p = PAGERS.accounts;
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&q=${encodeURIComponent(q)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
-    if (hasUnknown || items.length !== ACCOUNTS.length) {
+    if (hasUnknown || items.length !== ACCOUNTS.length || Number(snapshot.total || 0) !== ACCOUNTS_TOTAL) {
       planStatusRevision = snapshot.revision || '';
       await loadAccounts();
       return;
@@ -1192,24 +1205,18 @@ function _codexAgentCell(r) {
   const s = r.codex_agent_status || '';
   const err = r.codex_agent_error || '';
   const msg = r.codex_agent_message || '';
-  const routeInfo = [
-    r.codex_agent_network_route ? `网络:${r.codex_agent_network_route}` : '',
-    r.codex_agent_proxy_used ? `代理:${r.codex_agent_proxy_used}` : '',
-    r.codex_agent_device_id ? `did:${r.codex_agent_device_id}` : '',
-  ].filter(Boolean).join('；');
-  const title = esc([err || msg || r.codex_agent_runtime_id || '', routeInfo].filter(Boolean).join('；'));
+  const title = esc(msg || r.codex_agent_runtime_id || '');
   if (s === 'queued') return `<div class="agent-token-cell"><span class="pill status-running" title="${title}">排队中</span></div>`;
   if (s === 'running') return `<div class="agent-token-cell"><span class="pill status-running" title="${title}">生成中</span></div>`;
   if (s === 'success') {
-    const token = r.codex_agent_token || '';
     const rid = r.codex_agent_runtime_id ? short(r.codex_agent_runtime_id, 10) : '已生成';
-    const copy = token ? cbtn('复制Agent Token', token, '') : '';
+    const copy = r.codex_agent_has_token ? `<button data-account-copy-secret="codex_agent_token" data-account-id="${esc(r.id)}" title="按需读取并复制完整 Agent Token">复制Agent Token</button>` : '';
     const download = `<button class="agent-download" data-codex-agent-download="${esc(r.id)}" title="下载该账号 Codex Agent auth.json">下载Agent</button>`;
     const uploadSub2 = `<button class="agent-download" data-codex-agent-upload-sub2="${esc(r.id)}" title="上传该账号 Agent Token 到 sub2api">上传sub2</button>`;
     const regen = `<button data-codex-agent="${esc(r.id)}" title="重新生成 Codex Agent Token">重生成</button>`;
     return `<div class="agent-token-cell"><span class="pill status-success" title="${title}">${esc(rid)}</span>${copy}${download}${uploadSub2}${regen}</div>`;
   }
-  const gen = (r.access_token || '').trim() ? `<button data-codex-agent="${esc(r.id)}" title="生成 Codex CLI agent_identity auth.json/token">生成Agent</button>` : '';
+  const gen = r.has_access_token ? `<button data-codex-agent="${esc(r.id)}" title="生成 Codex CLI agent_identity auth.json/token">生成Agent</button>` : '';
   if (s === 'failed') return `<div class="agent-token-cell"><span class="pill status-failed" title="${title}">失败</span>${gen}</div>`;
   return gen ? `<div class="agent-token-cell">${gen}</div>` : '<span class="muted">-</span>';
 }
@@ -1361,31 +1368,25 @@ function _codexAction(r) {
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
 function renderAccounts() {
-  const q = $('#qAccounts').value.trim().toLowerCase();
-  const filtered = ACCOUNTS.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
   const p = PAGERS.accounts;
-  const total = filtered.length;
-  const rows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
-  const existingIds = new Set(ACCOUNTS.map(r => Number(r.id)));
-  for (const id of Array.from(ACCOUNT_SELECTED)) {
-    if (!existingIds.has(Number(id))) ACCOUNT_SELECTED.delete(id);
-  }
+  const total = ACCOUNTS_TOTAL;
+  const rows = ACCOUNTS;
   $('#accountsBody').innerHTML = rows.map(r => `
     <tr>
       <td><input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''}></td>
       <td class="muted">#${esc(r.id)}</td>
       <td><div class="main-cell">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div><div class="sub-cell">${esc(r.user_name || '-')}</div></td>
       <td>${esc(r.email_source || '-')}</td>
-      <td><span class="mono" title="${esc(r.access_token || '')}">${esc(short(r.access_token || '', 10))}</span></td>
+      <td><span class="mono" title="列表仅显示预览，完整 Token 请点复制">${r.has_access_token ? '有Token' : '<span class="muted">无Token</span>'}</span></td>
       <td>${_planCell(r)}<div class="sub-cell">${_extractLinkCell(r)}</div></td>
       <td class="wrap" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="muted">-</span>'}</td>
-      <td>${r.totp_secret ? '已启用' : '<span class="muted">未启用</span>'}</td>
+      <td>${r.totp_enabled ? '已启用' : '<span class="muted">未启用</span>'}</td>
       <td>${_codexCell(r)}</td>
       <td>${_codexAgentCell(r)}</td>
       <td class="muted">${esc(r.created_at || '-')}</td>
       <td class="actions actions-cell">
         <div class="account-row-actions">
-          <div class="account-action-group">${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制整行', r.copy_line, 'good')}</div>
+          <div class="account-action-group"><button class="primary" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" ${r.has_access_token ? '' : 'disabled'}>复制Token</button> <button class="good" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button></div>
           <div class="account-action-group"><button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> ${_planAction(r)} ${_extractLinkAction(r)}</div>
           <div class="account-action-group">${_codexAction(r)} <button data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button></div>
           <div class="account-action-group danger-zone"><button data-account-archive="${esc(r.id)}" data-archived="${r.archived ? '0' : '1'}" title="${r.archived ? '恢复到默认账号列表' : '归档后默认账号列表不再显示'}">${r.archived ? '恢复' : '归档'}</button> <button class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button></div>
@@ -1433,10 +1434,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const cbAll = $('#accountsSelectAll');
   if (!cbAll) return;
   if (!pageRows) {
-    const q = $('#qAccounts').value.trim().toLowerCase();
-    const filtered = ACCOUNTS.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-    const p = PAGERS.accounts;
-    pageRows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
+    pageRows = ACCOUNTS;
   }
   const pageIds = pageRows.map(r => Number(r.id));
   const checkedCount = pageIds.filter(id => ACCOUNT_SELECTED.has(id)).length;
@@ -1476,6 +1474,24 @@ $('#btnCloseRetryLog').addEventListener('click', closeRetryLogModal);
 
 // 账号操作按钮（事件委托）
 $('#accountsBody').addEventListener('click', async (e) => {
+  const copySecretBtn = e.target.closest('[data-account-copy-secret]');
+  if (copySecretBtn) {
+    const id = Number(copySecretBtn.dataset.accountId);
+    const field = copySecretBtn.dataset.accountCopySecret;
+    copySecretBtn.disabled = true;
+    try {
+      const value = await fetchOneAccountSecret(id, field);
+      if (!value) { showToast('可复制内容为空'); return; }
+      copyText(value);
+      showToast(field === 'access_token' ? 'Token 已复制' : field === 'codex_agent_token' ? 'Agent Token 已复制' : '账号整行已复制');
+    } catch(err) {
+      showToast('复制失败: ' + err.message);
+    } finally {
+      copySecretBtn.disabled = false;
+    }
+    return;
+  }
+
   const planBtn = e.target.closest('[data-plan-check]');
   if (planBtn) {
     await checkOnePlan(Number(planBtn.dataset.planCheck), planBtn);
@@ -1604,10 +1620,7 @@ $('#accountsBody').addEventListener('change', (e) => {
   updateAccountSelectionUi();
 });
 $('#accountsSelectAll').addEventListener('change', (e) => {
-  const q = $('#qAccounts').value.trim().toLowerCase();
-  const filtered = ACCOUNTS.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-  const p = PAGERS.accounts;
-  const pageRows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
+  const pageRows = ACCOUNTS;
   if (e.target.checked) pageRows.forEach(r => ACCOUNT_SELECTED.add(Number(r.id)));
   else pageRows.forEach(r => ACCOUNT_SELECTED.delete(Number(r.id)));
   renderAccounts();
@@ -1639,32 +1652,59 @@ $('#showPlusAccountsOnly').addEventListener('change', async (e) => {
   await loadAccounts();
   await pollAccountPlanStatuses();
 });
+$('#btnRefreshAccounts').addEventListener('click', async () => {
+  const btn = $('#btnRefreshAccounts');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '刷新中…';
+  try {
+    planStatusRevision = '';
+    await loadAccounts();
+    await pollAccountPlanStatuses();
+    loadSummary();
+    showToast('账号列表已刷新');
+  } catch(e) {
+    showToast('刷新账号失败: ' + e.message);
+  } finally {
+    btn.textContent = old;
+    btn.disabled = false;
+  }
+});
 
 
-function copySelectedAccountLines() {
-  const ids = new Set(Array.from(ACCOUNT_SELECTED).map(Number));
-  const lines = ACCOUNTS
-    .filter(r => ids.has(Number(r.id)))
-    .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
-    .map(r => r.copy_line || '')
-    .filter(Boolean);
-  if (!lines.length) { showToast('请先选择账号'); return; }
-  copyText(lines.join('\n'));
-  showToast(`已复制 ${lines.length} 行`);
+async function fetchAccountSecrets(ids, field) {
+  const r = await api('/api/accounts/secret-bulk', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({account_ids: ids, field}),
+  });
+  return (r.values || []).map(x => x.value).filter(Boolean);
 }
 
-function _selectedAccountLines() {
-  const ids = new Set(Array.from(ACCOUNT_SELECTED).map(Number));
-  return ACCOUNTS
-    .filter(r => ids.has(Number(r.id)))
-    .sort((a, b) => Number(a.id || 0) - Number(b.id || 0))
-    .map(r => r.copy_line || '')
-    .filter(Boolean);
+async function fetchOneAccountSecret(id, field) {
+  const r = await api(`/api/accounts/${encodeURIComponent(id)}/secret?field=${encodeURIComponent(field)}`);
+  return r.value || '';
 }
 
-function downloadSelectedAccountTxt() {
-  const lines = _selectedAccountLines();
-  if (!lines.length) { showToast('请先选择账号'); return; }
+async function copySelectedAccountLines() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  try {
+    const lines = await fetchAccountSecrets(ids, 'copy_line');
+    if (!lines.length) { showToast('选中账号没有可复制整行'); return; }
+    copyText(lines.join('\n'));
+    showToast(`已复制 ${lines.length} 行`);
+  } catch(err) { showToast('复制失败: ' + err.message); }
+}
+
+async function downloadSelectedAccountTxt() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  let lines = [];
+  try {
+    lines = await fetchAccountSecrets(ids, 'copy_line');
+  } catch(err) { showToast('生成 TXT 失败: ' + err.message); return; }
+  if (!lines.length) { showToast('选中账号没有可下载整行'); return; }
   const now = new Date();
   const pad = n => String(n).padStart(2, '0');
   const filename = `accounts-selected-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
@@ -1797,7 +1837,7 @@ async function extractSelectedLinks() {
 async function generateOneCodexAgent(id, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   if (!acc) { showToast('账号不存在'); return; }
-  if (!(acc.access_token || '').trim()) { showToast('该账号没有 access_token'); return; }
+  if (!acc.has_access_token) { showToast('该账号没有 access_token'); return; }
   if (!confirm(`确定为该账号生成 Codex Agent Token 吗？\n\n${acc.email || ('#' + id)}\n\n会调用 auth.openai.com 注册 agent_identity，并保存到本地账号记录。`)) return;
   const old = btn.textContent;
   btn.disabled = true;
@@ -1821,7 +1861,7 @@ async function generateSelectedCodexAgents() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
   const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
-  const eligible = selected.filter(a => (a.access_token || '').trim());
+  const eligible = selected.filter(a => a.has_access_token);
   if (!eligible.length) { showToast('选中账号里没有可用 access_token'); return; }
   if (!confirm(`确定批量生成 ${eligible.length} 个 Codex Agent Token 吗？\n\n缺少 access_token 的账号会自动跳过。`)) return;
   const btn = $('#btnGenerateSelectedAgent');
@@ -2179,9 +2219,17 @@ async function retrySelectedCodex() {
   }
 }
 
-$('#qAccounts').addEventListener('input', () => { PAGERS.accounts.page = 1; renderAccounts(); });
-$('#copyAllTokens').addEventListener('click', () => copyText(ACCOUNTS.map(r=>r.access_token).filter(Boolean).join('\n')));
-$('#copyAllLines').addEventListener('click', () => copyText(ACCOUNTS.map(r=>r.copy_line).filter(Boolean).join('\n')));
+$('#qAccounts').addEventListener('input', debounce(() => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); }, 250));
+$('#copyAllTokens').addEventListener('click', async () => {
+  const ids = ACCOUNTS.filter(r => r.has_access_token).map(r => Number(r.id));
+  if (!ids.length) { showToast('当前页没有 Token'); return; }
+  try { copyText((await fetchAccountSecrets(ids, 'access_token')).join('\n')); } catch(e) { showToast('复制失败: ' + e.message); }
+});
+$('#copyAllLines').addEventListener('click', async () => {
+  const ids = ACCOUNTS.map(r => Number(r.id));
+  if (!ids.length) { showToast('当前页没有账号'); return; }
+  try { copyText((await fetchAccountSecrets(ids, 'copy_line')).join('\n')); } catch(e) { showToast('复制失败: ' + e.message); }
+});
 
 // ---------- 邮箱池 ----------
 function poolKey(r) { return `${r.source || $('#poolSource')?.value || 'outlook'}|${r.email || ''}`; }
@@ -2191,21 +2239,19 @@ function poolLabel(src) {
 async function loadOutlook() {
   try {
     const source = $('#poolSource')?.value || 'outlook';
-    OUTLOOK = await api(`/api/outlook?limit=2000&source=${encodeURIComponent(source)}`);
-    OUTLOOK_SELECTED.clear();
+    const q = $('#qOutlook') ? $('#qOutlook').value.trim() : '';
+    const p = PAGERS.outlook;
+    const res = await api(`/api/outlook?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&source=${encodeURIComponent(source)}&q=${encodeURIComponent(q)}`);
+    OUTLOOK = res.items || [];
+    OUTLOOK_TOTAL = Number(res.total || OUTLOOK.length || 0);
+    const totalPages = Math.max(1, Math.ceil(OUTLOOK_TOTAL / p.size));
+    if (p.page > totalPages) { p.page = totalPages; return loadOutlook(); }
     renderOutlook();
   } catch(e) {}
 }
 function renderOutlook() {
-  const q = $('#qOutlook').value.trim().toLowerCase();
-  const filtered = OUTLOOK.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-  const p = PAGERS.outlook;
-  const total = filtered.length;
-  const rows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
-  const existingKeys = new Set(OUTLOOK.map(r => poolKey(r)));
-  for (const key of Array.from(OUTLOOK_SELECTED)) {
-    if (!existingKeys.has(key)) OUTLOOK_SELECTED.delete(key);
-  }
+  const total = OUTLOOK_TOTAL;
+  const rows = OUTLOOK;
   $('#outlookBody').innerHTML = rows.map(r => `
     <tr>
       <td><input type="checkbox" class="outlook-row-check" data-email="${esc(r.email)}" data-source="${esc(r.source || 'outlook')}" ${OUTLOOK_SELECTED.has(poolKey(r)) ? 'checked' : ''}></td>
@@ -2247,10 +2293,7 @@ function updateOutlookSelectionUi(pageRows = null) {
   const cbAll = $('#outlookSelectAll');
   if (!cbAll) return;
   if (!pageRows) {
-    const q = $('#qOutlook').value.trim().toLowerCase();
-    const filtered = OUTLOOK.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-    const p = PAGERS.outlook;
-    pageRows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
+    pageRows = OUTLOOK;
   }
   const pageKeys = pageRows.map(r => poolKey(r)).filter(Boolean);
   const checkedCount = pageKeys.filter(key => OUTLOOK_SELECTED.has(key)).length;
@@ -2258,7 +2301,7 @@ function updateOutlookSelectionUi(pageRows = null) {
   cbAll.indeterminate = checkedCount > 0 && checkedCount < pageKeys.length;
   cbAll.disabled = pageKeys.length === 0;
 }
-$('#qOutlook').addEventListener('input', () => { PAGERS.outlook.page = 1; renderOutlook(); });
+$('#qOutlook').addEventListener('input', debounce(() => { PAGERS.outlook.page = 1; loadOutlook(); }, 250));
 $('#poolSource').addEventListener('change', () => {
   PAGERS.outlook.page = 1;
   OUTLOOK_SELECTED.clear();
@@ -2273,10 +2316,7 @@ $('#importSource').addEventListener('change', () => {
 });
 $('#copyAllEmails').addEventListener('click', () => copyText(OUTLOOK.map(r=>r.copy_line).filter(Boolean).join('\n')));
 $('#outlookSelectAll').addEventListener('change', (e) => {
-  const q = $('#qOutlook').value.trim().toLowerCase();
-  const filtered = OUTLOOK.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-  const p = PAGERS.outlook;
-  const pageRows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
+  const pageRows = OUTLOOK;
   if (e.target.checked) pageRows.forEach(r => r.email && OUTLOOK_SELECTED.add(poolKey(r)));
   else pageRows.forEach(r => OUTLOOK_SELECTED.delete(poolKey(r)));
   renderOutlook();
@@ -2384,10 +2424,16 @@ $('#btnImport').addEventListener('click', async () => {
 
 // ---------- Codex 授权 ----------
 let CODEX = [];
+let CODEX_TOTAL = 0;
 async function loadCodex() {
   try {
-    const r = await api('/api/codex');
+    const p = PAGERS.codex;
+    const q = $('#qCodex') ? $('#qCodex').value.trim() : '';
+    const r = await api(`/api/codex?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&q=${encodeURIComponent(q)}`);
     CODEX = r.accounts || [];
+    CODEX_TOTAL = Number(r.total || CODEX.length || 0);
+    const totalPages = Math.max(1, Math.ceil(CODEX_TOTAL / p.size));
+    if (p.page > totalPages) { p.page = totalPages; return loadCodex(); }
     $('#codexStatTotal').textContent = r.summary?.total ?? 0;
     $('#codexStatExported').textContent = r.summary?.exported ?? 0;
     $('#codexStatPending').textContent = r.summary?.pending ?? 0;
@@ -2404,11 +2450,8 @@ function _codexUpdateSelectedHint() {
   if (delBtn) delBtn.disabled = CODEX_SELECTED.size === 0;
 }
 function renderCodex() {
-  const q = $('#qCodex').value.trim().toLowerCase();
-  const filtered = CODEX.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-  const p = PAGERS.codex;
-  const total = filtered.length;
-  const rows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
+  const total = CODEX_TOTAL;
+  const rows = CODEX;
   $('#codexBody').innerHTML = rows.map(r => {
     const exported = (r.exported_count || 0) > 0;
     const statusBadge = exported
@@ -2440,15 +2483,12 @@ function renderCodex() {
   _codexUpdateSelectedHint();
   _renderPager('codex', total);
 }
-$('#qCodex').addEventListener('input', () => { PAGERS.codex.page = 1; renderCodex(); });
+$('#qCodex').addEventListener('input', debounce(() => { PAGERS.codex.page = 1; loadCodex(); }, 250));
 $('#btnRefreshCodex').addEventListener('click', loadCodex);
 
 // 全选 / 取消全选（仅当前页可见行）
 $('#codexSelectAll').addEventListener('change', (e) => {
-  const q = $('#qCodex').value.trim().toLowerCase();
-  const filtered = CODEX.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-  const p = PAGERS.codex;
-  const pageRows = filtered.slice((p.page - 1) * p.size, p.page * p.size);
+  const pageRows = CODEX;
   if (e.target.checked) pageRows.forEach(r => CODEX_SELECTED.add(r.filename));
   else pageRows.forEach(r => CODEX_SELECTED.delete(r.filename));
   renderCodex();
@@ -2461,10 +2501,7 @@ $('#codexBody').addEventListener('change', (e) => {
   if (cb.checked) CODEX_SELECTED.add(cb.dataset.fname);
   else CODEX_SELECTED.delete(cb.dataset.fname);
   _codexUpdateSelectedHint();
-  const q = $('#qCodex').value.trim().toLowerCase();
-  const filtered = CODEX.filter(r => !q || Object.values(r).join('\n').toLowerCase().includes(q));
-  const p = PAGERS.codex;
-  const pageFilenames = filtered.slice((p.page - 1) * p.size, p.page * p.size).map(r => r.filename);
+  const pageFilenames = CODEX.map(r => r.filename);
   const allChecked = pageFilenames.length > 0 && pageFilenames.every(f => CODEX_SELECTED.has(f));
   $('#codexSelectAll').checked = allChecked;
   $('#codexSelectAll').indeterminate = !allChecked && pageFilenames.some(f => CODEX_SELECTED.has(f));

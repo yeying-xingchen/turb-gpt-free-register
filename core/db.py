@@ -1072,60 +1072,90 @@ def recover_interrupted_extract_links() -> int:
         return recovered
 
 
-def list_account_plan_check_statuses(limit: int = 5000, archived: str | bool | None = False, plan_filter: str | None = None) -> dict:
+def _account_matches_query(row: dict, q: str | None) -> bool:
+    q = str(q or "").strip().lower()
+    if not q:
+        return True
+    try:
+        return q in "\n".join(str(v) for v in row.values()).lower()
+    except Exception:
+        return False
+
+
+def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> list[dict]:
+    rows = _load_accounts()
+    if archived in (True, "1", "true", "yes", "only"):
+        rows = [r for r in rows if bool(r.get("archived"))]
+    elif archived in ("all", "include"):
+        pass
+    else:
+        rows = [r for r in rows if not bool(r.get("archived"))]
+    decorated = [_decorate_account(r) for r in rows]
+    decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
+    decorated = [r for r in decorated if _account_matches_query(r, q)]
+    return sorted(decorated, key=lambda x: int(x.get("id") or 0), reverse=True)
+
+
+def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
-        "id", "email", "updated_at", "archived", "archived_at", "plan_type", "current_plan_type",
-        "plan_check_status", "plan_check_trigger", "plan_check_queued_at",
-        "plan_check_started_at", "plan_check_completed_at", "plan_check_ok",
-        "plan_check_error", "plan_checked_at", "plan_last_success_at",
-        "plus_trial_eligible", "plan_check_network_route",
+        "id", "email", "archived",
+        "plan_type", "current_plan_type", "plus_trial_eligible",
+        "plan_check_status", "plan_check_error",
+        "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
+        "billing_period", "billing_currency", "discount_amount", "discount_type",
+        "discount_expires_at", "discount_promo_campaign_id",
         "extract_link_status", "extract_link_ok", "extract_link_type",
-        "extract_link_job_id", "extract_link_message", "extract_link_error",
+        "extract_link_message", "extract_link_error",
         "extract_link_long_url", "extract_link_copy_paste",
         "extract_link_image_url_png", "extract_link_image_url_svg",
-        "extract_link_expires_at", "extract_link_payment_method",
-        "extract_link_payment_link_type",
-        "extract_link_checked_at", "extract_link_completed_at",
-        "codex_agent_status", "codex_agent_ok", "codex_agent_message",
-        "codex_agent_error", "codex_agent_runtime_id", "codex_agent_token",
-        "codex_agent_auth_path", "codex_agent_checked_at", "codex_agent_completed_at",
-        "codex_agent_network_route", "codex_agent_proxy_mode", "codex_agent_proxy_used",
-        "codex_agent_proxy_fallback_reason", "codex_agent_device_id", "codex_agent_oai_session_id",
-        "codex_agent_attempt_count", "codex_agent_max_attempts", "codex_agent_request_timeout",
-        "codex_agent_sub2api_path", "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
+        "extract_link_expires_at",
+        "codex_status", "codex_error",
+        "codex_agent_status", "codex_agent_message",
+        "codex_agent_runtime_id", "codex_agent_sub2api_url",
+        "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
     )
     with _LOCK:
-        all_rows = _load_accounts()
-        if archived in (True, "1", "true", "yes", "only"):
-            all_rows = [r for r in all_rows if bool(r.get("archived"))]
-        elif archived in ("all", "include"):
-            pass
-        else:
-            all_rows = [r for r in all_rows if not bool(r.get("archived"))]
-        decorated_rows = [_decorate_account(r) for r in all_rows]
-        decorated_rows = [r for r in decorated_rows if _account_matches_plan_filter(r, plan_filter)]
-        rows = sorted(decorated_rows, key=lambda x: int(x.get("id") or 0), reverse=True)[:max(1, int(limit))]
+        all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        total = len(all_rows)
+        limit = max(1, int(limit))
+        offset = max(0, int(offset or 0))
+        rows = all_rows[offset: offset + limit]
         items = []
         for row in rows:
-            items.append({key: row.get(key) for key in fields})
-        latest = max((str(row.get("updated_at") or "") for row in rows), default="")
-        return {"items": items, "revision": f"{len(rows)}:{latest}"}
+            item = {"id": row.get("id"), "email": row.get("email")}
+            for key in fields:
+                value = row.get(key)
+                if key in ("id", "email"):
+                    continue
+                if value is not None and value != "":
+                    item[key] = value
+            plan = str(row.get("current_plan_type") or row.get("plan_type") or "").lower()
+            if not any(x in plan for x in ("plus", "pro", "team", "go")):
+                for expire_key in ("expires_at", "plan_expires_at", "plan_renews_at", "renews_at"):
+                    item.pop(expire_key, None)
+            item["codex_agent_has_token"] = bool(str(row.get("codex_agent_token") or "").strip())
+            item["has_access_token"] = bool(str(row.get("access_token") or "").strip())
+            items.append(item)
+        latest = max((str(row.get("updated_at") or "") for row in all_rows), default="")
+        return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}"}
 
 
-def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None) -> list[dict]:
+def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> list[dict]:
     with _LOCK:
-        rows = _load_accounts()
-        if archived in (True, "1", "true", "yes", "only"):
-            rows = [r for r in rows if bool(r.get("archived"))]
-        elif archived in ("all", "include"):
-            pass
-        else:
-            rows = [r for r in rows if not bool(r.get("archived"))]
-        decorated = [_decorate_account(r) for r in rows]
-        decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
-        rows = sorted(decorated, key=lambda x: int(x.get("id") or 0), reverse=True)
-        return rows[offset: offset + limit]
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        return rows[max(0, int(offset or 0)): max(0, int(offset or 0)) + max(1, int(limit))]
+
+
+def list_accounts_page(limit: int = 50, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> dict:
+    with _LOCK:
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        total = len(rows)
+        limit = max(1, int(limit))
+        offset = max(0, int(offset or 0))
+        items = rows[offset: offset + limit]
+        latest = max((str(row.get("updated_at") or "") for row in rows), default="")
+        return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}"}
 
 
 def get_account(acc_id: int) -> dict | None:
