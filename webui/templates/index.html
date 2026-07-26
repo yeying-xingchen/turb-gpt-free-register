@@ -1268,12 +1268,13 @@ function _planCell(r) {
     const detail = stamp ? `${queued ? '入队' : '开始'}: ${esc(stamp)}` : '';
     return `<span class="pill status-running" title="${detail}">${label}</span>`;
   }
-  if (err && ok === false) {
+  if (err || r.plan_check_status === 'failed') {
+    const reason = err || '套餐查询失败，未返回具体原因';
     const hasLastSuccess = Boolean(r.plan_last_success_at);
     const lastPlan = hasLastSuccess ? `${plan}${r.plus_trial_eligible ? '/可Plus试用' : ''}` : '';
     const lastText = lastPlan ? `（上次: ${lastPlan}）` : '';
     const lastTitle = hasLastSuccess ? `上次成功: ${esc(r.plan_last_success_at)}` : '';
-    return `<span class="pill status-failed" title="${[title, lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span>`;
+    return `<div class="extract-link-cell"><span class="pill status-failed" title="${[esc(reason), lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
   }
   const lower = plan.toLowerCase();
 

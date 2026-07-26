@@ -1101,7 +1101,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
     fields = (
         "id", "email", "archived",
         "plan_type", "current_plan_type", "plus_trial_eligible",
-        "plan_check_status", "plan_check_error",
+        "plan_check_status", "plan_check_ok", "plan_check_error",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
