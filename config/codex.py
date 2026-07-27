@@ -53,7 +53,7 @@ ENABLE_CODEX_AUTO: bool = False
 #   "cloak"       = 调用 CloakBrowser 完成授权页面/手机验证/回调捕获
 #   "browser_use" = 调用 Browser Use Cloud 完成授权页面/手机验证/回调捕获
 #   "same_as_registration" = 跟随 REGISTRATION_DRIVER
-CODEX_OAUTH_DRIVER: str = "cloak"
+CODEX_OAUTH_DRIVER: str = "roxy"
 
 
 
