@@ -9,6 +9,7 @@
     - 用于注册的邮箱.json     Outlook 账号池完整状态
     - 注册成功的邮箱.json     注册成功账号完整状态
 """
+import hashlib
 import json
 import sqlite3
 import threading
@@ -1101,7 +1102,10 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
     fields = (
         "id", "email", "archived",
         "plan_type", "current_plan_type", "plus_trial_eligible",
-        "plan_check_status", "plan_check_error",
+        "plan_check_status", "plan_check_ok", "plan_check_error",
+        "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
+        "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
+        "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
@@ -1138,7 +1142,32 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
             item["has_access_token"] = bool(str(row.get("access_token") or "").strip())
             items.append(item)
         latest = max((str(row.get("updated_at") or "") for row in all_rows), default="")
-        return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}"}
+        # updated_at 目前只有秒级精度；一次快速查询可能在同一秒内完成
+        # queued -> running -> success/failed，导致 revision 不变，前端跳过合并状态，
+        # 页面就会一直停在“查询中”。把轻量状态本身纳入签名，保证状态变化可被轮询发现。
+        revision_payload = json.dumps(
+            [
+                {
+                    "id": row.get("id"),
+                    "updated_at": row.get("updated_at"),
+                    "plan_check_status": row.get("plan_check_status"),
+                    "plan_check_ok": row.get("plan_check_ok"),
+                    "plan_check_error": row.get("plan_check_error"),
+                    "current_plan_type": row.get("current_plan_type"),
+                    "plan_type": row.get("plan_type"),
+                    "plus_trial_eligible": row.get("plus_trial_eligible"),
+                    "extract_link_status": row.get("extract_link_status"),
+                    "codex_status": row.get("codex_status"),
+                    "codex_agent_status": row.get("codex_agent_status"),
+                }
+                for row in all_rows
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        revision_sig = hashlib.sha1(revision_payload.encode("utf-8")).hexdigest()[:12]
+        return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}:{revision_sig}"}
 
 
 def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> list[dict]:

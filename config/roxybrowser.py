@@ -11,12 +11,12 @@ from config.env_loader import env_str, apply_env_overrides
 
 
 # 注册驱动：
-#   "protocol"     = 原有 curl_cffi 纯协议注册
+#   "protocol"     = 原有 curl_cffi 纯协议注册（容易封号，不建议）
 #   "roxy"         = 调用 RoxyBrowser 指纹浏览器 + Selenium 自动化注册
 #   "cloak"        = 调用 CloakBrowser + Playwright/Selenium 适配层注册
 #   "browser_use"  = Browser Use Cloud stealth Chromium + Playwright
 #   "skyvern"      = Skyvern Browser Sessions + Playwright
-REGISTRATION_DRIVER: str = "browser_use"
+REGISTRATION_DRIVER: str = "roxy"
 
 # RoxyBrowser 本地 API
 ROXY_API_BASE: str = "http://127.0.0.1:50100"

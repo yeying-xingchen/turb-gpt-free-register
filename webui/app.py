@@ -153,7 +153,7 @@ def _compact_job_for_list(row: dict) -> dict:
             out[key] = value
     err = str(row.get("error_message") or "").strip()
     if err:
-        # 列表只需要摘要；完整错误和堆栈看“补跑日志”。
+        # 列表只需要摘要；完整错误和堆栈看“任务日志”。
         out["error_message"] = err[:240] + ("…" if len(err) > 240 else "")
     return out
 

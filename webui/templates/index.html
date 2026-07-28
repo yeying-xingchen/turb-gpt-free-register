@@ -529,6 +529,15 @@
     .jobs-table-v2 .jobs-v2-op--view:hover { background: #909399; color: #fff; }
     .jobs-table-v2 .jobs-v2-op--retry { background: #E7FCF8; color: #2bb8a6; }
     .jobs-table-v2 .jobs-v2-op--retry:hover { background: #2bb8a6; color: #fff; }
+    .jobs-table-v2 .jobs-v2-op--stop { background: #fff7e6; color: #fa8c16; }
+    .jobs-table-v2 .jobs-v2-op--stop:hover { background: #fa8c16; color: #fff; }
+    .jobs-table-v2 .jobs-v2-op--otp { background: #ecf5ff; color: #409eff; }
+    .jobs-table-v2 .jobs-v2-op--otp:hover { background: #409eff; color: #fff; }
+    .jobs-table-v2 .manual-otp-input--v2 {
+      width: 86px; height: 32px; margin-right: 8px; padding: 0 8px;
+      border: 1px solid #dcdfe6; border-radius: 6px; font: inherit; font-size: 12px;
+    }
+    .jobs-table-v2 .col-actions { width: 280px; }
     .jobs-table-v2 .jobs-v2-op--del { background: #ffe0e0; color: #e64545; }
     .jobs-table-v2 .jobs-v2-op--del:hover { background: #e64545; color: #fff; }
     .jobs-table-v2 .jobs-v2-op:disabled { opacity: .5; cursor: not-allowed; }
@@ -1992,6 +2001,7 @@
         <div class="acc-v2-btn-group acc-v2-search-wrap">
           <input id="qAccountsV2" type="search" placeholder="搜索邮箱、token、来源…" autocomplete="off">
         </div>
+
         <div class="acc-v2-btn-group">
           <span class="acc-v2-selected" id="accountsSelectedHintV2">已选 0</span>
           <label class="acc-v2-inline" title="批量补跑 Codex 的并发线程数">线程
@@ -2008,13 +2018,14 @@
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通 Plus 的账号">已开通Plus</button>
           <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
+
         </div>
       </div>
       <div class="jobs-toolbar-v2" id="accountsToolbarV2">
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">套餐/提链</span>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnExtractSelectedLinksV2" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置 PIX/UPI">提链</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnExtractSelectedLinksV2" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置 PIX/UPI/KAKAO_PAY/IDEAL">提链</button>
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">Agent</span>
@@ -2475,6 +2486,8 @@ function jobsV2OpIcons() {
   return {
     view: `<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
     retry: `<svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`,
+    stop: `<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`,
+    check: `<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>`,
     del: `<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`,
   };
 }
@@ -2663,13 +2676,15 @@ function renderJobs() {
     const icons = jobsV2OpIcons();
     bodyV2.innerHTML = rows.map(j => {
       const running = ['running','stopping'].includes(j.status);
+      const stoppable = ['pending','running','stopping'].includes(j.status);
       const started = formatDateTime(j.started_at);
       const completed = formatDateTime(j.completed_at);
       const err = j.error_message || '';
+      const manualOtp = j.status === 'running' && j.email && j.manual_otp_required;
       return `
       <tr>
         <td class="col-check"><input type="checkbox" class="job-row-check" data-job-id="${esc(j.id)}" ${JOB_SELECTED.has(Number(j.id)) ? 'checked' : ''} ${running ? 'disabled title="运行中的任务不能选择"' : ''}></td>
-        <td class="col-id">#${esc(j.id)}</td>
+        <td class="col-id">#${esc(j.id)}${j.parent_job_id ? `<div class="sub-cell" title="重试自任务 #${esc(j.parent_job_id)}">↳ #${esc(j.parent_job_id)} · ${esc(j.retry_attempt || 1)}</div>` : ''}</td>
         <td class="col-status">${pillV2(j.display_status || j.status)}</td>
         <td class="col-email" title="${esc(j.email || '-')}">${esc(j.email || '-')}</td>
         <td class="col-time" title="${esc(started)}">${esc(started)}</td>
@@ -2678,13 +2693,16 @@ function renderJobs() {
         <td class="col-actions">
           <div class="jobs-v2-ops">
             <button type="button" class="jobs-v2-op jobs-v2-op--view" data-log-job="${esc(j.id)}" title="查看日志">${icons.view}</button>
-            ${j.retryable ? `<button type="button" class="jobs-v2-op jobs-v2-op--retry" data-retry-job="${esc(j.id)}" title="${esc(j.retry_label || '重试')}">${icons.retry}</button>` : ''}
-            <button type="button" class="jobs-v2-op jobs-v2-op--del" data-delete-job="${esc(j.id)}" ${running ? 'disabled title="运行中的任务不能删除"' : 'title="删除"'}>${icons.del}</button>
+            ${manualOtp ? `<input class="manual-otp-input manual-otp-input--v2" data-otp-email="${esc(j.email)}" data-otp-job="${esc(j.id)}" placeholder="邮箱验证码" maxlength="8" title="手动模式下，打开邮箱后把 6 位验证码贴这里"><button type="button" class="jobs-v2-op jobs-v2-op--otp" data-submit-otp-job="${esc(j.id)}" data-email="${esc(j.email)}" title="提交验证码">${icons.check}</button>` : ''}
+            ${stoppable ? `<button type="button" class="jobs-v2-op jobs-v2-op--stop" data-stop-job="${esc(j.id)}" title="${j.status === 'stopping' ? '停止/修复' : '停止'}">${icons.stop}</button>` : ''}
+            ${j.retryable ? `<button type="button" class="jobs-v2-op jobs-v2-op--retry" data-retry-job="${esc(j.id)}" title="${esc(j.retry_action === 'codex' ? '账号已创建，仅补跑 Codex 授权' : (j.retry_label || '重试'))}">${icons.retry}</button>` : ''}
+            <button type="button" class="jobs-v2-op jobs-v2-op--del" data-delete-job="${esc(j.id)}" ${running ? 'disabled title="运行中的任务不能删除；如需删除请先停止"' : 'title="删除"'}>${icons.del}</button>
           </div>
         </td>
       </tr>`;
     }).join('') || '<tr><td colspan="8" style="text-align:center;color:#909399;padding:28px;">暂无任务</td></tr>';
   }
+
 
   updateJobsSelectionUi(rows);
   _renderPager('jobs', total);
@@ -3081,12 +3099,13 @@ function _planCell(r) {
     const detail = stamp ? `${queued ? '入队' : '开始'}: ${esc(stamp)}` : '';
     return `<span class="pill status-running" title="${detail}">${label}</span>`;
   }
-  if (err && ok === false) {
+  if (err || r.plan_check_status === 'failed') {
+    const reason = err || '套餐查询失败，未返回具体原因';
     const hasLastSuccess = Boolean(r.plan_last_success_at);
     const lastPlan = hasLastSuccess ? `${plan}${r.plus_trial_eligible ? '/可Plus试用' : ''}` : '';
     const lastText = lastPlan ? `（上次: ${lastPlan}）` : '';
     const lastTitle = hasLastSuccess ? `上次成功: ${esc(r.plan_last_success_at)}` : '';
-    return `<span class="pill status-failed" title="${[title, lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span>`;
+    return `<div class="extract-link-cell"><span class="pill status-failed" title="${[esc(reason), lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
   }
   const lower = plan.toLowerCase();
 
@@ -3169,7 +3188,7 @@ function _extractLinkAction(r) {
   const eligible = plan === 'free' && !!r.plus_trial_eligible;
   if (!eligible) return '';
   const failedReason = s === 'failed' ? (r.extract_link_error || r.extract_link_message || '') : '';
-  return `<button class="good" data-extract-link="${esc(r.id)}" title="${esc(failedReason ? '重新提链；上次失败原因：' + failedReason : '为该 free(可Plus试用) 账号创建 PIX/UPI 提链任务')}">提链</button>`;
+  return `<button class="good" data-extract-link="${esc(r.id)}" title="${esc(failedReason ? '重新提链；上次失败原因：' + failedReason : '为该 free(可Plus试用) 账号创建 PIX/UPI/KAKAO_PAY/IDEAL 提链任务')}">提链</button>`;
 }
 function _codexAction(r) {
   const s = r.codex_status || '';
@@ -3685,7 +3704,7 @@ async function extractOneLink(id, btn) {
     showToast('仅支持 free(可Plus试用) 账号提链');
     return;
   }
-  if (!confirm(`确定为该账号提链吗？\n\n${acc.email || ('#' + id)}\n\n提链类型按配置使用 PIX/UPI，成功会消耗 1 次 CDK。`)) return;
+  if (!confirm(`确定为该账号提链吗？\n\n${acc.email || ('#' + id)}\n\n提链类型按配置使用 PIX/UPI/KAKAO_PAY/IDEAL，成功会消耗 1 次 CDK。`)) return;
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '提链中…';
