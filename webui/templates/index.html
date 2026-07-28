@@ -835,7 +835,7 @@ function renderJobs() {
       <td class="muted wrap" title="${esc(j.error_message || '')}">${esc(short(j.error_message || '', 90))}</td>
       <td class="actions-cell">
         <div class="actions job-actions">
-          <button data-log-job="${esc(j.id)}">补跑日志</button>
+          <button data-log-job="${esc(j.id)}">任务日志</button>
           ${j.status === 'running' && j.email && j.manual_otp_required ? `
             <input class="manual-otp-input" data-otp-email="${esc(j.email)}" data-otp-job="${esc(j.id)}" placeholder="邮箱验证码" maxlength="8" style="width:96px;min-height:28px;padding:2px 6px;" title="手动模式下，打开邮箱后把 6 位验证码贴这里">
             <button class="good" data-submit-otp-job="${esc(j.id)}" data-email="${esc(j.email)}">提交验证码</button>
