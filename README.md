@@ -424,6 +424,28 @@ CPA_MANAGEMENT_KEY = "你的CPA管理密钥"
 
 ## WebUI 推荐方式
 
+推荐使用项目根目录单脚本后台管理：
+
+```bash
+./webui.sh start      # 启动
+./webui.sh stop       # 关闭
+./webui.sh restart    # 重启
+./webui.sh status     # 状态
+./webui.sh logs       # 查看实时日志
+```
+
+脚本默认启动 `http://127.0.0.1:5000`，日志写入 `logs/webui.log`，PID 写入 `run/webui.pid`。
+
+可通过环境变量调整：
+
+```bash
+PORT=8000 OPEN_BROWSER=1 ./webui.sh start
+HOST=0.0.0.0 PORT=5000 ./webui.sh restart
+AUTH_CODE=你的授权码 ./webui.sh start
+```
+
+也可以直接前台启动：
+
 启动：
 
 ```bash

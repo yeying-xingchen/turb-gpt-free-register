@@ -81,3 +81,5 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+webui.log
+webui.pid

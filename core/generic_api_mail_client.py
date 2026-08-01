@@ -12,8 +12,11 @@ import json
 import logging
 import re
 import time
+import base64
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 import requests
 
@@ -27,6 +30,7 @@ _CONTEXT_WORDS = ("code", "verify", "verification", "验证码", "代码", "确�
 _CONTEXT_CACHE: dict[str, "GenericApiEmailAccount"] = {}
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ACCOUNTS_FILE = _PROJECT_ROOT / "用于注册的API邮箱.txt"
+_YANGYANG_MESSAGES_RE = re.compile(r"/messages/([^/]+)/([^/?#]+)", re.IGNORECASE)
 
 
 class GenericApiMailError(RuntimeError):
@@ -54,16 +58,38 @@ def _flatten_json(obj) -> str:
     return "\n".join(parts)
 
 
+def _decode_data_uri(text: str) -> str:
+    """把 data:text/html;base64,... 正文解码成可抽取 OTP 的 HTML/文本。"""
+    if not isinstance(text, str):
+        return ""
+    if not text.startswith("data:"):
+        return text
+    try:
+        _meta, payload = text.split(",", 1)
+    except ValueError:
+        return text
+    if ";base64" in _meta.lower():
+        try:
+            return base64.b64decode(payload).decode("utf-8", errors="replace")
+        except Exception:
+            return text
+    try:
+        from urllib.parse import unquote_to_bytes
+        return unquote_to_bytes(payload).decode("utf-8", errors="replace")
+    except Exception:
+        return text
+
+
 def _extract_code(text: str) -> str | None:
     """从纯文本/HTML/JSON 文本中提取 6 位 OTP。"""
     if not text:
         return None
 
     # 兼容 JSON：优先把所有 value 拉平再抽取。
-    candidates_text = [text]
+    candidates_text = [_decode_data_uri(text), text]
     try:
         parsed = json.loads(text)
-        candidates_text.insert(0, _flatten_json(parsed))
+        candidates_text.insert(0, _decode_data_uri(_flatten_json(parsed)))
     except Exception:
         pass
 
@@ -83,6 +109,108 @@ def _extract_code(text: str) -> str | None:
             if any(w.lower() in window for w in _CONTEXT_WORDS):
                 return code
         return codes[-1]
+    return None
+
+
+def _parse_yangyang_code_url(code_url: str) -> tuple[str, str, str] | None:
+    """
+    解析 yangyang.website 这类邮箱页面：
+        /messages/{token}/{email}
+    返回 (origin, token, email)。
+    """
+    try:
+        parsed = urlparse(code_url)
+    except Exception:
+        return None
+    m = _YANGYANG_MESSAGES_RE.search(parsed.path or "")
+    if not m:
+        return None
+    origin = urlunparse((parsed.scheme or "http", parsed.netloc, "", "", "", ""))
+    token = unquote(m.group(1))
+    email = unquote(m.group(2))
+    if not origin or not token or not email:
+        return None
+    return origin.rstrip("/"), token, email
+
+
+def _parse_yangyang_ts(value: str | None) -> float | None:
+    if not value:
+        return None
+    raw = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(raw[:19], fmt).timestamp()
+        except Exception:
+            pass
+    return None
+
+
+def _fetch_yangyang_otp(
+    session: requests.Session,
+    code_url: str,
+    headers: dict,
+    after_ts: float | None = None,
+) -> str | None:
+    """从 yangyang 邮箱页面的列表 API + 详情 API 中抽取最新 6 位验证码。"""
+    parsed = _parse_yangyang_code_url(code_url)
+    if not parsed:
+        return None
+    origin, token, email = parsed
+    token_q = quote(token, safe="")
+    email_q = quote(email, safe="@._+-")
+    api_url = f"{origin}/api/messages/{token_q}/{email_q}"
+
+    items: list[dict] = []
+    cursor: str | None = None
+    # 一般第一页足够；保守支持最多翻 5 页。
+    for _ in range(5):
+        url = api_url if not cursor else f"{api_url}?cursor={quote(str(cursor), safe='')}"
+        resp = session.get(url, headers={**headers, "Accept": "application/json"}, timeout=20, verify=False)
+        if resp.status_code != 200:
+            logger.debug(f"[GenericAPI] yangyang 邮件列表 HTTP {resp.status_code}: {resp.text[:160]}")
+            return None
+        data = resp.json()
+        page_items = data.get("items") or []
+        if isinstance(page_items, list):
+            items.extend([x for x in page_items if isinstance(x, dict)])
+        if not data.get("has_more") or not data.get("next_cursor"):
+            break
+        cursor = str(data.get("next_cursor"))
+
+    # API 默认新邮件在前；再次按时间倒序，尽量取最新验证码。
+    items.sort(key=lambda x: _parse_yangyang_ts(x.get("received_at") or x.get("receivedAt")) or 0, reverse=True)
+    for item in items:
+        msg_ts = _parse_yangyang_ts(item.get("received_at") or item.get("receivedAt"))
+        if after_ts and msg_ts and msg_ts + 2 < after_ts:
+            continue
+        msg_id = item.get("id")
+        if not msg_id:
+            continue
+        detail_url = f"{origin}/message/{quote(str(msg_id), safe='')}/{token_q}/{email_q}"
+        try:
+            detail_resp = session.get(detail_url, headers={**headers, "Accept": "application/json"}, timeout=20, verify=False)
+            if detail_resp.status_code != 200:
+                continue
+            detail = detail_resp.json()
+        except Exception as exc:
+            logger.debug(f"[GenericAPI] yangyang 邮件详情读取失败: {type(exc).__name__}: {exc}")
+            continue
+
+        body = _decode_data_uri(str(detail.get("body") or ""))
+        subject = str(detail.get("subject") or item.get("subject") or "")
+        text = "\n".join([
+            subject,
+            str(detail.get("fromAddress") or item.get("from_address") or ""),
+            str(detail.get("receivedAt") or item.get("received_at") or ""),
+            body,
+        ])
+        code = _extract_code(text)
+        if code:
+            logger.info(
+                f"[GenericAPI] yangyang 页面提取到 OTP={code}, "
+                f"mail_id={msg_id}, subject={subject[:80]!r}"
+            )
+            return code
     return None
 
 
@@ -181,9 +309,37 @@ def fetch_latest_otp(
 
     while time.time() < deadline:
         try:
-            resp = requests.get(account.code_url, headers=headers, timeout=20, verify=False)
-            text = resp.text or ""
-            if resp.status_code == 200:
+            session = requests.Session()
+            yy_code = _fetch_yangyang_otp(session, account.code_url, headers, after_ts=after_ts)
+            if yy_code:
+                code = yy_code
+                now_seen = time.time()
+                if not best_otp:
+                    best_otp = code
+                    best_seen_at = now_seen
+                    settle_until = now_seen + settle
+                    logger.info(
+                        f"[GenericAPI] 首次锁定 OTP={code}, "
+                        f"等 {settle}s 看取码接口是否出现更新验证码..."
+                    )
+                elif code != best_otp:
+                    logger.info(
+                        f"[GenericAPI] 发现更新 OTP={code}，"
+                        f"替换之前的 {best_otp}, 重置 settle 计时"
+                    )
+                    best_otp = code
+                    best_seen_at = now_seen
+                    settle_until = now_seen + settle
+                else:
+                    logger.debug(f"[GenericAPI] 取码接口仍返回候选 OTP={best_otp}")
+                resp = None
+                text = ""
+            else:
+                resp = session.get(account.code_url, headers=headers, timeout=20, verify=False)
+                text = resp.text or ""
+            if resp is None:
+                pass
+            elif resp.status_code == 200:
                 code = _extract_code(text)
                 if code:
                     now_seen = time.time()
