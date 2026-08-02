@@ -6,8 +6,6 @@ ChatGPT 协议注册全流程入口
 import sys
 import argparse
 import logging
-import random
-import string
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
@@ -39,6 +37,7 @@ from core.account_export import (
 )
 from core.email_provider import acquire_email, wait_for_otp
 from core.humanize import delay as human_delay
+from core.name_samples import random_display_name
 from core.profile_utils import generate_random_birthday
 
 # 配置日志
@@ -123,13 +122,7 @@ def _finalize_registration_session(
 
 def generate_display_name() -> str:
     """生成只包含英文字母和空格的显示名，符合注册接口限制。"""
-    first = random.choice(string.ascii_uppercase) + "".join(
-        random.choices(string.ascii_lowercase, k=random.randint(3, 6))
-    )
-    last = random.choice(string.ascii_uppercase) + "".join(
-        random.choices(string.ascii_lowercase, k=random.randint(3, 6))
-    )
-    return f"{first} {last}"
+    return random_display_name()
 
 
 def prepare_registration_inputs() -> tuple[str, str, str]:

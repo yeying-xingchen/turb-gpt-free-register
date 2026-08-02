@@ -6,6 +6,7 @@ import logging
 import random
 import string
 import time
+import uuid
 from pathlib import Path
 
 from config import roxybrowser as _cfg
@@ -44,6 +45,8 @@ def _build_driver(opened: RoxyOpenResult):
     if opened.debugger_address:
         logger.info("[Roxy] Selenium 连接 debuggerAddress=%s", opened.debugger_address)
         options = Options()
+        # 页面里长轮询/风控脚本偶尔会让 driver.get 等到超时；eager 只等 DOMContentLoaded。
+        options.page_load_strategy = "eager"
         options.add_experimental_option("debuggerAddress", opened.debugger_address)
         driver_path = ""
         try:
@@ -54,13 +57,19 @@ def _build_driver(opened: RoxyOpenResult):
             driver_path = ""
         if driver_path:
             logger.info("[Roxy] 使用 Roxy chromedriver=%s", driver_path)
-            return webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
-        return webdriver.Chrome(options=options)
+            driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
+        else:
+            driver = webdriver.Chrome(options=options)
+        _apply_browser_automation_mask(driver)
+        return driver
 
     if opened.webdriver_url:
         logger.info("[Roxy] Selenium 连接 webdriver_url=%s", opened.webdriver_url)
         options = Options()
-        return RemoteWebDriver(command_executor=opened.webdriver_url, options=options)
+        options.page_load_strategy = "eager"
+        driver = RemoteWebDriver(command_executor=opened.webdriver_url, options=options)
+        _apply_browser_automation_mask(driver)
+        return driver
 
     raise RuntimeError("Roxy 未返回可连接的 Selenium 地址")
 
@@ -70,6 +79,9 @@ def _center_browser_window(driver) -> None:
     if bool(getattr(_cfg, "ROXY_OPEN_HEADLESS", False)):
         return
     try:
+        import platform
+        if platform.system().lower() != "windows":
+            return
         import ctypes
 
         class _Rect(ctypes.Structure):
@@ -99,11 +111,249 @@ def _wait(driver, timeout: int | None = None):
     return WebDriverWait(driver, timeout or int(_cfg.ROXY_SELENIUM_TIMEOUT))
 
 
+def _safe_get(driver, url: str, *, timeout: int = 45, attempts: int = 2, accept_hosts: tuple[str, ...] = ()) -> None:
+    """带容错的页面跳转。
+
+    Roxy/Chrome 150 偶发 `Timed out receiving message from renderer`，实际页面可能已经可用。
+    这里超时后先 `window.stop()`，只要当前 URL/DOM 已进入目标页就继续；否则重试一次。
+    """
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+
+    last_exc: Exception | None = None
+    old_timeout = int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)
+    hosts = tuple(h.lower() for h in (accept_hosts or ()))
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            try:
+                driver.set_page_load_timeout(max(10, int(timeout)))
+                driver.set_script_timeout(8)
+            except Exception:
+                pass
+            driver.get(url)
+            return
+        except TimeoutException as exc:
+            last_exc = exc
+            logger.warning(
+                "%s 页面加载超时，尝试停止加载后检查 DOM：url=%s attempt=%s/%s error=%s",
+                _log_prefix(driver), url, attempt, attempts, str(exc).splitlines()[0] if str(exc) else "TimeoutException",
+            )
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+            time.sleep(1.0)
+            try:
+                current = str(driver.current_url or "").lower()
+            except Exception:
+                current = ""
+            try:
+                ready = str(driver.execute_script("return document.readyState || ''") or "")
+                has_body = bool(driver.execute_script("return !!document.body"))
+            except Exception:
+                ready = ""
+                has_body = False
+            target_ok = any(h in current for h in hosts) if hosts else (url.split("/", 3)[2].lower() in current)
+            if target_ok and has_body:
+                logger.info(
+                    "%s 页面加载虽超时但 DOM 可用，继续流程：current=%s readyState=%s",
+                    _log_prefix(driver), current[:180], ready or "-",
+                )
+                return
+            if attempt < attempts:
+                try:
+                    driver.get("about:blank")
+                except Exception:
+                    pass
+                time.sleep(1.5 * attempt)
+                continue
+        except WebDriverException as exc:
+            last_exc = exc
+            if attempt < attempts:
+                logger.warning("%s 页面跳转失败，准备重试：url=%s attempt=%s/%s error=%s", _log_prefix(driver), url, attempt, attempts, exc)
+                time.sleep(1.5 * attempt)
+                continue
+            raise
+        finally:
+            try:
+                driver.set_page_load_timeout(old_timeout)
+            except Exception:
+                pass
+    raise last_exc or RuntimeError(f"页面跳转失败: {url}")
+
+
 def _visible(el) -> bool:
     try:
         return el.is_displayed() and el.is_enabled()
     except Exception:
         return False
+
+
+def _browser_actions_enabled() -> bool:
+    try:
+        from config import humanize as _hcfg
+        return bool(getattr(_hcfg, "ENABLE_HUMANIZE_BROWSER_ACTIONS", True))
+    except Exception:
+        return True
+
+
+def _apply_browser_automation_mask(driver) -> None:
+    """连接 Selenium 后尽量降低明显自动化特征；失败不影响主流程。"""
+    if not _browser_actions_enabled():
+        return
+    try:
+        script = r"""
+        Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
+        if (!window.chrome) window.chrome = {};
+        if (!window.chrome.runtime) window.chrome.runtime = {};
+        const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+        if (originalQuery) {
+          window.navigator.permissions.query = (parameters) => (
+            parameters && parameters.name === 'notifications'
+              ? Promise.resolve({ state: Notification.permission })
+              : originalQuery(parameters)
+          );
+        }
+        """
+        if hasattr(driver, "execute_cdp_cmd"):
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": script})
+        try:
+            driver.execute_script(script)
+        except Exception:
+            pass
+        logger.info("%s 已注入浏览器自动化特征弱化脚本", _log_prefix(driver))
+    except Exception as exc:
+        logger.debug("%s 注入自动化特征弱化脚本失败：%s", _log_prefix(driver), exc)
+
+
+def _human_scroll_to(driver, el) -> None:
+    try:
+        block = random.choice(["center", "nearest", "center"])
+        driver.execute_script("arguments[0].scrollIntoView({block: arguments[1], inline:'nearest'});", el, block)
+        if _browser_actions_enabled():
+            time.sleep(random.uniform(0.08, 0.35))
+            # 轻微滚动抖动，避免每次都精准居中。
+            driver.execute_script("window.scrollBy(0, arguments[0]);", random.randint(-90, 90))
+            time.sleep(random.uniform(0.05, 0.22))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center', inline:'nearest'});", el)
+    except Exception:
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        except Exception:
+            pass
+
+
+def _human_click(driver, el, *, label: str = "") -> None:
+    """快速人工化点击。
+
+    之前用 ActionChains 在 Roxy/Chrome 150 上偶发卡住 1-2 分钟，导致邮箱提交很慢。
+    这里改为 CDP 派发鼠标事件；没有 CDP 时再用 JS/原生 click 兜底。
+    """
+    _human_scroll_to(driver, el)
+    if not _browser_actions_enabled():
+        time.sleep(0.2)
+        el.click()
+        return
+    try:
+        human_delay("click")
+        point = driver.execute_script(r"""
+        const el = arguments[0];
+        const r = el.getBoundingClientRect();
+        const x = r.left + r.width * (0.30 + Math.random() * 0.40);
+        const y = r.top + r.height * (0.35 + Math.random() * 0.30);
+        return {x, y, w:r.width, h:r.height};
+        """, el) or {}
+        x = float(point.get("x") or 0)
+        y = float(point.get("y") or 0)
+        if hasattr(driver, "execute_cdp_cmd") and x > 0 and y > 0:
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+            time.sleep(random.uniform(0.05, 0.22))
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
+            time.sleep(random.uniform(0.035, 0.13))
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+        else:
+            driver.execute_script(r"""
+            const el = arguments[0];
+            el.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, cancelable:true, pointerType:'mouse'}));
+            el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+            el.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+            el.click();
+            """, el)
+    except Exception as exc:
+        logger.debug("%s 人工化点击失败，回退 el.click label=%s err=%s", _log_prefix(driver), label, exc)
+        time.sleep(random.uniform(0.12, 0.45))
+        try:
+            driver.execute_script("arguments[0].click();", el)
+        except Exception:
+            el.click()
+
+
+def _human_type_text(driver, el, value: str, *, clear: bool = True) -> None:
+    """按字符/小段输入，触发真实 key events；失败时回退 JS setter。"""
+    if not _browser_actions_enabled():
+        if clear:
+            try:
+                el.clear()
+            except Exception:
+                pass
+        el.send_keys(value)
+        return
+    try:
+        _human_scroll_to(driver, el)
+        try:
+            _human_click(driver, el, label="input_focus")
+        except Exception:
+            driver.execute_script("arguments[0].focus();", el)
+        if clear:
+            from selenium.webdriver.common.keys import Keys
+            mod = Keys.COMMAND
+            try:
+                import platform
+                if platform.system().lower() != "darwin":
+                    mod = Keys.CONTROL
+            except Exception:
+                pass
+            try:
+                el.send_keys(mod, "a")
+                time.sleep(random.uniform(0.04, 0.16))
+                el.send_keys(Keys.BACKSPACE)
+            except Exception:
+                try:
+                    el.clear()
+                except Exception:
+                    pass
+        text = str(value)
+        i = 0
+        while i < len(text):
+            # 邮箱/密码整体仍逐字符，但偶尔 2 字符一组，节奏更自然。
+            step = 2 if random.random() < 0.12 and i + 1 < len(text) else 1
+            el.send_keys(text[i:i + step])
+            i += step
+            human_delay("keystroke")
+            if i < len(text) and random.random() < 0.08:
+                human_delay("typing_pause")
+        driver.execute_script(
+            "arguments[0].dispatchEvent(new Event('input', {bubbles:true}));"
+            "arguments[0].dispatchEvent(new Event('change', {bubbles:true}));",
+            el,
+        )
+    except Exception as exc:
+        logger.debug("%s 人工化输入失败，回退 JS setter err=%s", _log_prefix(driver), exc)
+        _set_element_value(driver, el, value)
+
+
+def _page_warmup(driver, *, reason: str = "") -> None:
+    if not _browser_actions_enabled():
+        return
+    try:
+        human_delay("page_warmup")
+        if hasattr(driver, "execute_cdp_cmd"):
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                "type": "mouseMoved",
+                "x": random.randint(80, 360),
+                "y": random.randint(80, 260),
+            })
+    except Exception:
+        pass
 
 
 def _find_any(driver, selectors: list[str], timeout: int | None = None):
@@ -127,20 +377,12 @@ def _find_any(driver, selectors: list[str], timeout: int | None = None):
 
 def _click_any(driver, selectors: list[str], timeout: int | None = None) -> None:
     el = _find_any(driver, selectors, timeout)
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-    time.sleep(0.2)
-    el.click()
+    _human_click(driver, el, label="click_any")
 
 
 def _type_any(driver, selectors: list[str], value: str, timeout: int | None = None, clear: bool = True) -> None:
     el = _find_any(driver, selectors, timeout)
-    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
-    if clear:
-        try:
-            el.clear()
-        except Exception:
-            pass
-    el.send_keys(value)
+    _human_type_text(driver, el, value, clear=clear)
 
 
 _EMAIL_INPUT_SELECTORS = [
@@ -238,7 +480,7 @@ def _click_email_entry_option(driver) -> bool:
     if _is_oauth_consent_like(driver):
         logger.info("%s 当前疑似 OAuth 授权页，跳过邮箱入口兜底点击", _log_prefix(driver))
         return False
-    clicked = driver.execute_script(r"""
+    target = driver.execute_script(r"""
     const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
       && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
       && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
@@ -261,12 +503,14 @@ def _click_email_entry_option(driver) -> bool:
       .filter(visible)
       .map(el => ({el, attrs: attrText(el), hasLogo: !!el.querySelector('img,svg,use')}))
       .filter(x => good.test(x.attrs) && !bad.test(x.attrs) && !x.hasLogo);
-    if (candidates.length !== 1) return false;
+    if (candidates.length !== 1) return null;
     candidates[0].el.scrollIntoView({block:'center'});
-    candidates[0].el.click();
-    return true;
+    return candidates[0].el;
     """)
-    return bool(clicked)
+    if target:
+        _human_click(driver, target, label="email_entry")
+        return True
+    return False
 
 
 def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
@@ -277,7 +521,7 @@ def _type_email_address(driver, email: str, timeout: int | None = None) -> None:
     while time.time() < end:
         el = _find_visible_email_input_js(driver)
         if el:
-            _set_element_value(driver, el, email)
+            _human_type_text(driver, el, email, clear=True)
             return
         last_state = _email_entry_state(driver)
         if not clicked_email_option and _click_email_entry_option(driver):
@@ -355,13 +599,15 @@ def _submit_nearest_form_for_active_input(driver) -> bool:
     const target = safe[0].el;
     target.scrollIntoView({block:'center'});
     window.__roxy_email_submit_debug = {at: Date.now(), targetAttrs: safe[0].attrs.slice(0,240), buttonCount: rawButtons.length, primary:safe[0].isPrimarySubmit};
-    target.dispatchEvent(new MouseEvent('pointerdown', {bubbles:true, cancelable:true, view:window}));
-    target.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
-    target.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
-    target.click();
-    return {ok:true, reason:safe[0].isPrimarySubmit ? 'clicked_primary_submit' : 'clicked_safe_submit', targetAttrs:safe[0].attrs.slice(0,160), primary:safe[0].isPrimarySubmit};
+    return {ok:true, reason:safe[0].isPrimarySubmit ? 'primary_submit' : 'safe_submit', target, targetAttrs:safe[0].attrs.slice(0,160), primary:safe[0].isPrimarySubmit};
     """) or {}
     if result.get("ok"):
+        target = result.get("target")
+        if target:
+            _human_click(driver, target, label="email_submit")
+        else:
+            logger.warning("%s 邮箱提交未返回目标元素，回退 requestSubmit", _log_prefix(driver))
+            driver.execute_script("document.querySelector('form')?.requestSubmit?.();")
         logger.info("%s 邮箱表单安全提交：%s", _log_prefix(driver), result)
         time.sleep(0.8)
         _assert_not_external_idp(driver, "提交邮箱后")
@@ -370,10 +616,305 @@ def _submit_nearest_form_for_active_input(driver) -> bool:
     return False
 
 
-def _submit_email_step(driver) -> None:
+def _current_email_input_value(driver) -> str:
+    try:
+        state = _email_input_value_state(driver)
+        for item in state.get("inputs") or []:
+            value = str(item.get("value") or "").strip()
+            if "@" in value:
+                return value
+    except Exception:
+        pass
+    return ""
+
+
+def _stabilize_email_input_before_submit(driver, email: str) -> dict:
+    """提交前把 DOM value / React 受控状态 / blur-change 状态统一稳定下来。"""
+    try:
+        return driver.execute_script(r"""
+        const email = String(arguments[0] || '').trim();
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+          && !el.disabled && !el.readOnly;
+        const input = [...document.querySelectorAll('input[type="email"],input[name="email"],input[name="username"],input[autocomplete*="email"]')]
+          .find(visible);
+        if (!input) return {ok:false, reason:'missing_email_input'};
+
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        input.scrollIntoView({block:'center', inline:'nearest'});
+        input.focus();
+        if (setter) setter.call(input, email); else input.value = email;
+
+        // 让 React/表单校验尽量收到完整输入链路。
+        try { input.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, inputType:'insertText', data:email})); } catch (_) {}
+        try { input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:email})); } catch (_) {
+          input.dispatchEvent(new Event('input', {bubbles:true}));
+        }
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+        input.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
+        input.blur();
+        input.focus();
+
+        const form = input.closest('form');
+        const submit = form?.querySelector('button[type="submit"],input[type="submit"]');
+        return {
+          ok:true,
+          value: input.value,
+          active: document.activeElement === input,
+          hasForm: !!form,
+          hasSubmit: !!submit,
+          submitDisabled: submit ? (!!submit.disabled || String(submit.getAttribute('aria-disabled') || '').toLowerCase() === 'true') : null,
+          url: location.href
+        };
+        """, email) or {}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _submit_email_form_stable(driver, email: str) -> dict:
+    """第一次提交就按“补交成功”的方式执行：稳定 value 后 Enter + DOM click。"""
+    try:
+        return driver.execute_script(r"""
+        const email = String(arguments[0] || '').trim();
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+          && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+        const editable = el => visible(el) && !el.readOnly;
+        const input = [...document.querySelectorAll('input[type="email"],input[name="email"],input[name="username"],input[autocomplete*="email"]')]
+          .find(editable);
+        if (!input) return {ok:false, reason:'missing_email_input'};
+        if (!email || !email.includes('@')) return {ok:false, reason:'empty_email', value: email};
+
+        const form = input.closest('form');
+        if (!form) return {ok:false, reason:'missing_form'};
+
+        const bad = /google|apple|microsoft|github|facebook|saml|sso|oauth|social|oidc|idp|provider|authorize|consent|grant|allow/;
+        const attrText = el => {
+          const own = [el.id, el.name, el.type, el.getAttribute('data-testid'), el.getAttribute('data-test-id'),
+            el.getAttribute('data-provider'), el.getAttribute('data-auth-provider'), el.getAttribute('data-idp'),
+            el.getAttribute('aria-label'), el.getAttribute('href'), el.getAttribute('formaction'), el.value, el.className]
+            .filter(Boolean).join(' ');
+          const desc = [...el.querySelectorAll('img,svg,use,[aria-label],[data-provider],[data-testid],[data-test-id]')]
+            .map(x => [x.getAttribute('alt'), x.getAttribute('src'), x.getAttribute('href'), x.getAttribute('xlink:href'),
+              x.getAttribute('aria-label'), x.getAttribute('data-provider'), x.getAttribute('data-testid'), x.getAttribute('data-test-id'), x.className]
+              .filter(Boolean).join(' '))
+            .join(' ');
+          return `${own} ${desc}`.toLowerCase();
+        };
+
+        const formId = form.getAttribute('id') || '';
+        const buttons = [
+          ...form.querySelectorAll('button,input[type="submit"]'),
+          ...(formId ? [...document.querySelectorAll(`button[form="${CSS.escape(formId)}"],input[type="submit"][form="${CSS.escape(formId)}"]`)] : [])
+        ].filter((el, idx, arr) => arr.indexOf(el) === idx)
+          .filter(el => visible(el) && !bad.test(attrText(el)) && !el.querySelector('img,svg,use'));
+        const submit = buttons.find(el => (el.getAttribute('type') || '').toLowerCase() === 'submit') || buttons[0] || null;
+        if (!submit) return {ok:false, reason:'missing_safe_submit'};
+
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        input.scrollIntoView({block:'center', inline:'nearest'});
+        input.focus();
+        if (setter) setter.call(input, email); else input.value = email;
+        try { input.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, inputType:'insertText', data:email})); } catch (_) {}
+        try { input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:email})); } catch (_) {
+          input.dispatchEvent(new Event('input', {bubbles:true}));
+        }
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+        input.dispatchEvent(new FocusEvent('blur', {bubbles:true}));
+        input.blur();
+        input.focus();
+
+        submit.scrollIntoView({block:'center', inline:'nearest'});
+
+        // 不要在 execute_script 同步执行 submit.click()：
+        // ChromeDriver 会等前端 submit/navigation，Roxy/Chrome 150 上可能卡到 page/script timeout。
+        // setTimeout 让 Selenium 先返回，点击在页面事件循环里异步发生，和补交逻辑一致。
+        setTimeout(() => {
+          try {
+            input.focus();
+            input.dispatchEvent(new KeyboardEvent('keydown', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
+            input.dispatchEvent(new KeyboardEvent('keypress', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
+            input.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
+            if (submit && !submit.disabled) submit.click();
+            else if (form && typeof form.requestSubmit === 'function') form.requestSubmit();
+          } catch (_) {}
+        }, 80);
+
+        window.__roxy_email_submit_debug = {
+          at: Date.now(),
+          mode: 'stable_async_enter_click',
+          value: input.value,
+          submitAttrs: attrText(submit).slice(0, 240)
+        };
+        return {
+          ok:true,
+          reason:'stable_async_enter_click',
+          value: input.value,
+          submitDisabled: !!submit.disabled || String(submit.getAttribute('aria-disabled') || '').toLowerCase() === 'true',
+          submitAttrs: attrText(submit).slice(0, 180),
+          url: location.href
+        };
+        """, email) or {}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _submit_email_step(driver, email: str | None = None) -> None:
+    # 不再优先走浏览器内 NextAuth fetch：
+    # Roxy/Chrome 150 下 execute_async_script + fetch 偶发卡到 script timeout；
+    # 实测 UI 首次提交后若停在 /auth/login?email=...，由 _recover_email_submit_if_stuck 补交表单更稳定。
+    email_value = str(email or _current_email_input_value(driver) or "").strip()
+    stable = _stabilize_email_input_before_submit(driver, email_value)
+    logger.info("%s 邮箱提交前状态稳定：%s", _log_prefix(driver), stable)
+    time.sleep(random.uniform(0.8, 1.8) if _browser_actions_enabled() else 0.4)
+
+    stable_submit = _submit_email_form_stable(driver, email_value)
+    if stable_submit.get("ok"):
+        logger.info("%s 邮箱稳定表单提交：%s", _log_prefix(driver), stable_submit)
+        time.sleep(1.0)
+        _assert_not_external_idp(driver, "稳定表单提交邮箱后")
+        return
+    logger.warning("%s 邮箱稳定表单提交失败，回退 UI 点击提交：%s", _log_prefix(driver), stable_submit)
     if _submit_nearest_form_for_active_input(driver):
         return
     raise RuntimeError(f"无法提交邮箱步骤（拒绝按页面文字或首个 submit 兜底，避免误点第三方登录），state={_email_entry_state(driver)}")
+
+
+def _recover_email_submit_if_stuck(driver, email: str) -> dict:
+    """邮箱提交后停在 /auth/login?email= 且输入框被清空时，补一次原生表单提交。"""
+    try:
+        return driver.execute_script(r"""
+        const email = String(arguments[0] || '').trim();
+        const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+          && !el.disabled && !el.readOnly;
+        const input = [...document.querySelectorAll('input[type="email"],input[name="email"],input[name="username"],input[autocomplete*="email"]')]
+          .find(visible);
+        if (!input) return {ok:false, reason:'missing_email_input'};
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        input.focus();
+        if (setter) setter.call(input, email); else input.value = email;
+        input.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:email}));
+        input.dispatchEvent(new Event('change', {bubbles:true}));
+        const form = input.closest('form');
+        const submit = form?.querySelector('button[type="submit"],input[type="submit"]');
+        setTimeout(() => {
+          try {
+            input.dispatchEvent(new KeyboardEvent('keydown', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
+            input.dispatchEvent(new KeyboardEvent('keyup', {bubbles:true, cancelable:true, key:'Enter', code:'Enter'}));
+            if (submit && !submit.disabled) submit.click();
+            else if (form && typeof form.requestSubmit === 'function') form.requestSubmit();
+          } catch (_) {}
+        }, 80);
+        return {ok:true, reason:'resubmitted_email_form', value: input.value, hasForm: !!form, hasSubmit: !!submit};
+        """, email) or {}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _submit_email_via_browser_nextauth(driver, email: str) -> dict:
+    """在 Roxy 浏览器上下文里调用 ChatGPT NextAuth signin。
+
+    UI submit 在 Roxy/Chrome 150 上会偶发只跳到 `/auth/login?email=...` 后停住。
+    这里改走浏览器页面内 fetch，仍使用当前 Roxy 浏览器的 cookie / 指纹环境，
+    拿到 auth.openai.com authorize URL 后让浏览器跳转。
+    """
+    try:
+        current = str(getattr(driver, "current_url", "") or "")
+        if "chatgpt.com" not in current:
+            return {"ok": False, "reason": "not_on_chatgpt", "url": current[:180]}
+    except Exception:
+        current = ""
+
+    did = str(uuid.uuid4())
+    auth_log_id = str(uuid.uuid4())
+    old_script_timeout = int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)
+    try:
+        try:
+            driver.set_script_timeout(25)
+        except Exception:
+            pass
+        result = driver.execute_async_script(r"""
+        const email = String(arguments[0] || '').trim();
+        const did = String(arguments[1] || '');
+        const authLogId = String(arguments[2] || '');
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const csrfResp = await fetch('/api/auth/csrf', {
+              method: 'GET',
+              credentials: 'include',
+              headers: {
+                'accept': 'application/json',
+                'cache-control': 'no-cache',
+                'pragma': 'no-cache'
+              }
+            });
+            const csrfText = await csrfResp.text();
+            let csrfData = {};
+            try { csrfData = JSON.parse(csrfText); } catch (_) {}
+            const csrfToken = csrfData.csrfToken || '';
+            if (!csrfResp.ok || !csrfToken) {
+              done({ok:false, stage:'csrf', status:csrfResp.status, body:csrfText.slice(0, 500)});
+              return;
+            }
+
+            const q = new URLSearchParams({
+              prompt: 'login',
+              'ext-oai-did': did,
+              auth_session_logging_id: authLogId,
+              'ext-passkey-client-capabilities': '11111',
+              screen_hint: 'login_or_signup',
+              login_hint: email
+            });
+            const body = new URLSearchParams({
+              callbackUrl: 'https://chatgpt.com/',
+              csrfToken,
+              json: 'true'
+            });
+            const resp = await fetch('/api/auth/signin/openai?' + q.toString(), {
+              method: 'POST',
+              credentials: 'include',
+              headers: {
+                'accept': 'application/json',
+                'content-type': 'application/x-www-form-urlencoded',
+                'cache-control': 'no-cache',
+                'pragma': 'no-cache'
+              },
+              body: body.toString()
+            });
+            const text = await resp.text();
+            let data = {};
+            try { data = JSON.parse(text); } catch (_) {}
+            let url = data.url || '';
+            if (!resp.ok || !url) {
+              done({ok:false, stage:'signin', status:resp.status, body:text.slice(0, 700)});
+              return;
+            }
+
+            try {
+              const u = new URL(url, location.href);
+              if (!u.searchParams.get('screen_hint')) u.searchParams.set('screen_hint', 'login_or_signup');
+              if (!u.searchParams.get('login_hint')) u.searchParams.set('login_hint', email);
+              if (!u.searchParams.get('ext-oai-did')) u.searchParams.set('ext-oai-did', did);
+              if (!u.searchParams.get('auth_session_logging_id')) u.searchParams.set('auth_session_logging_id', authLogId);
+              url = u.toString();
+            } catch (_) {}
+            window.location.assign(url);
+            done({ok:true, stage:'redirect', url:url.slice(0, 260)});
+          } catch (e) {
+            done({ok:false, stage:'exception', error:String(e && (e.stack || e.message) || e).slice(0, 700)});
+          }
+        })();
+        """, email, did, auth_log_id) or {}
+        return result if isinstance(result, dict) else {"ok": False, "reason": "invalid_result", "result": str(result)[:300]}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            driver.set_script_timeout(old_script_timeout)
+        except Exception:
+            pass
 
 
 def _email_input_value_state(driver) -> dict:
@@ -411,6 +952,7 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
     last = None
     cleared_seen_at: float | None = None
     cleared_last_log_at = 0.0
+    cleared_recover_done = False
     expected_email = str(email or "").strip().lower()
     while time.time() < end:
         if _has_access_token(driver):
@@ -434,13 +976,22 @@ def _wait_email_submit_next_state(driver, email: str, timeout: int = 18) -> str:
                 if cleared_seen_at is None:
                     cleared_seen_at = now
                 # URL 已带 email 查询参数时更像是提交后的中间态，给它更长观察窗口。
-                debounce = 6.0 if ("/auth/login" in url and "email=" in url) else 3.5
+                debounce = 18.0 if ("/auth/login" in url and "email=" in url) else 5.0
                 if now - cleared_last_log_at > 2.0:
                     logger.info(
                         "%s 邮箱提交后检测到输入框短暂清空，继续等待跳转：elapsed=%.1fs debounce=%.1fs url=%s",
                         _log_prefix(driver), now - cleared_seen_at, debounce, url[:180],
                     )
                     cleared_last_log_at = now
+                if (
+                    not cleared_recover_done
+                    and "/auth/login" in url
+                    and "email=" in url
+                    and now - cleared_seen_at >= 2.0
+                ):
+                    recover = _recover_email_submit_if_stuck(driver, email)
+                    cleared_recover_done = True
+                    logger.info("%s 邮箱提交后仍停留在 login?email，中途补交一次表单：%s", _log_prefix(driver), recover)
                 if now - cleared_seen_at >= debounce:
                     return "email_cleared"
             else:
@@ -465,7 +1016,7 @@ def _submit_email_and_wait_next(driver, email: str, attempts: int = 3) -> str:
             continue
         logger.info("%s 已填写邮箱并校验通过：%s", _log_prefix(driver), email)
         human_delay("form")
-        _submit_email_step(driver)
+        _submit_email_step(driver, email)
         logger.info("%s 已提交邮箱，等待进入密码页或验证码页（%s/%s）", _log_prefix(driver), attempt, attempts)
         state_name = _wait_email_submit_next_state(driver, email, timeout=20)
         if state_name == "login_password":
@@ -490,8 +1041,7 @@ def _type_otp(driver, code: str) -> None:
     ]:
         els = [e for e in driver.find_elements(By.CSS_SELECTOR, selector) if _visible(e)]
         if len(els) == 1:
-            els[0].clear()
-            els[0].send_keys(code)
+            _human_type_text(driver, els[0], code, clear=True)
             return
 
     # 6 个分格输入框
@@ -503,7 +1053,12 @@ def _type_otp(driver, code: str) -> None:
             numeric_boxes.append(e)
     if len(numeric_boxes) >= len(code):
         for e, ch in zip(numeric_boxes, code):
+            if _browser_actions_enabled():
+                _human_scroll_to(driver, e)
+                time.sleep(random.uniform(0.04, 0.18))
             e.send_keys(ch)
+            if _browser_actions_enabled():
+                human_delay("keystroke")
         return
 
     raise RuntimeError("找不到 OTP 输入框")
@@ -589,12 +1144,10 @@ def _click_resend_email_otp(driver, timeout: int = 20) -> dict:
             return candidates.find(el => enabled(el) && /resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重新发送电子邮件|重发|再次发送|再送信|新しい|届かない/.test((el.innerText || el.textContent || '').toLowerCase())) || null;
             """)
             if btn:
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                time.sleep(0.4)
                 text = str(btn.text or btn.get_attribute('value') or btn.get_attribute('data-dd-action-name') or '').strip()
-                btn.click()
+                _human_click(driver, btn, label="resend_otp")
                 logger.info("%s[OTP] 已点击重新发送验证码按钮：%s", _log_prefix(driver), text or '-')
-                time.sleep(1.5)
+                time.sleep(random.uniform(1.1, 2.4) if _browser_actions_enabled() else 1.5)
                 return {"ok": True, "text": text}
         except Exception as exc:
             last = exc
@@ -775,7 +1328,7 @@ def _select_or_type(driver, selectors: list[str], value: str, timeout: int = 3) 
                         sel.select_by_index(max(0, int(value)-1))
                 driver.execute_script("arguments[0].dispatchEvent(new Event('change', {bubbles:true}));", el)
         else:
-            _set_element_value(driver, el, str(value))
+            _human_type_text(driver, el, str(value), clear=True)
         return True
     except Exception as exc:
         logger.debug('%s 填写字段失败 selectors=%s value=%s err=%s', _log_prefix(driver), selectors, value, exc)
@@ -1007,7 +1560,7 @@ def _click_passwordless_signup_if_present(driver) -> dict:
     如果页面提供“使用一次性验证码”按钮，优先点击进入邮箱 OTP 页面。
     """
     try:
-        return driver.execute_script(r"""
+        result = driver.execute_script(r"""
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none';
         const enabled = el => !el.disabled && String(el.getAttribute('aria-disabled') || '').toLowerCase() !== 'true';
@@ -1052,25 +1605,20 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         const btn = candidates.find(isPasswordlessOtp);
         if (!btn) return {ok:false, reason:'missing_passwordless_button'};
         btn.scrollIntoView({block:'center'});
-        const form = btn.closest('form');
-        try {
-          btn.dispatchEvent(new MouseEvent('pointerdown', {bubbles:true, cancelable:true, view:window}));
-          btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
-          btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
-          btn.click();
-        } catch (e) {
-          if (form && typeof form.requestSubmit === 'function') form.requestSubmit(btn);
-          else if (form) form.submit();
-          else throw e;
-        }
         return {
           ok:true,
-          reason:'clicked_passwordless_send_otp',
+          reason:'passwordless_send_otp_target',
+          button: btn,
           name: btn.getAttribute('name') || '',
           value: btn.getAttribute('value') || '',
           text: (btn.textContent || '').trim().slice(0, 80)
         };
         """) or {"ok": False, "reason": "empty_result"}
+        if result.get("ok") and result.get("button"):
+            _human_click(driver, result.get("button"), label="passwordless_otp")
+            result["reason"] = "clicked_passwordless_send_otp"
+            result.pop("button", None)
+        return result
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
@@ -1110,22 +1658,12 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
         result = driver.execute_script(r"""
-        const password = String(arguments[0]);
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled && !el.readOnly;
-        const setValue = (el, value) => {
-          el.scrollIntoView({block:'center'});
-          el.focus();
-          const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-          if (setter) setter.call(el, value); else el.value = value;
-          el.dispatchEvent(new Event('input', {bubbles:true}));
-          el.dispatchEvent(new Event('change', {bubbles:true}));
-        };
         const input = [...document.querySelectorAll('input[type="password"],input[name*="password" i],input[autocomplete="new-password"]')]
           .find(visible);
         if (!input) return {ok:false, reason:'missing_password_input'};
-        setValue(input, password);
         const form = input.closest('form');
         const scope = form || document;
         const buttons = [...scope.querySelectorAll('button,input[type="submit"]')]
@@ -1139,11 +1677,13 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
         buttons[0].el.scrollIntoView({block:'center'});
-        buttons[0].el.click();
-        return {ok:true, reason:'submitted_password'};
-        """, password) or {}
+        return {ok:true, reason:'password_targets', input, button: buttons[0].el};
+        """) or {}
         if not result.get('ok'):
             raise RuntimeError(f"密码页处理失败：{result} state={last}")
+        _human_type_text(driver, result.get("input"), password, clear=True)
+        human_delay("form", minimum=0.4, maximum=1.4)
+        _human_click(driver, result.get("button"), label="password_submit")
         logger.info("%s 已填写并提交密码页", _log_prefix(driver))
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
         wait_end = time.time() + 20
@@ -1284,37 +1824,40 @@ def _complete_profile_page(driver, name: str, birthday: str, timeout: int = 45) 
 def _click_if_enabled_submit(driver) -> bool:
     """提交资料页：优先 form.requestSubmit/button[type=submit]，不依赖按钮文字。"""
     try:
-        return bool(driver.execute_script(r"""
+        target = driver.execute_script(r"""
         const visible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         const forms = [...document.querySelectorAll('form')].filter(visible);
         for (const form of forms) {
           const submit = form.querySelector('button[type="submit"], input[type="submit"]');
           if (submit && visible(submit) && !submit.disabled) {
             submit.scrollIntoView({block:'center'});
-            submit.click();
-            return true;
+            return submit;
           }
           if (typeof form.requestSubmit === 'function') {
             form.requestSubmit();
-            return true;
+            return 'submitted_by_requestSubmit';
           }
         }
         const submitters = [...document.querySelectorAll('button[type="submit"], input[type="submit"]')]
           .filter(el => visible(el) && !el.disabled);
         if (submitters.length) {
           submitters[0].scrollIntoView({block:'center'});
-          submitters[0].click();
-          return true;
+          return submitters[0];
         }
         // 兜底：页面只有一个可点击 button 时点击它，但仍不读文字。
         const buttons = [...document.querySelectorAll('button:not([disabled])')].filter(visible);
         if (buttons.length === 1) {
           buttons[0].scrollIntoView({block:'center'});
-          buttons[0].click();
-          return true;
+          return buttons[0];
         }
-        return false;
-        """))
+        return null;
+        """)
+        if not target:
+            return False
+        if isinstance(target, str):
+            return True
+        _human_click(driver, target, label="profile_submit")
+        return True
     except Exception:
         return False
 
@@ -1388,7 +1931,7 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
                     logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
-                    driver.get("https://chatgpt.com/")
+                    _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
                     forced_chatgpt_open = True
                     time.sleep(3)
                     current = str(getattr(driver, "current_url", "") or "")
@@ -1430,12 +1973,23 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
         driver = _build_driver(opened)
         _center_browser_window(driver)
         driver.set_page_load_timeout(int(_cfg.ROXY_SELENIUM_TIMEOUT))
+        try:
+            driver.set_script_timeout(12)
+        except Exception:
+            pass
         logger.info("[Roxy注册] 开始：%s，profile=%s", email, opened.profile_id)
 
         otp_after_ts = time.time()
         logger.info("[Roxy注册] 打开登录页：https://chatgpt.com/auth/login")
-        driver.get("https://chatgpt.com/auth/login")
+        _safe_get(
+            driver,
+            "https://chatgpt.com/auth/login",
+            timeout=min(45, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
+            attempts=2,
+            accept_hosts=("chatgpt.com", "auth.openai.com"),
+        )
         human_delay("navigate")
+        _page_warmup(driver, reason="login_page")
         logger.info("[Roxy注册] 登录页加载完成，准备填写邮箱")
         _maybe_accept(driver)
         _check_manual_stop()

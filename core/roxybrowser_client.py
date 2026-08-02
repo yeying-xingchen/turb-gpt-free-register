@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse
@@ -119,6 +120,27 @@ def _project_id_value() -> str | int:
     if not raw:
         return ""
     return int(raw) if raw.isdigit() else raw
+
+
+def _random_roxy_os() -> str:
+    raw = str(getattr(_cfg, "ROXY_RANDOM_OS_CHOICES", "Windows,macOS") or "Windows,macOS")
+    choices = [
+        x.strip()
+        for part in raw.replace("\n", ",").replace(";", ",").split(",")
+        for x in [part]
+        if x.strip()
+    ]
+    valid = {"Windows", "macOS", "Linux", "IOS", "Android"}
+    choices = [x for x in choices if x in valid]
+    if not choices:
+        choices = ["Windows", "macOS"]
+    return random.choice(choices)
+
+
+def _random_roxy_profile_name() -> str:
+    prefix = str(getattr(_cfg, "ROXY_PROFILE_NAME_PREFIX", "rb") or "rb").strip() or "rb"
+    # Roxy 环境名每次创建都不同：前缀 + 毫秒时间戳 + 随机 4 位十六进制。
+    return f"{prefix}-{int(time.time() * 1000)}-{random.randrange(0x10000):04x}"
 
 
 class RoxyBrowserClient:
@@ -354,13 +376,24 @@ class RoxyBrowserClient:
 
     def create_profile(self, payload: dict | None = None) -> str:
         body = dict(getattr(_cfg, "ROXY_PROFILE_CREATE_PAYLOAD", {}) or {})
-        default_os = str(getattr(_cfg, "ROXY_DEFAULT_OS", "macOS") or "macOS").strip()
-        if default_os:
-            # Roxy 官方枚举为 macOS（大小写敏感），默认创建 macOS 指纹环境。
-            body.setdefault("os", default_os)
-        default_os_version = str(getattr(_cfg, "ROXY_DEFAULT_OS_VERSION", "") or "").strip()
-        if default_os_version:
-            body.setdefault("osVersion", default_os_version)
+        random_name_enabled = bool(getattr(_cfg, "ROXY_RANDOM_PROFILE_NAME_ON_CREATE", True))
+        if random_name_enabled:
+            # 覆盖 ROXY_PROFILE_CREATE_PAYLOAD 里的固定 name，避免所有 Roxy 窗口同名。
+            body["name"] = _random_roxy_profile_name()
+        random_os_enabled = bool(getattr(_cfg, "ROXY_RANDOM_OS_ON_CREATE", True))
+        if random_os_enabled:
+            # 每次创建环境随机 Windows / macOS；覆盖 ROXY_PROFILE_CREATE_PAYLOAD 里的固定 os。
+            body["os"] = _random_roxy_os()
+            # osVersion 跟 os 强绑定，随机 OS 时不沿用固定版本，避免 macOS 版本传给 Windows。
+            body.pop("osVersion", None)
+        else:
+            default_os = str(getattr(_cfg, "ROXY_DEFAULT_OS", "macOS") or "macOS").strip()
+            if default_os:
+                # Roxy 官方枚举大小写敏感：Windows / macOS / Linux / IOS / Android。
+                body.setdefault("os", default_os)
+            default_os_version = str(getattr(_cfg, "ROXY_DEFAULT_OS_VERSION", "") or "").strip()
+            if default_os_version:
+                body.setdefault("osVersion", default_os_version)
         workspace_id = _workspace_id_value()
         if workspace_id:
             # Roxy 官方 /browser/create 要求 workspaceId。
@@ -391,7 +424,16 @@ class RoxyBrowserClient:
                 "Roxy 创建环境需要 workspaceId。请在 config/roxybrowser.py 或 WebUI 的 RoxyBrowser 配置中填写 ROXY_WORKSPACE_ID，"
                 "或直接在 ROXY_PROFILE_CREATE_PAYLOAD 里加入 {'workspaceId': '你的工作区ID'}。"
             )
-        logger.info("[Roxy] 创建环境参数：workspaceId=%s projectId=%s os=%s osVersion=%s", body.get("workspaceId"), body.get("projectId") or "-", body.get("os") or "-", body.get("osVersion") or "-")
+        logger.info(
+            "[Roxy] 创建环境参数：workspaceId=%s projectId=%s name=%s random_name=%s os=%s osVersion=%s random_os=%s",
+            body.get("workspaceId"),
+            body.get("projectId") or "-",
+            body.get("name") or "-",
+            random_name_enabled,
+            body.get("os") or "-",
+            body.get("osVersion") or "-",
+            random_os_enabled,
+        )
         result = self.request(_cfg.ROXY_CREATE_METHOD, _cfg.ROXY_CREATE_PATH, json_body=body)
         profile_id = _first(result, [
             ("id",), ("dirId",), ("dir_id",), ("profile_id",), ("profileId",), ("browser_id",),

@@ -92,16 +92,9 @@ def _append_job_log(job_id: int, message: str) -> None:
 
 def _random_display_name() -> str:
     """生成符合 OpenAI 限制的英文字母显示名。"""
-    import random
-    import string
+    from core.name_samples import random_display_name
 
-    first = random.choice(string.ascii_uppercase) + "".join(
-        random.choices(string.ascii_lowercase, k=random.randint(3, 6))
-    )
-    last = random.choice(string.ascii_uppercase) + "".join(
-        random.choices(string.ascii_lowercase, k=random.randint(3, 6))
-    )
-    return f"{first} {last}"
+    return random_display_name()
 
 
 def _prepare_registration_args() -> tuple[str, str, str]:
