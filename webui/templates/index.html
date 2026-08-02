@@ -198,8 +198,8 @@
       width: 100%; max-width: 100%; min-width: 0;
       max-height: 320px; overflow: auto; line-height: 1.5;
     }
-    #logPanel, #retryLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
-    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #qrPanel:not(.hidden) {
+    #logPanel, #retryLogPanel, #liveLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
+    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #liveLogPanel:not(.hidden), #qrPanel:not(.hidden) {
       position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
       z-index: 1000; display: block; width: min(1100px, calc(100vw - 48px));
       max-height: min(760px, calc(100vh - 48px)); overflow: hidden;
@@ -207,9 +207,9 @@
       background: var(--surface); box-shadow: 0 0 0 9999px rgba(15,23,42,.45), 0 24px 70px rgba(15,23,42,.34);
     }
     #qrPanel:not(.hidden) { width: min(520px, calc(100vw - 48px)); text-align: center; }
-    #logPanel h3, #retryLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    #logPanel h3 .btn, #retryLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
-    #logPanel .log, #retryLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
+    #logPanel h3, #retryLogPanel h3, #liveLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    #logPanel h3 .btn, #retryLogPanel h3 .btn, #liveLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
+    #logPanel .log, #retryLogPanel .log, #liveLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
     #qrPanel img { display:block; max-width:min(360px, calc(100vw - 96px)); max-height:420px; margin:12px auto; border:1px solid var(--line); border-radius:10px; background:#fff; }
     #qrPanel .qr-link { display:block; word-break:break-all; white-space:normal; font-size:12px; color:var(--muted); margin-top:8px; }
     .hidden { display: none !important; }
@@ -2024,12 +2024,14 @@
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通 Plus 的账号">已开通Plus</button>
           <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveTopV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
 
         </div>
       </div>
       <div class="jobs-toolbar-v2" id="accountsToolbarV2">
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">套餐/提链</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnExtractSelectedLinksV2" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置 PIX/UPI/KAKAO_PAY/IDEAL">提链</button>
         </div>
@@ -2092,6 +2094,12 @@
         <button class="btn" id="btnCloseRetryLog" style="float:right;min-height:28px;">关闭</button>
       </h3>
       <div class="log" id="retryLogContent">加载中…</div>
+    </div>
+    <div class="body hidden" id="liveLogPanel">
+      <h3>查活日志：<span id="liveLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
+        <button class="btn" id="btnCloseLiveLog" style="float:right;min-height:28px;">关闭</button>
+      </h3>
+      <div class="log" id="liveLogContent">加载中…</div>
     </div>
   </div>
 
@@ -2754,6 +2762,7 @@ let modalScrollY = 0;
 function updateModalScrollLock() {
   const opened = !$('#logPanel').classList.contains('hidden')
     || !$('#retryLogPanel').classList.contains('hidden')
+    || !$('#liveLogPanel').classList.contains('hidden')
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
@@ -2779,6 +2788,12 @@ function closeRetryLogModal() {
   retryLogEmail = null;
   clearInterval(retryLogTimer);
   $('#retryLogPanel').classList.add('hidden');
+  updateModalScrollLock();
+}
+function closeLiveLogModal() {
+  liveLogEmail = null;
+  clearInterval(liveLogTimer);
+  $('#liveLogPanel').classList.add('hidden');
   updateModalScrollLock();
 }
 function openQrModal(url) {
@@ -3206,15 +3221,26 @@ function _codexAction(r) {
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
 function _tokenCellV2(r) {
+  const live = r.live_check_status || '';
+  const liveErr = r.live_check_error || '';
+  const liveAt = r.live_checked_at || '';
+  let liveHtml = '';
+  if (live === 'live') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}">查活: 正常</div>`;
+  else if (live === 'queued') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}" style="color:#e6a23c">查活: 排队</div>`;
+  else if (live === 'running') liveHtml = `<div class="acc-v2-sub" title="${esc(liveAt)}" style="color:#e6a23c">查活: 运行中</div>`;
+  else if (live === 'deactivated') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#f56c6c">查活: 已废</div>`;
+  else if (live === 'failed') liveHtml = `<div class="acc-v2-sub" title="${esc(liveErr || liveAt)}" style="color:#e6a23c">查活: 失败</div>`;
   if (r.has_access_token) {
-    return `<button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制</button>`;
+    return `<button type="button" class="acc-v2-token-copy" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" title="复制完整 Token">复制</button>${liveHtml}`;
   }
-  return `<span class="pill status-failed">无Token</span>`;
+  return `<span class="pill status-failed">无Token</span>${liveHtml}`;
 }
 function _accountsV2MoreMenu(r) {
   const parts = [
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
     `<button type="button" data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button>`,
+    `<button type="button" onclick="checkSelectedLive([Number('${esc(r.id)}')], this); return false;" title="重新登录该账号，成功则刷新最新 AT/accessToken">查活刷新AT</button>`,
+    `<button type="button" data-account-live-log="${esc(r.email)}" title="查看该账号最近一次查活日志">查活日志</button>`,
     _planAction(r),
     _extractLinkAction(r),
     _codexAction(r),
@@ -3347,6 +3373,35 @@ async function pollRetryLog() {
 }
 $('#btnCloseRetryLog').addEventListener('click', closeRetryLogModal);
 
+// ---------- 查活日志面板 ----------
+let liveLogEmail = null, liveLogTimer = null;
+
+function openLiveLog(email) {
+  liveLogEmail = email;
+  $('#liveLogEmail').textContent = email;
+  $('#liveLogPanel').classList.remove('hidden');
+  updateModalScrollLock();
+  $('#liveLogContent').textContent = '加载中…';
+  pollLiveLog();
+  clearInterval(liveLogTimer);
+  liveLogTimer = setInterval(pollLiveLog, 2000);
+}
+async function pollLiveLog() {
+  if (!liveLogEmail) return;
+  try {
+    const r = await api(`/api/accounts/live-check-log?email=${encodeURIComponent(liveLogEmail)}`);
+    const c = $('#liveLogContent');
+    const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
+    c.textContent = r.log || '(暂无日志，等待任务写入…)';
+    if (atBottom) c.scrollTop = c.scrollHeight;
+    if (!r.running) {
+      clearInterval(liveLogTimer);
+      loadAccounts();
+    }
+  } catch(e) {}
+}
+$('#btnCloseLiveLog').addEventListener('click', closeLiveLogModal);
+
 // 账号操作按钮（事件委托）
 async function onAccountsBodyClick(e) {
   const moreToggle = e.target.closest('[data-acc-more-toggle]');
@@ -3390,6 +3445,18 @@ async function onAccountsBodyClick(e) {
   const planBtn = e.target.closest('[data-plan-check]');
   if (planBtn) {
     await checkOnePlan(Number(planBtn.dataset.planCheck), planBtn);
+    return;
+  }
+
+  const liveBtn = e.target.closest('[data-account-live-check]');
+  if (liveBtn) {
+    await checkSelectedLive([Number(liveBtn.dataset.accountLiveCheck)], liveBtn);
+    return;
+  }
+
+  const liveLogBtn = e.target.closest('[data-account-live-log]');
+  if (liveLogBtn) {
+    openLiveLog(liveLogBtn.dataset.accountLiveLog);
     return;
   }
 
@@ -3943,6 +4010,47 @@ async function checkSelectedPlans() {
     updateAccountSelectionUi();
   } finally {
     btn.textContent = old;
+  }
+}
+
+async function checkSelectedLive(idsArg = null, btnArg = null) {
+  const ids = idsArg || Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  const workers = getCodexBulkWorkers();
+  const msg = idsArg ? `确定查活这个账号并刷新最新 AT/accessToken 吗？` : `确定查活选中的 ${ids.length} 个账号吗？
+
+会重新登录邮箱 OTP；登录成功且未封号则标记正常，并刷新最新 AT/accessToken。
+
+并发线程数：${workers}`;
+  if (!confirm(msg)) return;
+  const firstAcc = ACCOUNTS.find(a => Number(a.id) === Number(ids[0]));
+  const btn = btnArg || $('#btnCheckSelectedLiveV2');
+  const old = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '查活中…';
+  }
+  try {
+    const r = await api('/api/accounts/check-live-bulk', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids, workers}),
+    });
+    const skipped = (r.skipped || []).length;
+    showToast(`查活已入队 ${r.started_count || 0} 个，忙碌 ${r.busy_count || 0} 个，失败 ${r.failed_count || 0}${skipped ? `，跳过 ${skipped}` : ''}`);
+    const firstStarted = (r.started || [])[0];
+    if (firstStarted?.email) openLiveLog(firstStarted.email);
+    else if (firstAcc && firstAcc.email) openLiveLog(firstAcc.email);
+    await loadAccounts();
+    loadSummary();
+  } catch(err) {
+    showToast('查活失败: ' + err.message);
+    updateAccountSelectionUi();
+  } finally {
+    if (btn) {
+      btn.textContent = old;
+      btn.disabled = false;
+    }
   }
 }
 

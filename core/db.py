@@ -1214,6 +1214,119 @@ def update_account_note(acc_id: int, note: str) -> bool:
         return True
 
 
+def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
+    """写回账号查活结果；成功时同步刷新最新 access_token 和账号基础信息。"""
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+
+        now = _now()
+        ok = bool(result.get("ok"))
+        status = str(result.get("status") or ("live" if ok else "failed"))
+        row["live_check_status"] = status
+        row["live_check_ok"] = ok
+        row["live_checked_at"] = result.get("checked_at") or now
+        row["live_check_error"] = None if ok else result.get("error")
+        row["updated_at"] = now
+
+        if status == "deactivated":
+            row["codex_status"] = "deactivated"
+            row["codex_error"] = result.get("error") or "账号已删除/停用/封禁"
+
+        if ok:
+            token = str(result.get("access_token") or "").strip()
+            if token:
+                row["access_token"] = token
+            session = result.get("session") or {}
+            user = session.get("user") or {}
+            account = session.get("account") or {}
+            if user.get("id"):
+                row["user_id"] = user.get("id")
+            if user.get("name") is not None:
+                row["user_name"] = user.get("name")
+            if account.get("planType"):
+                row["plan_type"] = account.get("planType")
+            if session.get("expires"):
+                row["expires_at"] = session.get("expires")
+            if result.get("device_id"):
+                row["device_id"] = result.get("device_id")
+            if result.get("proxy_used"):
+                row["live_check_proxy_used"] = result.get("proxy_used")
+            row["live_check_error"] = None
+
+        row["copy_line"] = _account_line(row)
+        _save_accounts(rows)
+        return True
+
+
+def claim_account_live_check(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用账号查活任务；已有 queued/running 时返回 False。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        if row.get("live_check_status") in {"queued", "running"}:
+            try:
+                stamp_key = "live_check_queued_at" if row.get("live_check_status") == "queued" else "live_check_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if row.get("live_check_status") == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["live_check_status"] = "queued"
+        row["live_check_ok"] = False
+        row["live_check_trigger"] = str(trigger or "manual")
+        row["live_check_queued_at"] = now
+        row["live_check_started_at"] = None
+        row["live_checked_at"] = None
+        row["live_check_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def recover_interrupted_live_checks() -> int:
+    """服务启动时恢复上次进程中断的查活状态，避免 queued/running 卡死。"""
+    with _LOCK:
+        rows = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in rows:
+            if row.get("live_check_status") not in {"queued", "running"}:
+                continue
+            row["live_check_status"] = "failed"
+            row["live_check_ok"] = False
+            row["live_check_error"] = "WebUI 重启或任务异常中断，请重新查活"
+            row["live_checked_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(rows)
+        return recovered
+
+
+def mark_account_live_check_running(acc_id: int) -> bool:
+    """把账号查活任务标记为运行中。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("live_check_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row["live_check_status"] = "running"
+        row["live_check_started_at"] = now
+        row["live_check_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
 def update_accounts_note(account_ids: list[int] | None, note: str) -> tuple[list[dict], list[dict]]:
     """
     批量更新已注册账号备注。

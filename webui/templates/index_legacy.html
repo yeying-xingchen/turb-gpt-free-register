@@ -262,8 +262,8 @@
       width: 100%; max-width: 100%; min-width: 0;
       max-height: 320px; overflow: auto; line-height: 1.5;
     }
-    #logPanel, #retryLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
-    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #qrPanel:not(.hidden) {
+    #logPanel, #retryLogPanel, #liveLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
+    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #liveLogPanel:not(.hidden), #qrPanel:not(.hidden) {
       position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
       z-index: 1000; display: block; width: min(1100px, calc(100vw - 48px));
       max-height: min(760px, calc(100vh - 48px)); overflow: hidden;
@@ -271,9 +271,9 @@
       background: var(--surface); box-shadow: 0 0 0 9999px rgba(15,23,42,.45), 0 24px 70px rgba(15,23,42,.34);
     }
     #qrPanel:not(.hidden) { width: min(520px, calc(100vw - 48px)); text-align: center; }
-    #logPanel h3, #retryLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    #logPanel h3 .btn, #retryLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
-    #logPanel .log, #retryLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
+    #logPanel h3, #retryLogPanel h3, #liveLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    #logPanel h3 .btn, #retryLogPanel h3 .btn, #liveLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
+    #logPanel .log, #retryLogPanel .log, #liveLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
     #qrPanel img { display:block; max-width:min(360px, calc(100vw - 96px)); max-height:420px; margin:12px auto; border:1px solid var(--line); border-radius:10px; background:#fff; }
     #qrPanel .qr-link { display:block; word-break:break-all; white-space:normal; font-size:12px; color:var(--muted); margin-top:8px; }
     .hidden { display: none !important; }
@@ -465,11 +465,13 @@
               <input id="showPlusAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 已开通Plus
             </label>
             <button class="btn" id="btnRefreshAccounts" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
+            <button class="btn primary" id="btnCheckSelectedLiveTop" data-live-check-selected="1" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
           </div>
         </div>
         <div class="accounts-actionbar">
           <div class="btn-group">
             <span class="btn-group-title">套餐/提链</span>
+            <button class="btn primary" id="btnCheckSelectedLive" data-live-check-selected="1" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
             <button class="btn primary" id="btnCheckSelectedPlans" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>
             <button class="btn good" id="btnExtractSelectedLinks" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置 PIX/UPI/KAKAO_PAY/IDEAL">提链</button>
           </div>
@@ -516,6 +518,12 @@
           <button class="btn" id="btnCloseRetryLog" style="float:right;min-height:28px;">关闭</button>
         </h3>
         <div class="log" id="retryLogContent">加载中…</div>
+      </div>
+      <div class="body hidden" id="liveLogPanel">
+        <h3>查活日志：<span id="liveLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
+          <button class="btn" id="btnCloseLiveLog" style="float:right;min-height:28px;">关闭</button>
+        </h3>
+        <div class="log" id="liveLogContent">加载中…</div>
       </div>
     </section>
   </div>
@@ -894,7 +902,7 @@ async function refreshJobs() {
 
 let modalScrollY = 0;
 function updateModalScrollLock() {
-  const opened = !$('#logPanel').classList.contains('hidden') || !$('#retryLogPanel').classList.contains('hidden') || !$('#qrPanel').classList.contains('hidden');
+  const opened = !$('#logPanel').classList.contains('hidden') || !$('#retryLogPanel').classList.contains('hidden') || !$('#liveLogPanel').classList.contains('hidden') || !$('#qrPanel').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -918,6 +926,12 @@ function closeRetryLogModal() {
   retryLogEmail = null;
   clearInterval(retryLogTimer);
   $('#retryLogPanel').classList.add('hidden');
+  updateModalScrollLock();
+}
+function closeLiveLogModal() {
+  liveLogEmail = null;
+  clearInterval(liveLogTimer);
+  $('#liveLogPanel').classList.add('hidden');
   updateModalScrollLock();
 }
 function openQrModal(url) {
@@ -1134,6 +1148,10 @@ async function pollLog() {
 let accountsLoading = false;
 let planStatusLoading = false;
 let planStatusRevision = '';
+function getCodexBulkWorkers() {
+  const el = document.getElementById('codexBulkWorkers');
+  return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
+}
 async function loadAccounts() {
   if (accountsLoading) return;
   accountsLoading = true;
@@ -1370,6 +1388,17 @@ function _codexAction(r) {
   const label = s === 'success' ? '重新补跑 Codex' : '补跑 Codex';
   return `<button data-codex-retry="${esc(r.email)}" title="重新跑一次 Codex 授权（会消耗 1 封邮箱 OTP + 1 个接码短信）">${label}</button>`;
 }
+function _liveStatusSub(r) {
+  const s = r.live_check_status || '';
+  const err = r.live_check_error || '';
+  const at = r.live_checked_at || '';
+  if (s === 'live') return `<div class="sub-cell" title="${esc(at)}">查活: 正常</div>`;
+  if (s === 'queued') return `<div class="sub-cell" style="color:#e6a23c">查活: 排队</div>`;
+  if (s === 'running') return `<div class="sub-cell" style="color:#e6a23c">查活: 运行中</div>`;
+  if (s === 'deactivated') return `<div class="sub-cell" style="color:#f56c6c" title="${esc(err || at)}">查活: 已废</div>`;
+  if (s === 'failed') return `<div class="sub-cell" style="color:#e6a23c" title="${esc(err || at)}">查活: 失败</div>`;
+  return '';
+}
 function renderAccounts() {
   const p = PAGERS.accounts;
   const total = ACCOUNTS_TOTAL;
@@ -1380,7 +1409,7 @@ function renderAccounts() {
       <td class="muted">#${esc(r.id)}</td>
       <td><div class="main-cell">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div><div class="sub-cell">${esc(r.user_name || '-')}</div></td>
       <td>${esc(r.email_source || '-')}</td>
-      <td><span class="mono" title="列表仅显示预览，完整 Token 请点复制">${r.has_access_token ? '有Token' : '<span class="muted">无Token</span>'}</span></td>
+      <td><span class="mono" title="列表仅显示预览，完整 Token 请点复制">${r.has_access_token ? '有Token' : '<span class="muted">无Token</span>'}</span>${_liveStatusSub(r)}</td>
       <td>${_planCell(r)}<div class="sub-cell">${_extractLinkCell(r)}</div></td>
       <td class="wrap" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="muted">-</span>'}</td>
       <td>${r.totp_enabled ? '已启用' : '<span class="muted">未启用</span>'}</td>
@@ -1390,7 +1419,7 @@ function renderAccounts() {
       <td class="actions actions-cell">
         <div class="account-row-actions">
           <div class="account-action-group"><button class="primary" data-account-copy-secret="access_token" data-account-id="${esc(r.id)}" ${r.has_access_token ? '' : 'disabled'}>复制Token</button> <button class="good" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button></div>
-          <div class="account-action-group"><button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> ${_planAction(r)} ${_extractLinkAction(r)}</div>
+          <div class="account-action-group"><button data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button> <button data-account-live-check="${esc(r.id)}" title="重新登录该账号，成功则刷新最新 AT/accessToken">查活</button> <button data-account-live-log="${esc(r.email)}" title="查看该账号最近一次查活日志">查活日志</button> ${_planAction(r)} ${_extractLinkAction(r)}</div>
           <div class="account-action-group">${_codexAction(r)} <button data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button></div>
           <div class="account-action-group danger-zone"><button data-account-archive="${esc(r.id)}" data-archived="${r.archived ? '0' : '1'}" title="${r.archived ? '恢复到默认账号列表' : '归档后默认账号列表不再显示'}">${r.archived ? '恢复' : '归档'}</button> <button class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button></div>
         </div>
@@ -1475,6 +1504,52 @@ async function pollRetryLog() {
 }
 $('#btnCloseRetryLog').addEventListener('click', closeRetryLogModal);
 
+// ---------- 查活日志面板 ----------
+let liveLogEmail = null, liveLogTimer = null;
+
+function openLiveLog(email) {
+  liveLogEmail = email;
+  $('#liveLogEmail').textContent = email;
+  $('#liveLogPanel').classList.remove('hidden');
+  updateModalScrollLock();
+  $('#liveLogContent').textContent = '加载中…';
+  pollLiveLog();
+  clearInterval(liveLogTimer);
+  liveLogTimer = setInterval(pollLiveLog, 2000);
+}
+async function pollLiveLog() {
+  if (!liveLogEmail) return;
+  try {
+    const r = await api(`/api/accounts/live-check-log?email=${encodeURIComponent(liveLogEmail)}`);
+    const c = $('#liveLogContent');
+    const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
+    c.textContent = r.log || '(暂无日志，等待任务写入…)';
+    if (atBottom) c.scrollTop = c.scrollHeight;
+    if (!r.running) {
+      clearInterval(liveLogTimer);
+      loadAccounts();
+    }
+  } catch(e) {}
+}
+$('#btnCloseLiveLog').addEventListener('click', closeLiveLogModal);
+
+// 老 UI 查活兜底：捕获阶段直接拦截，避免被表格/按钮组其它事件吞掉。
+document.addEventListener('click', async (e) => {
+  const bulkBtn = e.target.closest('[data-live-check-selected]');
+  if (bulkBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    await checkSelectedLive(null, bulkBtn);
+    return;
+  }
+  const oneBtn = e.target.closest('[data-account-live-check]');
+  if (oneBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    await checkSelectedLive([Number(oneBtn.dataset.accountLiveCheck)], oneBtn);
+  }
+}, true);
+
 // 账号操作按钮（事件委托）
 $('#accountsBody').addEventListener('click', async (e) => {
   const copySecretBtn = e.target.closest('[data-account-copy-secret]');
@@ -1498,6 +1573,18 @@ $('#accountsBody').addEventListener('click', async (e) => {
   const planBtn = e.target.closest('[data-plan-check]');
   if (planBtn) {
     await checkOnePlan(Number(planBtn.dataset.planCheck), planBtn);
+    return;
+  }
+
+  const liveBtn = e.target.closest('[data-account-live-check]');
+  if (liveBtn) {
+    await checkSelectedLive([Number(liveBtn.dataset.accountLiveCheck)], liveBtn);
+    return;
+  }
+
+  const liveLogBtn = e.target.closest('[data-account-live-log]');
+  if (liveLogBtn) {
+    openLiveLog(liveLogBtn.dataset.accountLiveLog);
     return;
   }
 
@@ -2023,6 +2110,47 @@ async function checkSelectedPlans() {
     updateAccountSelectionUi();
   } finally {
     btn.textContent = old;
+  }
+}
+
+async function checkSelectedLive(idsArg = null, btnArg = null) {
+  const ids = idsArg || Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  const workers = getCodexBulkWorkers();
+  const msg = idsArg ? `确定查活这个账号并刷新最新 AT/accessToken 吗？` : `确定查活选中的 ${ids.length} 个账号吗？
+
+会重新登录邮箱 OTP；登录成功且未封号则标记正常，并刷新最新 AT/accessToken。
+
+并发线程数：${workers}`;
+  if (!confirm(msg)) return;
+  const firstAcc = ACCOUNTS.find(a => Number(a.id) === Number(ids[0]));
+  const btn = btnArg || $('#btnCheckSelectedLive') || $('#btnCheckSelectedLiveTop');
+  const old = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '查活中…';
+  }
+  try {
+    const r = await api('/api/accounts/check-live-bulk', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids, workers}),
+    });
+    const skipped = (r.skipped || []).length;
+    showToast(`查活已入队 ${r.started_count || 0} 个，忙碌 ${r.busy_count || 0} 个，失败 ${r.failed_count || 0}${skipped ? `，跳过 ${skipped}` : ''}`);
+    const firstStarted = (r.started || [])[0];
+    if (firstStarted?.email) openLiveLog(firstStarted.email);
+    else if (firstAcc && firstAcc.email) openLiveLog(firstAcc.email);
+    await loadAccounts();
+    loadSummary();
+  } catch(err) {
+    showToast('查活失败: ' + err.message);
+    updateAccountSelectionUi();
+  } finally {
+    if (btn) {
+      btn.textContent = old;
+      btn.disabled = false;
+    }
   }
 }
 

@@ -38,6 +38,28 @@ class FakeSession:
         return FakeResponse(status_code=404, text="not found")
 
 
+class FakeInlineSession:
+    def get(self, url, **kwargs):
+        if "/api/messages/" in url:
+            return FakeResponse(status_code=404, text="Not Found")
+        return FakeResponse(text="""
+        <article class="mail-card">
+          <details open>
+            <summary>
+              <span class="subject">Your temporary ChatGPT verification code</span>
+              <span class="date">2026-08-02 13:18:53</span>
+            </summary>
+            <div class="meta">发件人：otp@example.com</div>
+            <pre class="body">Enter this temporary verification code to continue:
+
+541409
+
+Please ignore this email.</pre>
+          </details>
+        </article>
+        """)
+
+
 class GenericApiYangyangTests(unittest.TestCase):
     def test_parse_yangyang_url(self):
         self.assertEqual(
@@ -50,12 +72,35 @@ class GenericApiYangyangTests(unittest.TestCase):
         self.assertIn("123456", _decode_data_uri(body))
 
     def test_fetch_yangyang_otp_uses_api_and_detail(self):
-        code = _fetch_yangyang_otp(
+        result = _fetch_yangyang_otp(
             FakeSession(),
             "http://yangyang.website/messages/tok/a@icloud.com",
             {"User-Agent": "test"},
         )
+        code, meta = result
         self.assertEqual(code, "654321")
+        self.assertEqual(meta["mail_id"], 2)
+
+    def test_fetch_yangyang_otp_respects_after_ts(self):
+        import datetime
+        after = datetime.datetime(2026, 8, 1, 10, 2, 0).timestamp()
+        result = _fetch_yangyang_otp(
+            FakeSession(),
+            "http://yangyang.website/messages/tok/a@icloud.com",
+            {"User-Agent": "test"},
+            after_ts=after,
+        )
+        self.assertIsNone(result)
+
+    def test_fetch_inline_messages_page_without_api(self):
+        result = _fetch_yangyang_otp(
+            FakeInlineSession(),
+            "https://mail.ai1998.xyz/messages/tok/cookies-benzene.48%40icloud.com",
+            {"User-Agent": "test"},
+        )
+        code, meta = result
+        self.assertEqual(code, "541409")
+        self.assertEqual(meta["mail_id"], "inline-0")
 
 
 if __name__ == "__main__":

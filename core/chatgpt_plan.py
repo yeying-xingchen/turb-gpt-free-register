@@ -324,7 +324,8 @@ def check_account_plan(
             "ok": False,
             "checked_at": now_iso(),
             "http_status": None,
-            "error": "token 已过期",
+            "error": "AT已过期/失效，请手动查活刷新",
+            "needs_live_check": True,
             **{k: v for k, v in claims.items() if k != "payload"},
         }
 
@@ -369,13 +370,16 @@ def check_account_plan(
             response_text = resp.text or ""
             http_status = int(resp.status_code)
             if not (200 <= http_status < 300):
+                is_auth_expired = http_status == 401
                 last_result = {
                     "ok": False,
                     "checked_at": now_iso(),
                     "http_status": http_status,
-                    "error": f"HTTP {http_status}",
+                    "error": "AT已过期/失效，请手动查活刷新" if is_auth_expired else f"HTTP {http_status}",
                     "response_preview": response_text[:500],
                     "retryable": _retryable_plan_error(http_status),
+                    "token_expired": True if is_auth_expired else claims.get("token_expired"),
+                    "needs_live_check": True if is_auth_expired else False,
                 }
             else:
                 try:

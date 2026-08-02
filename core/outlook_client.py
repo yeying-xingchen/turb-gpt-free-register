@@ -1082,9 +1082,9 @@ def fetch_latest_otp(
     )
 
 
-# 时差容忍：仅 30 秒（足以吸收客户端/邮件服务器 NTP 偏差）。
-# 不能像之前那样放 5 分钟——OTP 30 秒就轮换一次，旧 OTP 会被误判通过。
-_OTP_CLOCK_SKEW_TOLERANCE = 30
+# 时差容忍：只保留极小容忍。
+# 重发 OTP 时上一封旧码常常只早 10~20 秒；若容忍 30 秒，会把上一轮旧码误判为新码。
+_OTP_CLOCK_SKEW_TOLERANCE = 2
 
 
 def _parse_email_ts(item: dict) -> float | None:
