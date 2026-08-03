@@ -29,6 +29,7 @@ from core.roxy_registration import (
     _clear_otp_inputs,
     _email_otp_page_state,
     _is_email_verification_page,
+    _is_login_password_page,
     _click_passwordless_signup_if_present,
 )
 
@@ -209,6 +210,37 @@ def _maybe_click_passwordless_after_email(driver, email: str, timeout: int = 18)
         logger.info("[Codex][Browser] 已点击一次性验证码入口，未立即检测到 OTP 页，继续后续 OTP 轮询")
 
 
+def _wait_for_otp_input(driver, timeout: int = 30) -> None:
+    """验证码已收到但 OTP 输入框可能尚未出现（点完一次性验证码后常有中间页/延迟渲染）。
+
+    等待期间若仍停留在登录密码页，则补点一次性验证码入口（最多 2 次、间隔 6s）；
+    超时仍未出现时打印页面状态便于定位。
+    """
+    end = time.time() + timeout
+    passwordless_retries = 0
+    while time.time() < end:
+        if _is_email_verification_page(driver):
+            return
+        if _is_login_password_page(driver) and passwordless_retries < 2:
+            passwordless_retries += 1
+            result = _click_passwordless_signup_if_present(driver)
+            if result.get("ok"):
+                logger.info("[Codex][Browser] 仍停留登录密码页，补点一次性验证码入口：%s", result.get("reason"))
+                human_delay("form")
+            time.sleep(6)
+            continue
+        time.sleep(0.8)
+    state = _email_otp_page_state(driver)
+    logger.warning(
+        "[Codex][Browser] 等待 OTP 输入框超时，页面 url=%s inputs=%s buttons=%s 文本前300字=%s",
+        str(state.get("url") or ""),
+        len(state.get("inputs") or []),
+        [(b.get("text") or "")[:24] for b in (state.get("buttons") or [])][:8],
+        str(state.get("text") or "")[:300],
+    )
+    raise RuntimeError("等待 OTP 输入框超时，页面未出现验证码输入框")
+
+
 def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None:
     otp_after_ts = time.time()
     logger.info("[Codex][Browser] 打开授权地址")
@@ -283,6 +315,7 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             continue
         used_codes.add(str(code))
         logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", code)
+        _wait_for_otp_input(driver, timeout=30)
         _clear_otp_inputs(driver)
         _type_otp(driver, code)
         logger.info("[Codex][Browser] 已填写邮箱 OTP")
@@ -428,13 +461,9 @@ def _read_email_otp_validate_dead_code(driver) -> str:
     return ""
 
 
-def _is_email_verification_page(driver) -> bool:
-    try:
-        url = str(driver.current_url or "").lower()
-        return "email-verification" in url
-    except Exception:
-        return False
-
+# 邮箱验证码页判断复用 roxy_registration 的强版本（URL + 输入框属性识别，
+# 且明确排除 /log-in/password），不使用本地弱化版，避免点完一次性验证码后
+# 页面已渲染 OTP 输入框却因 URL 不含 email-verification 而识别失败。
 
 def _wait_after_email_otp_submit(driver, timeout: int = 45) -> str:
     """
