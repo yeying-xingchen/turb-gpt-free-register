@@ -24,6 +24,53 @@ _LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
 _RUNNING: set[str] = set()
 _RUNNING_LOCK = threading.Lock()
 
+# 查活网络预检失败（403/429/代理/超时等）多为出口 IP 被 CF 标记或代理池抖动，
+# 视为可换新 IP 重试；账号本身问题（废号/邮箱错误等）不重试。
+_RETRYABLE_NETWORK_HINTS = (
+    "403", "429", "502", "503", "504",
+    "proxy", "socks", "timeout", "timed out",
+    "connection", "closed", "reset",
+)
+
+
+def _is_retryable_network_error(exc: BaseException) -> bool:
+    if isinstance(exc, AccountUnusableError):
+        return False
+    text = str(exc or "").lower()
+    return any(h in text for h in _RETRYABLE_NETWORK_HINTS)
+
+
+def _network_preflight_with_retry(email: str, proxy: str | None, max_attempts: int = 4) -> tuple[BrowserSession, str]:
+    """Providers → CSRF → Signin 网络预检；失败换新 IP 重试（每轮新会话新代理）。"""
+    session: BrowserSession | None = None
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        if session is not None:
+            try:
+                session.session.close()
+            except Exception:
+                pass
+        session = BrowserSession(proxy=proxy if proxy else None)
+        logger.info(
+            "[查活] 会话创建完成：proxy=%s device_id=%s（网络预检第 %s/%s 次）",
+            session.proxy or "配置随机/直连", session.device_id, attempt, max_attempts,
+        )
+        try:
+            get_providers(session)
+            csrf = get_csrf_token(session)
+            authorize_url = signin_openai(session, csrf, email)
+            return session, authorize_url
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not _is_retryable_network_error(exc):
+                raise
+            logger.warning(
+                "[查活] 网络预检失败（%s/%s），换新 IP 重试：%s",
+                attempt, max_attempts, str(exc)[:200],
+            )
+            time.sleep(2)
+    raise RuntimeError(f"网络预检多次失败：{last_exc}")
+
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -57,6 +104,19 @@ def _validate_with_retry(session: BrowserSession, email: str, otp_after_ts: floa
             logger.warning("[查活] OTP 无效/过期，重新发送后再取：%s", str(exc)[:180])
             send_email_otp(session)
             # 以“重新发送请求完成后”为新基准，避免刚刚失败的上一封旧码再次被 after 容忍窗口命中。
+            otp_after_ts = time.time()
+            current_otp = None
+            time.sleep(1)
+        except Exception as exc:
+            # 提交 OTP 后的网络抖动（连接断开/超时/代理波动）：同一会话重发验证码再验证一次。
+            if attempt >= max_otp_attempts or not _is_retryable_network_error(exc):
+                raise
+            last_exc = exc
+            logger.warning("[查活] OTP 验证网络抖动，重新发送后再取（%s/%s）：%s", attempt, max_otp_attempts, str(exc)[:180])
+            try:
+                send_email_otp(session)
+            except Exception:
+                raise
             otp_after_ts = time.time()
             current_otp = None
             time.sleep(1)
@@ -106,11 +166,7 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
         logger.info("[查活] 日志文件：%s", path)
         logger.info("[查活] 开始重新登录：%s", email)
         logger.info("[查活] 流程：Providers → CSRF → Signin → Authorize → 邮箱 OTP → OAuth callback → Session/AT")
-        session = BrowserSession(proxy=proxy if proxy else None)
-        logger.info("[查活] 会话创建完成：proxy=%s device_id=%s", session.proxy or "配置随机/直连", session.device_id)
-        get_providers(session)
-        csrf = get_csrf_token(session)
-        authorize_url = signin_openai(session, csrf, email)
+        session, authorize_url = _network_preflight_with_retry(email, proxy)
 
         otp_after_ts = time.time()
         final_url = follow_authorize(session, authorize_url)
