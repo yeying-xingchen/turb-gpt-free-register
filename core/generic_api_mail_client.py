@@ -204,6 +204,104 @@ def _parse_yangyang_ts(value: str | None) -> float | None:
     return None
 
 
+def _parse_generic_api_ts(value) -> float | None:
+    """解析通用 API 返回的时间字段，兼容 ISO8601/Z 和常见本地时间格式。"""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    # 数字时间戳：秒 / 毫秒
+    if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+        try:
+            ts = float(raw)
+            return ts / 1000.0 if ts > 10_000_000_000 else ts
+        except Exception:
+            return None
+    # ISO8601: 2026-08-05T01:10:17.000Z
+    try:
+        iso = raw
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            return dt.timestamp()
+        return dt.timestamp()
+    except Exception:
+        pass
+    # 常见字符串格式
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(raw[:19], fmt).timestamp()
+        except Exception:
+            pass
+    return None
+
+
+def _extract_structured_api_code(text: str, after_ts: float | None = None) -> tuple[str, dict] | None:
+    """
+    兼容 newzoe 这类直接返回 JSON 的取码接口：
+      {"code":"784207","from":"...","subject":"Your temporary ChatGPT login code","time":"2026-08-05T01:10:17.000Z"}
+
+    如果响应里有 time/date/received_at，会按 after_ts 过滤旧码，避免拿到上一次缓存验证码。
+    """
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    # 常见字段优先级：code / otp / verification_code；没有再回退从拉平文本提取。
+    raw_code = (
+        data.get("code")
+        or data.get("otp")
+        or data.get("verification_code")
+        or data.get("verificationCode")
+        or data.get("email_code")
+        or data.get("emailCode")
+    )
+    code = None
+    if raw_code is not None:
+        m = _CODE_REGEX.search(str(raw_code))
+        if m:
+            code = m.group(1)
+    if not code:
+        code = _extract_code(_flatten_json(data))
+    if not code:
+        return None
+
+    ts_raw = (
+        data.get("time")
+        or data.get("date")
+        or data.get("received_at")
+        or data.get("receivedAt")
+        or data.get("created_at")
+        or data.get("createdAt")
+        or data.get("timestamp")
+    )
+    msg_ts = _parse_generic_api_ts(ts_raw)
+    if after_ts and msg_ts and msg_ts + 2 < after_ts:
+        logger.debug(
+            "[GenericAPI] structured API 跳过旧验证码: code=%s ts=%s after=%s subject=%r",
+            code,
+            ts_raw,
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
+            str(data.get("subject") or "")[:80],
+        )
+        return None
+
+    return code, {
+        "source": "structured_api",
+        "received_at": ts_raw,
+        "msg_ts": msg_ts,
+        "subject": data.get("subject"),
+        "from": data.get("from") or data.get("fromAddress") or data.get("sender"),
+    }
+
+
 def _fetch_yangyang_otp(
     session: requests.Session,
     code_url: str,
@@ -513,22 +611,38 @@ def fetch_latest_otp(
             if resp is None:
                 pass
             elif resp.status_code == 200:
-                code = _extract_code(text)
+                structured = _extract_structured_api_code(text, after_ts=after_ts)
+                structured_meta = structured[1] if structured else {}
+                code = structured[0] if structured else _extract_code(text)
                 if code:
                     now_seen = time.time()
                     if not best_otp:
                         best_otp = code
                         best_seen_at = now_seen
                         settle_until = now_seen + settle
-                        logger.info(
-                            f"[GenericAPI] 首次锁定 OTP={code}, "
-                            f"等 {settle}s 看取码接口是否出现更新验证码..."
-                        )
+                        if structured_meta:
+                            logger.info(
+                                f"[GenericAPI] 首次锁定 OTP={code}, source=structured_api "
+                                f"ts={structured_meta.get('received_at')} subject={str(structured_meta.get('subject') or '')[:80]!r}, "
+                                f"等 {settle}s 看取码接口是否出现更新验证码..."
+                            )
+                        else:
+                            logger.info(
+                                f"[GenericAPI] 首次锁定 OTP={code}, "
+                                f"等 {settle}s 看取码接口是否出现更新验证码..."
+                            )
                     elif code != best_otp:
-                        logger.info(
-                            f"[GenericAPI] 发现更新 OTP={code}，"
-                            f"替换之前的 {best_otp}, 重置 settle 计时"
-                        )
+                        if structured_meta:
+                            logger.info(
+                                f"[GenericAPI] 发现更新 OTP={code}, source=structured_api "
+                                f"ts={structured_meta.get('received_at')} subject={str(structured_meta.get('subject') or '')[:80]!r}，"
+                                f"替换之前的 {best_otp}, 重置 settle 计时"
+                            )
+                        else:
+                            logger.info(
+                                f"[GenericAPI] 发现更新 OTP={code}，"
+                                f"替换之前的 {best_otp}, 重置 settle 计时"
+                            )
                         best_otp = code
                         best_seen_at = now_seen
                         settle_until = now_seen + settle
