@@ -1123,12 +1123,22 @@ def _do_phone_verification_if_present(driver) -> None:
                 return
             except Exception as exc:
                 last_err = exc
-                logger.warning("[Codex][Browser] 手机验证尝试失败，换号：%s", str(exc)[:240])
+                err_text = str(exc) or ""
+                logger.warning("[Codex][Browser] 手机验证尝试失败，换号：%s", err_text[:240])
                 if activation_id:
                     try:
                         sms_provider.cancel(activation_id, http)
                     except Exception:
                         pass
+                # 余额不足 / 无可用号码：重试多少次都不会成功，立即失败止损，
+                # 避免白等 N 轮换号重试（每轮还要刷新页面 + 随机等待）。
+                if any(k in err_text for k in (
+                    "NO_BALANCE", "NO_NUMBERS", "BALANCE", "余额不足",
+                    "暂无可用号码", "没有可用号码", "insufficient", "not enough balance",
+                )):
+                    raise RuntimeError(
+                        f"接码平台余额不足或无可用号码，已停止换号止损：{err_text[:180]}"
+                    ) from exc
                 if "invalid_auth_step" in str(exc):
                     raise RuntimeError(
                         "手机号流程进入 invalid_auth_step，说明授权状态还未从 email-verification 正常跳转或已失效；"
