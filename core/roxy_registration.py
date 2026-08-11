@@ -11,7 +11,7 @@ from pathlib import Path
 
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data
+from core.account_export import save_account_data, post_register_dwell
 from core.email_provider import wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
@@ -2141,6 +2141,7 @@ def run_roxy_registration(email: str, name: str, birthday: str, proxy: str = Non
                 "codex": codex_result,
             },
         )
+        post_register_dwell(email, label="Roxy注册")
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
         return {
             "success": bool(codex_ok),

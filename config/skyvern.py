@@ -19,6 +19,16 @@ SKYVERN_BROWSER_TYPE: str = "stealth-chromium"
 # Playwright / 页面超时；留空时实际流程仍会使用 Browser Use 配置中的默认超时
 SKYVERN_KEEP_BROWSER_OPEN: bool = False
 
+# Skyvern 手动注册不容易封时，自动化默认尽量贴近“手动操作”：
+# - 不走 Browser Use 的 fast mode；
+# - 不额外覆盖 UA/语言/时区/Client Hints；
+# - 保留较慢逐字输入、点击前停顿、提交后停留。
+SKYVERN_HUMAN_MODE: bool = True
+
+# 是否给 Skyvern 页面注入最轻量 navigator.webdriver/window.chrome 修正。
+# Skyvern 自带 stealth 浏览器时，额外注入也可能和原生指纹冲突，默认关闭。
+SKYVERN_INJECT_AUTOMATION_MASK: bool = False
+
 # 打开的起始注册页
 SKYVERN_START_URL: str = "https://chatgpt.com/auth/login"
 
@@ -33,5 +43,7 @@ apply_env_overrides(globals(), {
     'SKYVERN_AD_BLOCKER': 'bool',
     'SKYVERN_BROWSER_TYPE': 'str',
     'SKYVERN_KEEP_BROWSER_OPEN': 'bool',
+    'SKYVERN_HUMAN_MODE': 'bool',
+    'SKYVERN_INJECT_AUTOMATION_MASK': 'bool',
     'SKYVERN_START_URL': 'str',
 })

@@ -111,6 +111,8 @@ from config.register import (
     REGISTER_EMAIL,
     REGISTER_PASSWORD,
     REGISTER_NAME,
+    AUTO_PLAN_CHECK_AFTER_REGISTER,
+    POST_REGISTER_DWELL_SECONDS_RANGE,
 )
 
 # ---------- 邮箱服务 ----------

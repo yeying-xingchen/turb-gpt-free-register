@@ -21,7 +21,7 @@ from typing import Any
 
 from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data
+from core.account_export import save_account_data, _post_register_dwell_seconds
 from core.browser_use_client import BrowserUseClient
 from core.email_provider import resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
@@ -39,6 +39,25 @@ def _set_log_provider_label(label: str) -> None:
     _LOG_CONTEXT.provider_label = label or "BrowserUse"
 
 
+def _set_cloud_provider(prefix: str) -> None:
+    _LOG_CONTEXT.provider_prefix = prefix or "browser_use"
+
+
+def _cloud_provider_prefix() -> str:
+    return str(getattr(_LOG_CONTEXT, "provider_prefix", "browser_use") or "browser_use")
+
+
+def _skyvern_human_mode() -> bool:
+    if _cloud_provider_prefix() != "skyvern":
+        return False
+    try:
+        from config import skyvern as _skyvern_cfg
+
+        return bool(getattr(_skyvern_cfg, "SKYVERN_HUMAN_MODE", True))
+    except Exception:
+        return True
+
+
 class _CloudProviderLogFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         label = _log_provider_label()
@@ -51,6 +70,8 @@ logger.addFilter(_CloudProviderLogFilter())
 
 
 def _fast_mode() -> bool:
+    if _skyvern_human_mode():
+        return False
     return bool(getattr(_cfg, "BROWSER_USE_FAST_MODE", True))
 
 
@@ -291,6 +312,41 @@ def _apply_cloud_browser_automation_mask(context, page, *, label: str, proxy_cou
     except Exception as exc:
         logger.debug("[%s] 注入自动化特征弱化脚本失败：%s", label, str(exc)[:180])
     return {}
+
+
+def _should_apply_cloud_automation_mask(provider_prefix: str) -> bool:
+    if provider_prefix == "skyvern":
+        try:
+            from config import skyvern as _skyvern_cfg
+
+            return bool(getattr(_skyvern_cfg, "SKYVERN_INJECT_AUTOMATION_MASK", False))
+        except Exception:
+            return False
+    return True
+
+
+def _post_register_dwell(page, context, *, provider_prefix: str, email: str) -> None:
+    """注册成功后随机停留再断开，模拟手动注册后短暂观察。"""
+    seconds = _post_register_dwell_seconds()
+    if seconds <= 0:
+        return
+    logger.info("[%s] 注册成功后随机停留 %.1fs 再关闭连接：%s", _log_provider_label(), seconds, email)
+    end = time.time() + seconds
+    last_touch = 0.0
+    while time.time() < end:
+        try:
+            _check_manual_stop()
+        except Exception:
+            break
+        if time.time() - last_touch >= random.uniform(4.0, 8.0):
+            try:
+                page = _pick_live_page(context, page) or page
+                if page is not None:
+                    page.evaluate("() => { try { window.scrollBy(0, Math.floor(Math.random()*80)-40); } catch(e) {} return location.href; }")
+            except Exception:
+                pass
+            last_touch = time.time()
+        time.sleep(random.uniform(0.8, 1.8))
 
 
 def _page_url(page) -> str:
@@ -1836,6 +1892,7 @@ def run_browser_use_registration(
         client = BrowserUseClient()
 
     _set_log_provider_label(cloud_label)
+    _set_cloud_provider(provider_prefix)
     _t_all = _StepTimer(f"{cloud_label} 注册全流程")
     session_info_open = client.open_session()
     create_acknowledged = False
@@ -1870,12 +1927,15 @@ def run_browser_use_registration(
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(_timeout_ms())
             page.set_default_navigation_timeout(_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
-            _apply_cloud_browser_automation_mask(
-                context,
-                page,
-                label=cloud_label,
-                proxy_country_code=session_info_open.proxy_country_code,
-            )
+            if _should_apply_cloud_automation_mask(provider_prefix):
+                _apply_cloud_browser_automation_mask(
+                    context,
+                    page,
+                    label=cloud_label,
+                    proxy_country_code=session_info_open.proxy_country_code,
+                )
+            else:
+                logger.info("[%s] 已跳过额外 JS 指纹补丁，使用云浏览器原生 stealth 环境", cloud_label)
 
             if provider_prefix == "skyvern":
                 try:
@@ -2098,6 +2158,7 @@ def run_browser_use_registration(
                     "codex": codex_result,
                 },
             )
+            _post_register_dwell(page, context, provider_prefix=provider_prefix, email=email)
             _t_all.done("success")
             return {
                 "success": True,
@@ -2138,3 +2199,4 @@ def run_browser_use_registration(
             except Exception:
                 pass
         _set_log_provider_label("BrowserUse")
+        _set_cloud_provider("browser_use")

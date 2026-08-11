@@ -10,6 +10,7 @@
 """
 import json
 import logging
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,39 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ACCOUNTS_DIR = _PROJECT_ROOT / "accounts"
 _BATCH_ARCHIVE_LOCK = threading.RLock()
+
+
+def _post_register_dwell_seconds() -> float:
+    try:
+        from config import register as _register_cfg
+
+        raw = str(getattr(_register_cfg, "POST_REGISTER_DWELL_SECONDS_RANGE", "18,45") or "0,0").strip()
+    except Exception:
+        raw = "0,0"
+    try:
+        parts = [float(x.strip()) for x in raw.replace(";", ",").replace("|", ",").split(",") if x.strip()]
+        if not parts:
+            lo = hi = 0.0
+        elif len(parts) == 1:
+            lo = hi = parts[0]
+        else:
+            lo, hi = parts[0], parts[1]
+    except Exception:
+        lo = hi = 0.0
+    lo, hi = max(0.0, lo), max(0.0, hi)
+    if hi < lo:
+        lo, hi = hi, lo
+    seconds = random.uniform(lo, hi) if hi > lo else lo
+    return max(0.0, min(300.0, seconds))
+
+
+def post_register_dwell(email: str, *, label: str = "注册后") -> None:
+    """注册成功后随机停留一段时间；供不同浏览器驱动复用。"""
+    seconds = _post_register_dwell_seconds()
+    if seconds <= 0:
+        return
+    logger.info("[%s] 注册成功后随机停留 %.1fs：%s", label, seconds, email)
+    time.sleep(seconds)
 
 
 def _account_material_line(email: str, row: dict | None = None) -> str:
@@ -388,6 +422,7 @@ def save_account_data(
     email_source: str | None = None,
     proxy_used: str | None = None,
     batch_dir: Path | None = None,
+    auto_plan_check: bool | None = None,
 ) -> int:
     """
     将账号信息保存到本地 JSON/TXT 文件存储。
@@ -431,6 +466,16 @@ def save_account_data(
     )
     logger.info(f"[Save] 账号已写入 DB, id={row_id}, email={email}")
     logger.info(f"[Save] 批次归档目录: {batch_folder}")
+    if auto_plan_check is None:
+        try:
+            from config import register as _register_cfg
+
+            auto_plan_check = bool(getattr(_register_cfg, "AUTO_PLAN_CHECK_AFTER_REGISTER", False))
+        except Exception:
+            auto_plan_check = False
+    if not auto_plan_check:
+        logger.info(f"[Plan] 注册后自动套餐查询已跳过: id={row_id}, email={email}")
+        return row_id
     # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
     # 入队，由专用线程池异步查询并回写，避免占用注册工作线程。
     try:

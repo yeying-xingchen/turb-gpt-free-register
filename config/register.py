@@ -17,5 +17,18 @@ REGISTER_PASSWORD = ""
 # OpenAI 限制：name_invalid_chars —— 只允许字母和空格
 REGISTER_NAME = ""
 
+# 注册成功落库后是否自动查询套餐/Plus 资格。
+# 关闭后不会在注册完成后立刻访问 backend-api/accounts/check，后续可在账号列表手动查询。
+AUTO_PLAN_CHECK_AFTER_REGISTER = False
+
+# 注册成功并拿到 accessToken 后，在浏览器里随机停留一段时间再关闭连接。
+# 格式：最小秒,最大秒。设为 "0,0" 表示不额外停留。
+POST_REGISTER_DWELL_SECONDS_RANGE = "18,45"
+
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'REGISTER_EMAIL': 'str', 'REGISTER_NAME': 'str'})
+apply_env_overrides(globals(), {
+    'REGISTER_EMAIL': 'str',
+    'REGISTER_NAME': 'str',
+    'AUTO_PLAN_CHECK_AFTER_REGISTER': 'bool',
+    'POST_REGISTER_DWELL_SECONDS_RANGE': 'str',
+})

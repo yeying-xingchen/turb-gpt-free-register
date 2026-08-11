@@ -8,7 +8,7 @@ from pathlib import Path
 
 from config import cloakbrowser as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data
+from core.account_export import save_account_data, post_register_dwell
 from core.cloakbrowser_driver import build_cloak_driver
 from core.email_provider import wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
@@ -140,6 +140,7 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
                 "codex": codex_result,
             },
         )
+        post_register_dwell(email, label="Cloak注册")
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
         return {"success": bool(codex_ok), "email": email, "account_id": account_id, "access_token": access_token, "totp_secret": totp_secret, "codex": codex_result, "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}"}
     except Exception as exc:
