@@ -25,10 +25,6 @@ SKYVERN_KEEP_BROWSER_OPEN: bool = False
 # - 保留较慢逐字输入、点击前停顿、提交后停留。
 SKYVERN_HUMAN_MODE: bool = True
 
-# 是否给 Skyvern 页面注入最轻量 navigator.webdriver/window.chrome 修正。
-# Skyvern 自带 stealth 浏览器时，额外注入也可能和原生指纹冲突，默认关闭。
-SKYVERN_INJECT_AUTOMATION_MASK: bool = False
-
 # 打开的起始注册页
 SKYVERN_START_URL: str = "https://chatgpt.com/auth/login"
 
@@ -44,6 +40,5 @@ apply_env_overrides(globals(), {
     'SKYVERN_BROWSER_TYPE': 'str',
     'SKYVERN_KEEP_BROWSER_OPEN': 'bool',
     'SKYVERN_HUMAN_MODE': 'bool',
-    'SKYVERN_INJECT_AUTOMATION_MASK': 'bool',
     'SKYVERN_START_URL': 'str',
 })
