@@ -331,7 +331,7 @@ def _build_playwright_stealth(provider_prefix: str, *, label: str):
         navigator_vendor=True,
         navigator_webdriver=True,
         error_prototype=True,
-        navigator_languages_override=("en-US", "en"),
+        
         init_scripts_only=True,
     )
 
@@ -1751,6 +1751,68 @@ def _js_complete_profile(page, name: str, birthday: str) -> dict:
 
 
 def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) -> bool:
+    """资料页人工化填写/提交：name + birthday + checkbox + submit。提交后等待跳转或 accessToken。"""
+
+    timeout = min(timeout, 45) if _fast_mode() else timeout
+    end = time.time() + timeout
+    submitted = False
+    last_submit = 0.0
+    last_log = 0.0
+    last_info: dict[str, Any] = {}
+    last_diag: dict[str, Any] = {}
+    while time.time() < end:
+        _check_manual_stop()
+        url = _page_url(page).lower()
+        if "chatgpt.com" in url and "auth.openai.com" not in url and "about-you" not in url:
+            logger.info("[BrowserUse] 已离开资料页并进入 ChatGPT：%s", _page_url(page))
+            return True
+        if _has_chatgpt_access_token(page):
+            logger.info("[BrowserUse] 资料页提交后已检测到 accessToken")
+            return True
+        body = ""
+        try:
+            body = (page.locator("body").inner_text(timeout=800) or "").lower()
+        except Exception:
+            pass
+        looks_profile = any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")) or any(x in body for x in ("birthday", "birth", "age", "name", "誕生日", "年齢", "名前", "生日", "年龄", "姓名"))
+        if looks_profile:
+            if not submitted or time.time() - last_submit > 3:
+                logger.info("[BrowserUse] 资料页：人工化填写/提交昵称生日 url=%s", _page_url(page) or "-")
+                info = _human_complete_profile(page, name, birthday)
+                last_info = info
+                logger.info("[BrowserUse] 资料页人工化提交结果：%s", str(info)[:900])
+                submitted = bool(info.get("submitted") or submitted)
+                last_submit = time.time()
+                _bu_delay("form")
+            elif time.time() - last_log > 2:
+                logger.info("[BrowserUse] 资料页已提交，等待跳转：url=%s", _page_url(page) or "-")
+                last_log = time.time()
+                # 强制刷新兜底 - 触发 about-you -> chatgpt.com 重定向
+                if "about-you" in url or "auth.openai.com" in url:
+                    try:
+                        logger.info("[BrowserUse] 资料页已提交，仍停留在 about-you，强制刷新触发重定向")
+                        page.reload(wait_until="domcontentloaded", timeout=10000)
+                        _bu_delay("navigate")
+                    except Exception as reload_exc:
+                        logger.warning("[BrowserUse] 强制刷新失败：%s", reload_exc)
+            time.sleep(0.35 if _fast_mode() else 0.8)
+            continue
+        if submitted:
+            if time.time() - last_log > 2:
+                logger.info("[BrowserUse] 资料页已提交，等待跳转/登录态同步：url=%s", _page_url(page) or "-")
+                last_log = time.time()
+            time.sleep(0.35 if _fast_mode() else 0.8)
+            continue
+        if time.time() - last_log > 2:
+            logger.info("[BrowserUse] 等待资料页/登录态：url=%s", _page_url(page) or "-")
+            last_log = time.time()
+        time.sleep(0.25 if _fast_mode() else 0.6)
+    url = _page_url(page).lower()
+    if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
+        last_diag = _profile_diagnostics(page)
+        raise RuntimeError(f"资料页提交后仍未跳转，停止读取 session 以免误判；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
+    return submitted
+
     # fast mode 也必须等资料页真正离开；不能未提交成功就主动打开 chatgpt.com。
     timeout = min(timeout, 45) if _fast_mode() else timeout
     end = time.time() + timeout
