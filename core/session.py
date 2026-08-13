@@ -123,6 +123,75 @@ class BrowserSession:
             pass
         return out
 
+    @staticmethod
+    def _short_value(value: object, limit: int = 80) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
+
+    def fingerprint_summary(self) -> dict:
+        """返回适合日志/落库的浏览器指纹摘要，不展开过长数组字段。"""
+        profile = getattr(self, "browser_profile", {}) or {}
+        geo = profile.get("geo") or self.exit_geo or {}
+        summary = {
+            "device_id": self.device_id,
+            "proxy": self.proxy or "",
+            "proxy_mode": "direct" if not self.proxy else "proxy",
+            "browser_family": profile.get("browser_family") or "chrome",
+            "browser_os": profile.get("browser_os") or "macOS",
+            "user_agent": profile.get("user_agent") or USER_AGENT,
+            "accept_language": profile.get("accept_language") or ACCEPT_LANGUAGE,
+            "navigator_language": profile.get("navigator_language") or "zh-CN",
+            "navigator_languages": list(profile.get("navigator_languages") or []),
+            "timezone_iana": profile.get("timezone_iana") or "",
+            "timezone_offset_minutes": int(profile.get("timezone_offset_minutes", 0) or 0),
+            "timezone_name": profile.get("timezone_name") or "",
+            "screen_width": int(profile.get("screen_width", 0) or 0),
+            "screen_height": int(profile.get("screen_height", 0) or 0),
+            "device_pixel_ratio": profile.get("device_pixel_ratio") or 0,
+            "hardware_concurrency": profile.get("hardware_concurrency") or 0,
+            "device_memory": profile.get("device_memory") or 0,
+            "js_heap_size_limit": profile.get("js_heap_size_limit") or 0,
+            "sec_ch_ua": profile.get("sec_ch_ua") or "",
+            "sec_ch_ua_platform": profile.get("sec_ch_ua_platform") or "",
+            "sec_ch_ua_platform_version": profile.get("sec_ch_ua_platform_version") or "",
+            "sec_ch_ua_mobile": profile.get("sec_ch_ua_mobile") or "",
+            "sec_ch_ua_arch": profile.get("sec_ch_ua_arch") or "",
+            "sec_ch_ua_bitness": profile.get("sec_ch_ua_bitness") or "",
+            "sec_ch_ua_model": profile.get("sec_ch_ua_model") or "",
+            "sec_ch_ua_full_version_list": profile.get("sec_ch_ua_full_version_list") or "",
+            "react_listening_key": profile.get("react_listening_key") or "",
+            "react_container_key": profile.get("react_container_key") or "",
+            "react_resources_key": profile.get("react_resources_key") or "",
+            "sentinel_sid": self.sentinel_sid,
+            "oai_session_id": self.oai_session_id,
+            "auth_session_logging_id": self.auth_session_logging_id,
+            "datadog_trace_id": self.datadog_trace_id,
+            "datadog_parent_id": self.datadog_parent_id,
+            "geo_country": geo.get("country") or "",
+            "geo_city": geo.get("city") or "",
+            "geo_timezone": geo.get("timezone") or "",
+            "geo_org": geo.get("org") or "",
+        }
+        return summary
+
+    def fingerprint_summary_text(self) -> str:
+        """把摘要压成单行，方便日志输出。"""
+        p = self.fingerprint_summary()
+        parts = [
+            f"device_id={self._short_value(p.get('device_id'), 12)}",
+            f"proxy={self._short_value(p.get('proxy') or 'direct', 36)}",
+            f"ua={self._short_value(p.get('user_agent'), 72)}",
+            f"lang={p.get('accept_language')}",
+            f"tz={p.get('timezone_iana')}({p.get('timezone_offset_minutes')})",
+            f"screen={p.get('screen_width')}x{p.get('screen_height')}@{p.get('device_pixel_ratio')}",
+            f"cpu={p.get('hardware_concurrency')}",
+            f"mem={p.get('device_memory')}",
+            f"geo={p.get('geo_country') or '?'}:{p.get('geo_city') or '?'}",
+        ]
+        return " ".join(parts)
+
     def _observe_cf_cookie_changes(self, url: str) -> None:
         current = self.cf_cookie_snapshot()
         if current != getattr(self, "_cf_cookie_seen", {}):

@@ -1141,6 +1141,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
+        "live_check_device_id", "live_check_proxy_used", "live_check_fingerprint_text",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
@@ -1288,8 +1289,11 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
                 row["expires_at"] = session.get("expires")
             if result.get("device_id"):
                 row["device_id"] = result.get("device_id")
-            if result.get("proxy_used"):
-                row["live_check_proxy_used"] = result.get("proxy_used")
+            row["live_check_device_id"] = result.get("device_id") or row.get("live_check_device_id")
+            row["live_check_proxy_used"] = result.get("proxy_used") or row.get("live_check_proxy_used")
+            row["live_check_fingerprint_text"] = result.get("fingerprint_text") or row.get("live_check_fingerprint_text")
+            if result.get("fingerprint"):
+                row["live_check_fingerprint"] = result.get("fingerprint")
             row["live_check_error"] = None
 
         row["copy_line"] = _account_line(row)

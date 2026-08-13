@@ -1392,7 +1392,8 @@ function _liveStatusSub(r) {
   const s = r.live_check_status || '';
   const err = r.live_check_error || '';
   const at = r.live_checked_at || '';
-  if (s === 'live') return `<div class="sub-cell" title="${esc(at)}">查活: 正常</div>`;
+  const fp = r.live_check_fingerprint_text || '';
+  if (s === 'live') return `<div class="sub-cell" title="${esc([at, fp].filter(Boolean).join('\n'))}">查活: 正常${fp ? ` · ${esc(fp)}` : ''}</div>`;
   if (s === 'queued') return `<div class="sub-cell" style="color:#e6a23c">查活: 排队</div>`;
   if (s === 'running') return `<div class="sub-cell" style="color:#e6a23c">查活: 运行中</div>`;
   if (s === 'deactivated') return `<div class="sub-cell" style="color:#f56c6c" title="${esc(err || at)}">查活: 已废</div>`;
