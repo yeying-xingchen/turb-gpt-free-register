@@ -491,6 +491,7 @@
             <span class="btn-group-title">批量</span>
             <button class="btn good" id="btnNoteSelectedAccounts" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
             <button class="btn good" id="btnCopySelectedLines" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
+            <button class="btn good" id="btnCopySelectedTokens" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
             <button class="btn good" id="btnDownloadSelectedTxt" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
             <button class="btn" id="btnArchiveSelectedAccounts" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档</button>
             <button class="btn" id="btnDeleteSelectedAccounts" disabled title="删除选中的本地账号/token记录">删除</button>
@@ -1442,6 +1443,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const uploadAgentSub2Btn = $('#btnUploadSelectedAgentSub2');
   const checkPlanBtn = $('#btnCheckSelectedPlans');
   const copySelectedBtn = $('#btnCopySelectedLines');
+  const copySelectedTokensBtn = $('#btnCopySelectedTokens');
   const downloadTxtBtn = $('#btnDownloadSelectedTxt');
   const noteSelectedBtn = $('#btnNoteSelectedAccounts');
   const archiveSelectedBtn = $('#btnArchiveSelectedAccounts');
@@ -1456,6 +1458,7 @@ function updateAccountSelectionUi(pageRows = null) {
   if (uploadAgentSub2Btn) uploadAgentSub2Btn.disabled = ACCOUNT_SELECTED.size === 0;
   if (checkPlanBtn) checkPlanBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (copySelectedBtn) copySelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
+  if (copySelectedTokensBtn) copySelectedTokensBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (downloadTxtBtn) downloadTxtBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (noteSelectedBtn) noteSelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (archiveSelectedBtn) {
@@ -1719,6 +1722,7 @@ $('#accountsSelectAll').addEventListener('change', (e) => {
 $('#btnDeleteSelectedAccounts').addEventListener('click', deleteSelectedAccounts);
 $('#btnArchiveSelectedAccounts').addEventListener('click', archiveSelectedAccounts);
 $('#btnCopySelectedLines').addEventListener('click', copySelectedAccountLines);
+$('#btnCopySelectedTokens').addEventListener('click', copySelectedAccountTokens);
 $('#btnDownloadSelectedTxt').addEventListener('click', downloadSelectedAccountTxt);
 $('#btnNoteSelectedAccounts').addEventListener('click', noteSelectedAccounts);
 $('#btnExtractSelectedLinks').addEventListener('click', extractSelectedLinks);
@@ -1785,6 +1789,17 @@ async function copySelectedAccountLines() {
     if (!lines.length) { showToast('选中账号没有可复制整行'); return; }
     copyText(lines.join('\n'));
     showToast(`已复制 ${lines.length} 行`);
+  } catch(err) { showToast('复制失败: ' + err.message); }
+}
+
+async function copySelectedAccountTokens() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  try {
+    const lines = await fetchAccountSecrets(ids, 'access_token');
+    if (!lines.length) { showToast('选中账号没有可复制 Token'); return; }
+    copyText(lines.join('\n'));
+    showToast(`已复制 ${lines.length} 个 Token`);
   } catch(err) { showToast('复制失败: ' + err.message); }
 }
 
