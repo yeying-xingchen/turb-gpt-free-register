@@ -483,6 +483,36 @@ def _maybe_accept_cookies(page) -> None:
     )
 
 
+def _maybe_dismiss_chatgpt_onboarding(page) -> None:
+    """登录后 ChatGPT 欢迎/介绍弹窗兜底点击，避免 Skyvern 停在弹窗层。"""
+    selectors = [
+        "button:has-text('Get started')",
+        "button:has-text('Start using ChatGPT')",
+        "button:has-text('Continue')",
+        "button:has-text('Next')",
+        "button:has-text('Done')",
+        "button:has-text('Skip')",
+        "button:has-text('Maybe later')",
+        "button:has-text('开始使用')",
+        "button:has-text('继续')",
+        "button:has-text('下一步')",
+        "button:has-text('完成')",
+        "button:has-text('跳过')",
+        "[data-testid*='dismiss' i]",
+        "[aria-label*='close' i]",
+        "[aria-label*='关闭' i]",
+    ]
+    end = time.time() + (4 if _fast_mode() else 7)
+    clicks = 0
+    while time.time() < end and clicks < 4:
+        if "chatgpt.com" not in _page_url(page).lower():
+            return
+        if not _click_first(page, selectors, timeout_ms=900):
+            return
+        clicks += 1
+        _human_pause(0.25, 0.6)
+
+
 def _assert_not_external_idp(page, stage: str) -> None:
     url = _page_url(page).lower()
     bad_hosts = (
@@ -1421,10 +1451,22 @@ def _has_chatgpt_access_token(page) -> bool:
         if "chatgpt.com" not in _page_url(page).lower():
             return False
         data = page.evaluate(
-            """async () => {
-              const r = await fetch('/api/auth/session', {credentials:'include'});
-              return await r.json();
-            }"""
+            """async ({timeoutMs}) => {
+              const ctrl = new AbortController();
+              const timer = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
+              try {
+                const r = await fetch('/api/auth/session', {
+                  credentials: 'include',
+                  cache: 'no-store',
+                  headers: {'accept': 'application/json'},
+                  signal: ctrl.signal,
+                });
+                return await r.json();
+              } finally {
+                clearTimeout(timer);
+              }
+            }""",
+            {"timeoutMs": 2500 if _fast_mode() else 4000},
         )
         return bool(isinstance(data, dict) and data.get("accessToken"))
     except Exception:
@@ -1750,8 +1792,45 @@ def _js_complete_profile(page, name: str, birthday: str) -> dict:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "url": _page_url(page)}
 
 
+def _force_exit_profile_page(page, deadline: float) -> bool:
+    """资料页提交后如果仍卡在 about-you/profile，强制跳出，避免 Skyvern 远端页面无限等待。"""
+    targets = [
+        "https://chatgpt.com/",
+        "https://chatgpt.com/auth/login",
+    ]
+    attempt = 0
+    while time.time() < deadline:
+        _check_manual_stop()
+        attempt += 1
+        try:
+            url = _page_url(page).lower()
+        except Exception:
+            url = ""
+        if "chatgpt.com" in url and "about-you" not in url and "signup/profile" not in url and "auth.openai.com" not in url:
+            return True
+        if _has_chatgpt_access_token(page):
+            return True
+        for target in targets:
+            if time.time() >= deadline:
+                break
+            try:
+                logger.info("[BrowserUse] 资料页提交后仍未离开，强制跳转兜底：attempt=%s target=%s current=%s", attempt, target, _page_url(page) or "-")
+                page.goto(target, wait_until="domcontentloaded", timeout=10000)
+                _bu_delay("navigate")
+                _maybe_dismiss_chatgpt_onboarding(page)
+                if _has_chatgpt_access_token(page):
+                    return True
+                url = _page_url(page).lower()
+                if "chatgpt.com" in url and "about-you" not in url and "signup/profile" not in url and "auth.openai.com" not in url:
+                    return True
+            except Exception as exc:
+                logger.warning("[BrowserUse] 强制跳出资料页失败：%s: %s", type(exc).__name__, str(exc)[:180])
+        time.sleep(0.8 if _fast_mode() else 1.2)
+    return False
+
+
 def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) -> bool:
-    """资料页人工化填写/提交：name + birthday + checkbox + submit。提交后等待跳转或 accessToken。"""
+    """资料页填写/提交：提交后不无限等待；Skyvern 卡住时强制跳出 about-you。"""
 
     timeout = min(timeout, 45) if _fast_mode() else timeout
     end = time.time() + timeout
@@ -1760,117 +1839,85 @@ def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) ->
     last_log = 0.0
     last_info: dict[str, Any] = {}
     last_diag: dict[str, Any] = {}
+    post_submit_hard_exit_at: float | None = None
+
     while time.time() < end:
         _check_manual_stop()
         url = _page_url(page).lower()
-        if "chatgpt.com" in url and "auth.openai.com" not in url and "about-you" not in url:
+        if "chatgpt.com" in url and "auth.openai.com" not in url and "about-you" not in url and "signup/profile" not in url:
             logger.info("[BrowserUse] 已离开资料页并进入 ChatGPT：%s", _page_url(page))
             return True
         if _has_chatgpt_access_token(page):
             logger.info("[BrowserUse] 资料页提交后已检测到 accessToken")
             return True
+
         body = ""
         try:
             body = (page.locator("body").inner_text(timeout=800) or "").lower()
         except Exception:
             pass
         looks_profile = any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")) or any(x in body for x in ("birthday", "birth", "age", "name", "誕生日", "年齢", "名前", "生日", "年龄", "姓名"))
+
         if looks_profile:
-            if not submitted or time.time() - last_submit > 3:
-                logger.info("[BrowserUse] 资料页：人工化填写/提交昵称生日 url=%s", _page_url(page) or "-")
+            if not submitted or time.time() - last_submit > 4:
+                logger.info("[BrowserUse] 资料页：填写/提交昵称生日 url=%s", _page_url(page) or "-")
                 info = _human_complete_profile(page, name, birthday)
                 last_info = info
                 logger.info("[BrowserUse] 资料页人工化提交结果：%s", str(info)[:900])
-                submitted = bool(info.get("submitted") or submitted)
+                if not info.get("submitted"):
+                    js_info = _js_complete_profile(page, name, birthday)
+                    last_info = {"human": info, "js": js_info}
+                    logger.info("[BrowserUse] 资料页 JS 兜底提交结果：%s", str(js_info)[:900])
+                    submitted = bool(js_info.get("submitted") or submitted)
+                else:
+                    submitted = True
+                if submitted and post_submit_hard_exit_at is None:
+                    # Skyvern 常见卡点：按钮已提交但页面不跳转。最多给它 10~16 秒同步登录态，然后强制跳出。
+                    post_submit_hard_exit_at = time.time() + (10 if _fast_mode() else 16)
                 last_submit = time.time()
                 _bu_delay("form")
             elif time.time() - last_log > 2:
-                logger.info("[BrowserUse] 资料页已提交，等待跳转：url=%s", _page_url(page) or "-")
+                logger.info("[BrowserUse] 资料页已提交，等待短暂跳转：url=%s", _page_url(page) or "-")
                 last_log = time.time()
-                # 强制刷新兜底 - 触发 about-you -> chatgpt.com 重定向
-                if "about-you" in url or "auth.openai.com" in url:
-                    try:
-                        logger.info("[BrowserUse] 资料页已提交，仍停留在 about-you，强制刷新触发重定向")
-                        page.reload(wait_until="domcontentloaded", timeout=10000)
-                        _bu_delay("navigate")
-                    except Exception as reload_exc:
-                        logger.warning("[BrowserUse] 强制刷新失败：%s", reload_exc)
+
+            if submitted and post_submit_hard_exit_at and time.time() >= post_submit_hard_exit_at:
+                if _force_exit_profile_page(page, min(end, time.time() + (8 if _fast_mode() else 12))):
+                    logger.info("[BrowserUse] 资料页提交后已通过强制跳转退出：%s", _page_url(page) or "-")
+                    return True
+                break
             time.sleep(0.35 if _fast_mode() else 0.8)
             continue
+
         if submitted:
+            if _has_chatgpt_access_token(page):
+                logger.info("[BrowserUse] 资料页提交后已检测到 accessToken")
+                return True
+            if post_submit_hard_exit_at is None:
+                post_submit_hard_exit_at = time.time() + (10 if _fast_mode() else 16)
             if time.time() - last_log > 2:
-                logger.info("[BrowserUse] 资料页已提交，等待跳转/登录态同步：url=%s", _page_url(page) or "-")
+                logger.info("[BrowserUse] 资料页已提交，等待登录态同步：url=%s", _page_url(page) or "-")
                 last_log = time.time()
+            if time.time() >= post_submit_hard_exit_at:
+                if _force_exit_profile_page(page, min(end, time.time() + (8 if _fast_mode() else 12))):
+                    logger.info("[BrowserUse] 资料页提交后已通过强制跳转退出：%s", _page_url(page) or "-")
+                    return True
+                break
             time.sleep(0.35 if _fast_mode() else 0.8)
             continue
+
         if time.time() - last_log > 2:
             logger.info("[BrowserUse] 等待资料页/登录态：url=%s", _page_url(page) or "-")
             last_log = time.time()
         time.sleep(0.25 if _fast_mode() else 0.6)
+
     url = _page_url(page).lower()
     if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
         last_diag = _profile_diagnostics(page)
-        raise RuntimeError(f"资料页提交后仍未跳转，停止读取 session 以免误判；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
-    return submitted
-
-    # fast mode 也必须等资料页真正离开；不能未提交成功就主动打开 chatgpt.com。
-    timeout = min(timeout, 45) if _fast_mode() else timeout
-    end = time.time() + timeout
-    submitted = False
-    last_submit = 0.0
-    last_log = 0.0
-    last_info: dict[str, Any] = {}
-    last_diag: dict[str, Any] = {}
-    while time.time() < end:
-        _check_manual_stop()
-        url = _page_url(page).lower()
-        if "chatgpt.com" in url and "auth.openai.com" not in url and "about-you" not in url:
-            logger.info("[BrowserUse] 已离开资料页并进入 ChatGPT：%s", _page_url(page))
+        if submitted and _force_exit_profile_page(page, time.time() + (8 if _fast_mode() else 12)):
+            logger.info("[BrowserUse] 资料页最终超时后已强制退出：%s", _page_url(page) or "-")
             return True
-        if _has_chatgpt_access_token(page):
-            logger.info("[BrowserUse] 资料页阶段已检测到 accessToken")
-            return False
-
-        body = ""
-        try:
-            body = (page.locator("body").inner_text(timeout=800) or "").lower()
-        except Exception:
-            pass
-        looks_profile = any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")) or any(x in body for x in ("birthday", "birth", "age", "name", "誕生日", "年齢", "名前", "生日", "年龄", "姓名"))
-
-        if looks_profile:
-            if not submitted or time.time() - last_submit > 3:
-                logger.info("[BrowserUse] 资料页：人工化填写/提交昵称生日 url=%s", _page_url(page) or "-")
-                info = _human_complete_profile(page, name, birthday)
-                last_info = info
-                logger.info("[BrowserUse] 资料页人工化提交结果：%s", str(info)[:900])
-                submitted = bool(info.get("submitted") or submitted)
-                last_submit = time.time()
-                _bu_delay("form")
-            elif time.time() - last_log > 2:
-                logger.info("[BrowserUse] 资料页已提交，等待跳转：url=%s", _page_url(page) or "-")
-                last_log = time.time()
-            time.sleep(0.35 if _fast_mode() else 0.8)
-            continue
-
-        if submitted:
-            if time.time() - last_log > 2:
-                logger.info("[BrowserUse] 资料页已提交，等待跳转/登录态同步：url=%s", _page_url(page) or "-")
-                last_log = time.time()
-            time.sleep(0.35 if _fast_mode() else 0.8)
-            continue
-
-        if time.time() - last_log > 2:
-            logger.info("[BrowserUse] 等待资料页/登录态：url=%s", _page_url(page) or "-")
-            last_log = time.time()
-        time.sleep(0.25 if _fast_mode() else 0.6)
-
-    url = _page_url(page).lower()
-    if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
-        last_diag = _profile_diagnostics(page)
-        raise RuntimeError(f"资料页提交后仍未跳转，停止读取 session 以免误判；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
+        raise RuntimeError(f"资料页提交后仍未跳转，已触发强制退出仍失败；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
     return submitted
-
 
 
 def _is_target_closed_error(exc: Exception | str) -> bool:
@@ -2158,6 +2205,7 @@ def _fetch_chatgpt_session(page, context=None, timeout: int = 120) -> dict:
     last = None
     proactive_opened = False
     first_not_chatgpt_at: float | None = None
+    first_profile_still_at: float | None = None
     last_log = 0.0
     target_closed_count = 0
 
@@ -2197,6 +2245,7 @@ def _fetch_chatgpt_session(page, context=None, timeout: int = 120) -> dict:
 
         # 2) 如果已经在 chatgpt.com，再用页面内 fetch 兜底；但设置短超时。
         if on_chatgpt and page is not None:
+            _maybe_dismiss_chatgpt_onboarding(page)
             data = _read_chatgpt_session_via_page(page, timeout_ms=2200 if _fast_mode() else 5000)
             last = data
             if isinstance(data, dict) and data.get("accessToken"):
@@ -2214,10 +2263,17 @@ def _fetch_chatgpt_session(page, context=None, timeout: int = 120) -> dict:
                 logger.info("[BrowserUse] 等待 accessToken via=page，url=%s keys=%s", _page_url(page) or "-", keys)
                 last_log = time.time()
         else:
-            # 仍在 auth about-you/profile 时不能主动跳 chatgpt.com，否则资料未提交会拿不到 accessToken。
+            # 资料页提交后 Skyvern 偶发不会自动跳转；到 session 阶段说明 profile 处理已经结束，
+            # 继续停留在 about-you/profile 没有意义，短暂观察后强制跳到 ChatGPT 读取登录态。
             if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
+                if first_profile_still_at is None:
+                    first_profile_still_at = time.time()
+                if time.time() - first_profile_still_at >= (3.0 if _fast_mode() else 6.0):
+                    if _force_exit_profile_page(page, min(end, time.time() + (8 if _fast_mode() else 12))):
+                        proactive_opened = True
+                        continue
                 if time.time() - last_log > 2:
-                    logger.info("[BrowserUse] 仍在资料页，等待提交跳转，不主动打开 chatgpt.com：url=%s", _page_url(page) or "-")
+                    logger.info("[BrowserUse] session 阶段仍在资料页，短暂等待后将强制跳出：url=%s", _page_url(page) or "-")
                     last_log = time.time()
                 time.sleep(0.4 if _fast_mode() else 1.0)
                 continue
@@ -2230,6 +2286,7 @@ def _fetch_chatgpt_session(page, context=None, timeout: int = 120) -> dict:
                     page.goto("https://chatgpt.com/", wait_until="domcontentloaded", timeout=_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
                     proactive_opened = True
                     _bu_delay("navigate")
+                    _maybe_dismiss_chatgpt_onboarding(page)
                     continue
                 except Exception as exc:
                     last = f"goto_chatgpt_failed {type(exc).__name__}: {exc}"
@@ -2470,12 +2527,14 @@ def run_browser_use_registration(
 
             logger.info("[BrowserUse] 处理资料页/登录态")
             _t_profile = _StepTimer("资料页/登录态")
-            profile_submitted = _complete_profile_page(page, name, birthday, timeout=28 if _fast_mode() else 60)
+            profile_timeout = 28 if _fast_mode() else (42 if provider_prefix == "skyvern" else 60)
+            profile_submitted = _complete_profile_page(page, name, birthday, timeout=profile_timeout)
             if profile_submitted:
                 create_acknowledged = True
                 _bu_delay("post_auth")
 
-            session_info = _fetch_chatgpt_session(page, context=context, timeout=18 if _fast_mode() else 60)
+            session_timeout = 18 if _fast_mode() else (35 if provider_prefix == "skyvern" else 60)
+            session_info = _fetch_chatgpt_session(page, context=context, timeout=session_timeout)
             _t_profile.done()
             access_token = session_info.get("accessToken")
             if not access_token:

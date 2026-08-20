@@ -11,6 +11,7 @@ Flask 本地控制台。
 默认绑定 127.0.0.1，仅本地访问。
 """
 import logging
+import gzip
 import threading
 import time
 import uuid
@@ -174,6 +175,35 @@ def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     _prepared_downloads: dict[str, dict] = {}
 
+    @app.after_request
+    def _compress_json_response(response: Response):
+        """默认对 JSON API 响应启用 gzip，减少本地前端拉取大列表的传输体积。"""
+        accept_encoding = (request.headers.get("Accept-Encoding") or "").lower()
+        # 默认开启 gzip：浏览器会自动带 gzip；本地脚本未带 Accept-Encoding 时也压缩。
+        # 只有客户端明确声明 identity 且没有 gzip 时，才按明文返回。
+        gzip_allowed = ("gzip" in accept_encoding) or (not accept_encoding)
+        if (
+            response.direct_passthrough
+            or response.headers.get("Content-Encoding")
+            or not gzip_allowed
+        ):
+            return response
+        mimetype = (response.mimetype or "").lower()
+        if mimetype != "application/json":
+            return response
+        data = response.get_data()
+        if not data or len(data) < 1024:
+            return response
+        compressed = gzip.compress(data, compresslevel=6)
+        if len(compressed) >= len(data):
+            return response
+        response.set_data(compressed)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = str(len(compressed))
+        vary = response.headers.get("Vary")
+        response.headers["Vary"] = "Accept-Encoding" if not vary else f"{vary}, Accept-Encoding"
+        return response
+
     def _put_prepared_download(content: bytes, filename: str, mimetype: str = "application/zip") -> str:
         now = time.time()
         # 顺手清理 10 分钟前的临时下载，避免内存堆积。
@@ -284,6 +314,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         limit = request.args.get("limit", default=500, type=int)
         archived = str(request.args.get("archived", default="0") or "0").lower()
         plan_filter = str(request.args.get("plan", default="") or "").lower()
+        codex_filter = str(request.args.get("codex_status", default="") or "").strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
@@ -295,11 +326,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q, date_from=date_from, date_to=date_to)
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to)
             result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
-        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, q=q, date_from=date_from, date_to=date_to))
+        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to))
 
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
@@ -307,6 +338,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         limit = request.args.get("limit", default=5000, type=int)
         archived = str(request.args.get("archived", default="0") or "0").lower()
         plan_filter = str(request.args.get("plan", default="") or "").lower()
+        codex_filter = str(request.args.get("codex_status", default="") or "").strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
@@ -314,10 +346,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, q=q)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, q=q)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 
@@ -1947,7 +1979,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         acc = db.get_account_by_email(email)
         if acc is None:
             return jsonify({"ok": False, "error": f"账号不存在: {email}"}), 404
-        if (acc.get("codex_status") or "") == "deactivated":
+        if (acc.get("live_check_status") or "") == "deactivated":
             return jsonify({"ok": False, "error": "账号已废号，不能补跑 Codex"}), 409
         if not _reserve_codex_retry(email):
             return jsonify({"ok": False, "error": "该账号正在补跑中，请稍候"}), 409
@@ -1999,7 +2031,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             if not email:
                 skipped.append({"id": acc_id, "reason": "邮箱为空"})
                 continue
-            if (acc.get("codex_status") or "") == "deactivated":
+            if (acc.get("live_check_status") or "") == "deactivated":
                 skipped.append({"id": acc_id, "email": email, "reason": "账号已废号"})
                 continue
             if not _reserve_codex_retry(email):

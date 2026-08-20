@@ -45,6 +45,10 @@ _LEGACY_OUTLOOK_JSON = _LEGACY_DATA_DIR / "outlook_accounts.json"
 _LEGACY_ACCOUNTS_JSON = _LEGACY_DATA_DIR / "registered_accounts.json"
 _LEGACY_JOBS_JSON = _LEGACY_DATA_DIR / "registration_jobs.json"
 _LOCK = threading.RLock()
+_VIEWER_DEBOUNCE_SECONDS = 3.0
+_VIEWER_REFRESH_LOCK = threading.Lock()
+_VIEWER_REFRESH_TIMER: threading.Timer | None = None
+_VIEWER_REFRESH_REASON = ""
 
 
 def _now() -> str:
@@ -458,6 +462,44 @@ render();
             return fallback
 
 
+def _run_debounced_static_viewer_refresh() -> None:
+    """后台刷新静态账号查看页。
+
+    WebUI 的实时列表不依赖 accounts_viewer.html；把它从保存路径上移走，
+    避免注册/查活/Codex/套餐状态高频写入时，反复生成大 HTML 并阻塞查询 API。
+    """
+    global _VIEWER_REFRESH_TIMER, _VIEWER_REFRESH_REASON
+    with _VIEWER_REFRESH_LOCK:
+        _VIEWER_REFRESH_TIMER = None
+        reason = _VIEWER_REFRESH_REASON
+        _VIEWER_REFRESH_REASON = ""
+    try:
+        with _LOCK:
+            outlook_rows = _load_outlook()
+            account_rows = _load_accounts()
+            _render_static_viewer(outlook_rows=outlook_rows, account_rows=account_rows)
+    except Exception:
+        # 静态查看页只是旁路产物，失败不应影响主流程。
+        try:
+            import logging
+            logging.getLogger(__name__).exception("后台刷新 accounts_viewer.html 失败: %s", reason or "-")
+        except Exception:
+            pass
+
+
+def _schedule_static_viewer_refresh(reason: str = "") -> None:
+    """防抖刷新静态查看页：短时间内多次保存只生成一次 HTML。"""
+    global _VIEWER_REFRESH_TIMER, _VIEWER_REFRESH_REASON
+    with _VIEWER_REFRESH_LOCK:
+        _VIEWER_REFRESH_REASON = reason or _VIEWER_REFRESH_REASON
+        if _VIEWER_REFRESH_TIMER is not None:
+            _VIEWER_REFRESH_TIMER.cancel()
+        timer = threading.Timer(_VIEWER_DEBOUNCE_SECONDS, _run_debounced_static_viewer_refresh)
+        timer.daemon = True
+        _VIEWER_REFRESH_TIMER = timer
+        timer.start()
+
+
 def _load_outlook() -> list[dict]:
     rows = _read_json(_OUTLOOK_JSON, None)
     if not isinstance(rows, list):
@@ -468,7 +510,7 @@ def _load_outlook() -> list[dict]:
 def _save_outlook(rows: list[dict]) -> None:
     _write_json(_OUTLOOK_JSON, rows)
     _sync_outlook_txt(rows)
-    _render_static_viewer(outlook_rows=rows)
+    _schedule_static_viewer_refresh("save_outlook")
 
 
 def _load_generic_api_emails() -> list[dict]:
@@ -496,7 +538,7 @@ def _save_accounts(rows: list[dict]) -> None:
     _write_json(_ACCOUNTS_JSON, rows)
     _sync_accounts_txt(rows)
     _sync_tokens_txt(rows)
-    _render_static_viewer(account_rows=rows)
+    _schedule_static_viewer_refresh("save_accounts")
 
 
 def _load_jobs() -> list[dict]:
@@ -690,6 +732,12 @@ def update_account_codex_status(email: str, codex_status: str, codex_error: str 
             return False
         row["codex_status"] = codex_status
         row["codex_error"] = codex_error
+        if str(codex_status or "").strip().lower() == "deactivated":
+            # Codex 授权阶段判定为 deactivated，按账号废号处理，便于账号列表统一筛选。
+            row["live_check_status"] = "deactivated"
+            row["live_check_ok"] = False
+            row["live_check_error"] = codex_error or "Codex 授权判定账号已废号"
+            row["live_checked_at"] = _now()
         row["updated_at"] = _now()
         _save_accounts(accounts)
         return True
@@ -1102,7 +1150,27 @@ def _parse_iso_dt(value: str | None, end_of_day: bool = False) -> datetime | Non
         return None
 
 
-def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+def _matches_codex_status_filter(row: dict, codex_filter: str | None) -> bool:
+    codex_filter = str(codex_filter or "").strip().lower()
+    if not codex_filter:
+        return True
+    status = str(row.get("codex_status") or "").strip().lower()
+    live_status = str(row.get("live_check_status") or "").strip().lower()
+    if codex_filter in {"all", "*"}:
+        return True
+    if codex_filter == "deactivated":
+        return live_status == "deactivated"
+    return status == codex_filter
+
+
+def _filtered_decorated_accounts(
+    archived: str | bool | None = False,
+    plan_filter: str | None = None,
+    codex_filter: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict]:
     rows = _load_accounts()
     if archived in (True, "1", "true", "yes", "only"):
         rows = [r for r in rows if bool(r.get("archived"))]
@@ -1112,6 +1180,7 @@ def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filte
         rows = [r for r in rows if not bool(r.get("archived"))]
     decorated = [_decorate_account(r) for r in rows]
     decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
+    decorated = [r for r in decorated if _matches_codex_status_filter(r, codex_filter)]
     decorated = [r for r in decorated if _account_matches_query(r, q)]
     # 按创建时间筛选（date_from/date_to 为 ISO 字符串或 YYYY-MM-DD）
     if date_from or date_to:
@@ -1132,7 +1201,14 @@ def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filte
     return sorted(decorated, key=lambda x: int(x.get("id") or 0), reverse=True)
 
 
-def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> dict:
+def list_account_plan_check_statuses(
+    limit: int = 5000,
+    offset: int = 0,
+    archived: str | bool | None = False,
+    plan_filter: str | None = None,
+    codex_filter: str | None = None,
+    q: str | None = None,
+) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
         "id", "email", "archived",
@@ -1156,7 +1232,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
     )
     with _LOCK:
-        all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q)
         total = len(all_rows)
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
@@ -1206,15 +1282,33 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}:{revision_sig}"}
 
 
-def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+def list_accounts(
+    limit: int = 500,
+    offset: int = 0,
+    archived: str | bool | None = False,
+    plan_filter: str | None = None,
+    codex_filter: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[dict]:
     with _LOCK:
-        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q, date_from=date_from, date_to=date_to)
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to)
         return rows[max(0, int(offset or 0)): max(0, int(offset or 0)) + max(1, int(limit))]
 
 
-def list_accounts_page(limit: int = 50, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None) -> dict:
+def list_accounts_page(
+    limit: int = 50,
+    offset: int = 0,
+    archived: str | bool | None = False,
+    plan_filter: str | None = None,
+    codex_filter: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict:
     with _LOCK:
-        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q, date_from=date_from, date_to=date_to)
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to)
         total = len(rows)
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
@@ -1267,10 +1361,6 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
         row["live_checked_at"] = result.get("checked_at") or now
         row["live_check_error"] = None if ok else result.get("error")
         row["updated_at"] = now
-
-        if status == "deactivated":
-            row["codex_status"] = "deactivated"
-            row["codex_error"] = result.get("error") or "账号已删除/停用/封禁"
 
         if ok:
             token = str(result.get("access_token") or "").strip()
@@ -2401,6 +2491,12 @@ def storage_paths() -> dict:
 
 def refresh_static_viewer() -> Path:
     """手动刷新静态查看器，返回 HTML 路径。"""
+    global _VIEWER_REFRESH_TIMER, _VIEWER_REFRESH_REASON
+    with _VIEWER_REFRESH_LOCK:
+        if _VIEWER_REFRESH_TIMER is not None:
+            _VIEWER_REFRESH_TIMER.cancel()
+            _VIEWER_REFRESH_TIMER = None
+        _VIEWER_REFRESH_REASON = ""
     with _LOCK:
         outlook_rows = _load_outlook()
         account_rows = _load_accounts()

@@ -2128,6 +2128,17 @@
           </label>
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通 Plus 的账号">已开通Plus</button>
+          <label class="acc-v2-inline" title="按账号状态筛选账号">
+            <select id="codexStatusFilterV2">
+              <option value="">全部状态</option>
+              <option value="success">成功</option>
+              <option value="failed">失败</option>
+              <option value="retrying">补跑中</option>
+              <option value="stopped">已停止</option>
+              <option value="skipped">已跳过</option>
+              <option value="deactivated">账号废号</option>
+            </select>
+          </label>
           <div class="acc-v2-date-select" id="dateSelectAccountsV2">
             <button type="button" class="acc-v2-date-select-btn" id="btnDateFilterAccountsV2" title="按注册时间筛选日期范围">📅 日期筛选</button>
             <div class="acc-v2-date-select-menu" id="dateFilterPanelAccountsV2"></div>
@@ -3072,7 +3083,7 @@ function openLog(jobId) {
   $('#logContent').textContent = '加载中…';
   pollLog();
   clearInterval(logTimer);
-  logTimer = setInterval(pollLog, 2000);
+  logTimer = setInterval(pollLog, 5000);
 }
 async function pollLog() {
   if (activeLogJob == null) return;
@@ -3094,6 +3105,10 @@ function getAccountsQuery() {
   const el = document.getElementById('qAccountsV2');
   return (el ? el.value : '').trim();
 }
+function getAccountsCodexFilter() {
+  const el = document.getElementById('codexStatusFilterV2');
+  return (el ? el.value : '').trim();
+}
 function getCodexBulkWorkers() {
   const el = document.getElementById('codexBulkWorkersV2');
   return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
@@ -3104,11 +3119,12 @@ async function loadAccounts() {
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
+    const codex = getAccountsCodexFilter();
     const q = getAccountsQuery();
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -3123,9 +3139,10 @@ async function pollAccountPlanStatuses() {
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
+    const codex = getAccountsCodexFilter();
     const q = getAccountsQuery();
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&q=${encodeURIComponent(q)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&q=${encodeURIComponent(q)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -3165,7 +3182,7 @@ function _codexCell(r) {
   if (s === 'stopped') return `<span class="pill status-used"${titleAttr}>已停止</span>`;
   if (s === 'failed') return `<span class="pill status-failed"${titleAttr}>失败</span>`;
   if (s === 'skipped') return `<span class="pill status-used">已跳过</span>`;
-  if (s === 'deactivated') return `<span class="pill status-failed" title="账号已被 OpenAI 删除/停用/封禁，无法授权">已废号</span>`;
+  if (s === 'deactivated') return `<span class="pill status-failed" title="授权记录显示账号异常，建议通过查活确认账号状态">失败</span>`;
   return `<span class="muted">-</span>`;
 }
 function _codexCellV2(r) {
@@ -3177,7 +3194,7 @@ function _codexCellV2(r) {
   if (s === 'stopped') return `<span class="acc-v2-codex is-mute"${titleAttr}>已停止</span>`;
   if (s === 'failed') return `<span class="acc-v2-codex is-fail"${titleAttr}>失败</span>`;
   if (s === 'skipped') return `<span class="acc-v2-codex is-skip"${titleAttr}>已跳过</span>`;
-  if (s === 'deactivated') return `<span class="acc-v2-codex is-fail" title="账号已被 OpenAI 删除/停用/封禁，无法授权">已废号</span>`;
+  if (s === 'deactivated') return `<span class="acc-v2-codex is-fail" title="授权记录显示账号异常，建议通过查活确认账号状态">失败</span>`;
   return `<span class="acc-v2-muted">-</span>`;
 }
 function _codexAgentCell(r) {
@@ -3483,7 +3500,7 @@ function openRetryLog(email) {
   $('#retryLogContent').textContent = '加载中…';
   pollRetryLog();
   clearInterval(retryLogTimer);
-  retryLogTimer = setInterval(pollRetryLog, 2000);
+  retryLogTimer = setInterval(pollRetryLog, 5000);
 }
 async function pollRetryLog() {
   if (!retryLogEmail) return;
@@ -3512,7 +3529,7 @@ function openLiveLog(email) {
   $('#liveLogContent').textContent = '加载中…';
   pollLiveLog();
   clearInterval(liveLogTimer);
-  liveLogTimer = setInterval(pollLiveLog, 2000);
+  liveLogTimer = setInterval(pollLiveLog, 5000);
 }
 async function pollLiveLog() {
   if (!liveLogEmail) return;
@@ -3694,7 +3711,7 @@ async function onAccountsBodyClick(e) {
     const poll = setInterval(async () => {
       const acc = ACCOUNTS.find(a => a.email === email);
       if (!acc || acc.codex_status !== 'retrying') clearInterval(poll);
-    }, 5000);
+    }, 15000);
     setTimeout(() => clearInterval(poll), 5 * 60 * 1000);
   } catch(err) {
     showToast('触发补跑失败: ' + err.message);
@@ -3776,6 +3793,12 @@ async function refreshAccountsList(btn) {
     PAGERS.accounts.page = 1;
     loadAccounts();
   }, 250));
+  const codexV2 = $('#codexStatusFilterV2');
+  if (codexV2) codexV2.addEventListener('change', () => {
+    ACCOUNT_SELECTED.clear();
+    PAGERS.accounts.page = 1;
+    loadAccounts();
+  });
 
   const archivedV2 = $('#showArchivedAccountsV2');
   if (archivedV2) archivedV2.addEventListener('click', () => {
@@ -4516,7 +4539,7 @@ async function retrySelectedCodex() {
   if (workersElV2) workersElV2.value = workers;
   const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
   const retryingCount = selectedAccounts.filter(a => (a.codex_status || '') === 'retrying').length;
-  const deactivatedCount = selectedAccounts.filter(a => (a.codex_status || '') === 'deactivated').length;
+  const deactivatedCount = selectedAccounts.filter(a => (a.live_check_status || '') === 'deactivated').length;
   let msg = `批量补跑选中的 ${ids.length} 个账号 Codex 授权？
 
 并发线程数：${workers}
@@ -4540,7 +4563,7 @@ async function retrySelectedCodex() {
     loadAccounts();
     const first = (r.started || [])[0];
     if (first && first.email) openRetryLog(first.email);
-    const poll = setInterval(loadAccounts, 5000);
+    const poll = setInterval(loadAccounts, 15000);
     setTimeout(() => clearInterval(poll), 10 * 60 * 1000);
   } catch(err) {
     showToast('批量补跑失败: ' + err.message);
@@ -6254,9 +6277,9 @@ document.addEventListener('click', (e) => {
 // ---------- 初始化 ----------
 loadSummary();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);
-jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 3000);
-setInterval(loadSummary, 5000);
-setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 2000);
+jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 10000);
+setInterval(loadSummary, 30000);
+setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 10000);
 </script>
 </body>
 </html>
