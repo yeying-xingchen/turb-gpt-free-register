@@ -52,6 +52,14 @@ BROWSER_USE_FAST_MODE: bool = True
 # 阶段耗时日志：打印 connect/goto/email/otp/phone/callback 等步骤耗时，方便定位慢点。
 BROWSER_USE_LOG_TIMING: bool = True
 
+# 资料页最大处理时间；超时后不再卡住，直接尝试读取 /api/auth/session 的 accessToken。
+BROWSER_USE_PROFILE_TIMEOUT: int = 28
+SKYVERN_PROFILE_TIMEOUT: int = 45
+
+# 资料页结束/超时后读取 accessToken 的最大等待时间；取不到则任务失败。
+BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT: int = 18
+SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT: int = 35
+
 # 任务结束后是否主动断开 CDP
 BROWSER_USE_KEEP_BROWSER_OPEN: bool = False
 
@@ -63,4 +71,4 @@ BROWSER_USE_EXTRA_QUERY: dict = {}
 BROWSER_USE_START_URL: str = "https://chatgpt.com/auth/login"
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'BROWSER_USE_API_KEY': 'str', 'BROWSER_USE_PROXY_COUNTRY_CODE': 'str', 'BROWSER_USE_USE_PROXY': 'bool', 'BROWSER_USE_PROFILE_ID': 'str', 'BROWSER_USE_CDP_BASE': 'str', 'BROWSER_USE_TIMEOUT': 'int', 'BROWSER_USE_SESSION_TIMEOUT': 'int', 'BROWSER_USE_FAST_MODE': 'bool', 'BROWSER_USE_LOG_TIMING': 'bool', 'BROWSER_USE_KEEP_BROWSER_OPEN': 'bool', 'BROWSER_USE_START_URL': 'str'})
+apply_env_overrides(globals(), {'BROWSER_USE_API_KEY': 'str', 'BROWSER_USE_PROXY_COUNTRY_CODE': 'str', 'BROWSER_USE_USE_PROXY': 'bool', 'BROWSER_USE_PROFILE_ID': 'str', 'BROWSER_USE_CDP_BASE': 'str', 'BROWSER_USE_TIMEOUT': 'int', 'BROWSER_USE_SESSION_TIMEOUT': 'int', 'BROWSER_USE_FAST_MODE': 'bool', 'BROWSER_USE_LOG_TIMING': 'bool', 'BROWSER_USE_PROFILE_TIMEOUT': 'int', 'SKYVERN_PROFILE_TIMEOUT': 'int', 'BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT': 'int', 'SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT': 'int', 'BROWSER_USE_KEEP_BROWSER_OPEN': 'bool', 'BROWSER_USE_START_URL': 'str'})

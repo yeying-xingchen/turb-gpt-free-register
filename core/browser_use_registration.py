@@ -1859,7 +1859,7 @@ def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) ->
         looks_profile = any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")) or any(x in body for x in ("birthday", "birth", "age", "name", "誕生日", "年齢", "名前", "生日", "年龄", "姓名"))
 
         if looks_profile:
-            if not submitted or time.time() - last_submit > 4:
+            if not submitted:
                 logger.info("[BrowserUse] 资料页：填写/提交昵称生日 url=%s", _page_url(page) or "-")
                 info = _human_complete_profile(page, name, birthday)
                 last_info = info
@@ -1872,12 +1872,12 @@ def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) ->
                 else:
                     submitted = True
                 if submitted and post_submit_hard_exit_at is None:
-                    # Skyvern 常见卡点：按钮已提交但页面不跳转。最多给它 10~16 秒同步登录态，然后强制跳出。
+                    # 已提交后不再重复填写/点击；最多给它 10~16 秒同步登录态，然后强制跳出。
                     post_submit_hard_exit_at = time.time() + (10 if _fast_mode() else 16)
                 last_submit = time.time()
                 _bu_delay("form")
             elif time.time() - last_log > 2:
-                logger.info("[BrowserUse] 资料页已提交，等待短暂跳转：url=%s", _page_url(page) or "-")
+                logger.info("[BrowserUse] 资料页已提交，等待短暂跳转/准备取 AT：url=%s", _page_url(page) or "-")
                 last_log = time.time()
 
             if submitted and post_submit_hard_exit_at and time.time() >= post_submit_hard_exit_at:
@@ -1913,10 +1913,9 @@ def _complete_profile_page(page, name: str, birthday: str, timeout: int = 60) ->
     url = _page_url(page).lower()
     if any(x in url for x in ("about-you", "profile", "create-account/about", "signup/profile")):
         last_diag = _profile_diagnostics(page)
-        if submitted and _force_exit_profile_page(page, time.time() + (8 if _fast_mode() else 12)):
-            logger.info("[BrowserUse] 资料页最终超时后已强制退出：%s", _page_url(page) or "-")
-            return True
-        raise RuntimeError(f"资料页提交后仍未跳转，已触发强制退出仍失败；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
+        if submitted:
+            raise RuntimeError(f"资料页提交后超时仍未跳转，转入取 AT；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
+        raise RuntimeError(f"资料页处理超时且未确认提交，转入取 AT；last_info={str(last_info)[:900]} diag={str(last_diag)[:1200]}")
     return submitted
 
 
@@ -2527,15 +2526,28 @@ def run_browser_use_registration(
 
             logger.info("[BrowserUse] 处理资料页/登录态")
             _t_profile = _StepTimer("资料页/登录态")
-            profile_timeout = 28 if _fast_mode() else (42 if provider_prefix == "skyvern" else 60)
-            profile_submitted = _complete_profile_page(page, name, birthday, timeout=profile_timeout)
-            if profile_submitted:
-                create_acknowledged = True
-                _bu_delay("post_auth")
+            if provider_prefix == "skyvern":
+                profile_timeout = int(getattr(_cfg, "SKYVERN_PROFILE_TIMEOUT", 45) or 45)
+                session_timeout = int(getattr(_cfg, "SKYVERN_SESSION_ACCESS_TOKEN_TIMEOUT", 35) or 35)
+            else:
+                profile_timeout = int(getattr(_cfg, "BROWSER_USE_PROFILE_TIMEOUT", 28 if _fast_mode() else 60) or (28 if _fast_mode() else 60))
+                session_timeout = int(getattr(_cfg, "BROWSER_USE_SESSION_ACCESS_TOKEN_TIMEOUT", 18 if _fast_mode() else 60) or (18 if _fast_mode() else 60))
 
-            session_timeout = 18 if _fast_mode() else (35 if provider_prefix == "skyvern" else 60)
-            session_info = _fetch_chatgpt_session(page, context=context, timeout=session_timeout)
-            _t_profile.done()
+            try:
+                profile_submitted = _complete_profile_page(page, name, birthday, timeout=profile_timeout)
+                if profile_submitted:
+                    create_acknowledged = True
+                    _bu_delay("post_auth")
+            except Exception as exc:
+                # 资料页是高频卡点：超时/强制跳出失败后不继续卡，直接进入取 AT；取不到则由下一步抛错失败。
+                logger.warning("[BrowserUse] 资料页处理超时/失败，直接尝试取 AT：%s: %s", type(exc).__name__, str(exc)[:260])
+
+            try:
+                session_info = _fetch_chatgpt_session(page, context=context, timeout=session_timeout)
+                _t_profile.done()
+            except Exception as exc:
+                _t_profile.done(f"failed={type(exc).__name__}: {str(exc)[:160]}")
+                raise
             access_token = session_info.get("accessToken")
             if not access_token:
                 raise RuntimeError("注册流程结束但未拿到 accessToken")
