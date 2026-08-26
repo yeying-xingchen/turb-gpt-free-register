@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """已注册账号查活：重新邮箱 OTP 登录，成功拿到最新 ChatGPT accessToken 即视为正常。"""
 import logging
+import json
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
 from core.session import BrowserSession
+from core.codex_oauth import _account_registration_password, _account_totp_secret, _account_totp_code
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
     follow_authorize,
@@ -32,6 +34,18 @@ _RETRYABLE_NETWORK_HINTS = (
     "connection", "closed", "reset",
 )
 
+_SESSION_FINGERPRINT_KEYS = {
+    "device_id",
+    "sentinel_sid",
+    "oai_session_id",
+    "auth_session_logging_id",
+    "datadog_trace_id",
+    "datadog_parent_id",
+    "react_listening_key",
+    "react_container_key",
+    "react_resources_key",
+}
+
 
 def _is_retryable_network_error(exc: BaseException) -> bool:
     if isinstance(exc, AccountUnusableError):
@@ -44,13 +58,14 @@ def _network_preflight_with_retry(email: str, proxy: str | None, max_attempts: i
     """Providers → CSRF → Signin 网络预检；失败换新 IP 重试（每轮新会话新代理）。"""
     session: BrowserSession | None = None
     last_exc: BaseException | None = None
+    seed = f"account:{email.lower()}"
     for attempt in range(1, max_attempts + 1):
         if session is not None:
             try:
                 session.session.close()
             except Exception:
                 pass
-        session = BrowserSession(proxy=proxy if proxy else None)
+        session = BrowserSession(proxy=proxy if proxy else None, fingerprint_seed=seed)
         logger.info(
             "[查活] 会话创建完成：proxy=%s device_id=%s（网络预检第 %s/%s 次）",
             session.proxy or "配置随机/直连", session.device_id, attempt, max_attempts,
@@ -75,6 +90,175 @@ def _network_preflight_with_retry(email: str, proxy: str | None, max_attempts: i
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _safe_fingerprint_for_account(session: BrowserSession) -> dict:
+    """账号里只记录运行环境画像，不保存会话/设备标识。"""
+    fp = session.fingerprint_summary()
+    return {k: v for k, v in fp.items() if k not in _SESSION_FINGERPRINT_KEYS}
+
+
+def _safe_fingerprint_text_for_account(session: BrowserSession) -> str:
+    fp = _safe_fingerprint_for_account(session)
+    parts = [
+        f"proxy={BrowserSession._short_value(fp.get('proxy') or 'direct', 36)}",
+        f"ua={BrowserSession._short_value(fp.get('user_agent'), 72)}",
+        f"lang={fp.get('accept_language')}",
+        f"tz={fp.get('timezone_iana')}({fp.get('timezone_offset_minutes')})",
+        f"screen={fp.get('screen_width')}x{fp.get('screen_height')}@{fp.get('device_pixel_ratio')}",
+        f"cpu={fp.get('hardware_concurrency')}",
+        f"mem={fp.get('device_memory')}",
+        f"geo={fp.get('geo_country') or '?'}:{fp.get('geo_city') or '?'}",
+    ]
+    return " ".join(parts)
+
+
+def _extract_continue_url(result: dict | None) -> str:
+    if not isinstance(result, dict):
+        return ""
+    page = result.get("page") or {}
+    page = page if isinstance(page, dict) else {}
+    return str(
+        result.get("continue_url")
+        or result.get("external_url")
+        or result.get("url")
+        or page.get("continue_url")
+        or page.get("external_url")
+        or page.get("url")
+        or ""
+    ).strip()
+
+
+def _extract_factor_id(result: dict | None, continue_url: str) -> str:
+    if isinstance(result, dict):
+        page = result.get("page") or {}
+        page = page if isinstance(page, dict) else {}
+        payload = page.get("payload") or {}
+        if isinstance(payload, dict):
+            factor_id = str(payload.get("factor_id") or "").strip()
+            if factor_id:
+                return factor_id
+        if isinstance(page.get("payload"), dict):
+            factor_id = str(page["payload"].get("factor_id") or "").strip()
+            if factor_id:
+                return factor_id
+    if "/mfa-challenge/" in continue_url:
+        return continue_url.rstrip("/").rsplit("/", 1)[-1]
+    return ""
+
+
+def _password_verify(session: BrowserSession, password: str) -> dict:
+    from core.openai_auth import build_sentinel_header, request_sentinel_token
+
+    sentinel_resp = request_sentinel_token(session, "password_verify")
+    sentinel_header, so_header = build_sentinel_header(session, sentinel_resp, "password_verify")
+    headers = session.get_auth_headers(referer="https://auth.openai.com/log-in/password")
+    headers["openai-sentinel-token"] = sentinel_header
+    if so_header:
+        headers["openai-sentinel-so-token"] = so_header
+    resp = session.post(
+        "https://auth.openai.com/api/accounts/password/verify",
+        headers=headers,
+        data=json.dumps({"password": password}),
+        allow_redirects=False,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _mfa_issue_challenge(session: BrowserSession, factor_id: str) -> dict:
+    headers = session.get_auth_headers(referer="https://auth.openai.com/mfa-challenge")
+    headers.pop("openai-sentinel-token", None)
+    headers.pop("openai-sentinel-so-token", None)
+    resp = session.post(
+        "https://auth.openai.com/api/accounts/mfa/issue_challenge",
+        headers=headers,
+        data=json.dumps({"id": factor_id, "type": "totp", "force_fresh_challenge": False}),
+        allow_redirects=False,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _mfa_verify(session: BrowserSession, factor_id: str, code: str) -> dict:
+    headers = session.get_auth_headers(referer="https://auth.openai.com/mfa-challenge")
+    headers.pop("openai-sentinel-token", None)
+    headers.pop("openai-sentinel-so-token", None)
+    resp = session.post(
+        "https://auth.openai.com/api/accounts/mfa/verify",
+        headers=headers,
+        data=json.dumps({"id": factor_id, "type": "totp", "code": code}),
+        allow_redirects=False,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _follow_continue_and_fetch(session: BrowserSession, continue_url: str, *, referer: str) -> dict:
+    follow_oauth_callback(session, continue_url, referer=referer)
+    return fetch_session(session)
+
+
+def _login_via_email_otp(session: BrowserSession, email: str, otp_after_ts: float) -> dict:
+    """完成邮箱 OTP 登录，并跟随 OAuth callback 后拉取 ChatGPT session。"""
+    validate_result = _validate_with_retry(session, email, otp_after_ts)
+    page = validate_result.get("page") if isinstance(validate_result, dict) else {}
+    page = page if isinstance(page, dict) else {}
+    page_type = str(page.get("type") or "")
+    continue_url = _extract_continue_url(validate_result)
+    if not continue_url:
+        raise RuntimeError(f"OTP 登录成功但没有 OAuth continue_url: {validate_result}")
+    if "about-you" in str(continue_url) or page_type in {"about_you", "about-you"}:
+        raise RuntimeError(f"该邮箱登录后进入资料页，疑似不是完整已注册账号: page_type={page_type}, continue_url={continue_url}")
+    logger.info("[查活] 邮箱 OTP 验证完成，开始跟随 OAuth callback")
+    return _follow_continue_and_fetch(session, continue_url, referer="https://auth.openai.com/email-verification")
+
+
+def _login_via_password_or_otp(session: BrowserSession, email: str, otp_after_ts: float) -> dict:
+    """优先密码登录；如进入 MFA challenge 则自动用 TOTP 完成。"""
+    password = _account_registration_password(email)
+    if not password:
+        logger.info("[查活] 未找到注册密码，继续使用邮箱 OTP：%s", email)
+        return _login_via_email_otp(session, email, otp_after_ts)
+
+    logger.info("[查活] 账号存在密码，优先走密码登录：%s", email)
+    password_result = _password_verify(session, password)
+    continue_url = _extract_continue_url(password_result)
+    page = password_result.get("page") if isinstance(password_result, dict) else {}
+    page = page if isinstance(page, dict) else {}
+    page_type = str(page.get("type") or "")
+
+    if "/mfa-challenge/" in continue_url or page_type == "mfa_challenge":
+        factor_id = _extract_factor_id(password_result, continue_url)
+        secret = _account_totp_secret(email)
+        if not factor_id:
+            raise RuntimeError(f"密码登录后进入 MFA 但未拿到 factor_id: {password_result}")
+        if not secret:
+            raise RuntimeError(f"密码登录后进入 MFA，但账号没有 totp_secret：{email}")
+        logger.info("[查活] 已进入 MFA challenge，开始提交 TOTP：%s factor_id=%s", email, factor_id)
+        _mfa_issue_challenge(session, factor_id)
+        code = _account_totp_code(email)
+        if not code:
+            raise RuntimeError(f"无法生成 TOTP 验证码：{email}")
+        mfa_result = _mfa_verify(session, factor_id, code)
+        mfa_continue_url = _extract_continue_url(mfa_result) or continue_url
+        if not mfa_continue_url:
+            raise RuntimeError(f"MFA 验证成功但没有 continue_url: {mfa_result}")
+        return _follow_continue_and_fetch(
+            session,
+            mfa_continue_url,
+            referer=f"https://auth.openai.com/mfa-challenge/{factor_id}",
+        )
+
+    if "email-verification" in continue_url or page_type in {"email_verification", "email_otp_send"}:
+        logger.info("[查活] 密码登录后仍进入邮箱 OTP，继续完成邮箱验证：%s", email)
+        return _login_via_email_otp(session, email, otp_after_ts)
+
+    if continue_url:
+        logger.info("[查活] 密码登录直接给出回调地址，继续完成回调：%s", email)
+        return _follow_continue_and_fetch(session, continue_url, referer="https://auth.openai.com/log-in/password")
+
+    raise RuntimeError(f"密码登录成功但没有可用 continue_url: {password_result}")
 
 
 def log_path(email: str) -> Path:
@@ -166,7 +350,7 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
 
         logger.info("[查活] 日志文件：%s", path)
         logger.info("[查活] 开始重新登录：%s", email)
-        logger.info("[查活] 流程：Providers → CSRF → Signin → Authorize → 邮箱 OTP → OAuth callback → Session/AT")
+        logger.info("[查活] 流程：Providers → CSRF → Signin → Authorize → 密码/邮箱 OTP → MFA(如有) → OAuth callback → Session/AT")
         session, authorize_url = _network_preflight_with_retry(email, proxy)
 
         otp_after_ts = time.time()
@@ -175,25 +359,7 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
         if dead_code:
             return {"ok": False, "status": "deactivated", "checked_at": checked_at, "error": dead_code}
 
-        validate_result = _validate_with_retry(session, email, otp_after_ts)
-        page = validate_result.get("page") if isinstance(validate_result, dict) else {}
-        page = page if isinstance(page, dict) else {}
-        page_type = str(page.get("type") or "")
-        continue_url = (
-            validate_result.get("continue_url")
-            or validate_result.get("external_url")
-            or validate_result.get("url")
-            or page.get("continue_url")
-            or page.get("external_url")
-            or page.get("url")
-        )
-        if not continue_url:
-            raise RuntimeError(f"OTP 登录成功但没有 OAuth continue_url: {validate_result}")
-        if "about-you" in str(continue_url) or page_type in {"about_you", "about-you"}:
-            raise RuntimeError(f"该邮箱登录后进入资料页，疑似不是完整已注册账号: page_type={page_type}, continue_url={continue_url}")
-
-        follow_oauth_callback(session, str(continue_url), referer="https://auth.openai.com/email-verification")
-        session_info = fetch_session(session)
+        session_info = _login_via_password_or_otp(session, email, otp_after_ts)
         access_token = str(session_info.get("accessToken") or "")
         if not access_token:
             raise RuntimeError("重新登录后未拿到 accessToken")
@@ -201,17 +367,16 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
         user = session_info.get("user") or {}
         account = session_info.get("account") or {}
         logger.info("[查活] 正常：%s user_id=%s plan=%s", email, user.get("id"), account.get("planType"))
-        fp = session.fingerprint_summary()
+        fp = _safe_fingerprint_for_account(session)
         return {
             "ok": True,
             "status": "live",
             "checked_at": checked_at,
             "access_token": access_token,
             "session": session_info,
-            "device_id": session.device_id,
             "proxy_used": session.proxy or None,
             "fingerprint": fp,
-            "fingerprint_text": session.fingerprint_summary_text(),
+            "fingerprint_text": _safe_fingerprint_text_for_account(session),
         }
     except AccountUnusableError as exc:
         code = getattr(exc, "error_code", "") or detect_account_unusable_text(str(exc)) or "account_deactivated"

@@ -66,13 +66,51 @@ def post_register_dwell(email: str, *, label: str = "注册后") -> None:
 def _account_material_line(email: str, row: dict | None = None) -> str:
     """优先输出 Outlook 原始素材；没有素材时退回邮箱地址。"""
     if row:
-        return row.get("original_email_line") or row.get("email") or email
+        base = row.get("original_email_line") or row.get("email") or email
+        password = ""
+        if isinstance(row.get("extra_json"), str) and row.get("extra_json"):
+            try:
+                extra = json.loads(str(row.get("extra_json") or ""))
+                password = str(extra.get("registration_password") or "").strip()
+            except Exception:
+                password = ""
+        if not password:
+            password = str(row.get("password") or "").strip()
+        parts = [p for p in str(base or "").split("----") if p != ""]
+        if password:
+            if not parts:
+                base = password
+            elif len(parts) == 1:
+                if parts[0] != password:
+                    parts.insert(1, password)
+                base = "----".join(parts)
+            elif parts[1] != password:
+                looks_like_material = (
+                    parts[1].startswith("M.")
+                    or parts[1].startswith("m.")
+                    or (len(parts[1]) >= 32 and parts[1].count("-") >= 4)
+                    or any(ch in parts[1] for ch in ("@", ":", "/", "\\"))
+                )
+                if looks_like_material:
+                    parts.insert(1, password)
+                    base = "----".join(parts)
+        return base
     return email
 
 
-def _account_copy_line(material_line: str, access_token: str, totp_secret: str | None = None) -> str:
+def _account_copy_line(
+    material_line: str,
+    access_token: str,
+    gpt_password: str | None = None,
+    totp_secret: str | None = None,
+) -> str:
     """生成包含 token 的整行归档，方便从批次汇总文件里复制。"""
-    return f"{material_line}----{access_token}----{totp_secret}" if totp_secret else f"{material_line}----{access_token}"
+    parts = [material_line, access_token]
+    if gpt_password or totp_secret:
+        parts.append(str(gpt_password or ""))
+    if totp_secret:
+        parts.append(totp_secret)
+    return "----".join(parts)
 
 
 def create_batch_archive_dir(count: int, workers: int = 1) -> Path:
@@ -115,7 +153,13 @@ def _append_batch_archive(
     row = db.get_account(row_id) or {}
     folder.mkdir(parents=True, exist_ok=True)
     material_line = _account_material_line(email, row)
-    copy_line = _account_copy_line(material_line, access_token, totp_secret)
+    try:
+        extra_raw = row.get("extra_json")
+        extra = json.loads(extra_raw) if isinstance(extra_raw, str) and extra_raw.strip() else (extra_raw if isinstance(extra_raw, dict) else {})
+        gpt_password = str((extra or {}).get("registration_password") or row.get("registration_password") or "").strip() or "未设置"
+    except Exception:
+        gpt_password = str(row.get("registration_password") or "").strip() or "未设置"
+    copy_line = _account_copy_line(material_line, access_token, gpt_password, totp_secret)
     archive = {
         "id": row_id,
         "email": email,
@@ -357,7 +401,12 @@ def _activate_totp(
     return True
 
 
-def setup_2fa(session: BrowserSession, email: str, otp_code: str | None = None) -> str:
+def setup_2fa(
+    session: BrowserSession,
+    email: str,
+    otp_code: str | None = None,
+    access_token: str | None = None,
+) -> str:
     """
     完整的 2FA 设置流程。
     会触发再发一份邮箱验证码：
@@ -374,16 +423,29 @@ def setup_2fa(session: BrowserSession, email: str, otp_code: str | None = None) 
     """
     # 用模块属性读，支持 WebUI 热加载
     from config import email as _email_cfg
+    from core.chatgpt_bootstrap import authenticated_bootstrap
 
     logger.info("=" * 60)
     logger.info("开始设置 2FA")
     logger.info("=" * 60)
 
+    if access_token:
+        try:
+            logger.info("[2FA] 使用现有 accessToken 预热登录态...")
+            authenticated_bootstrap(session, access_token, strict=False)
+            human_delay("navigate")
+            logger.info("[2FA] accessToken 预热完成")
+        except Exception as exc:
+            logger.warning("[2FA] accessToken 预热失败，继续按重认证流程执行：%s: %s", type(exc).__name__, str(exc)[:180])
+
     # 阶段一：重认证
+    logger.info("[2FA] 阶段1：发起重认证")
     reauth_otp_after_ts = time.time()
     auth_url = _trigger_reauth(session, email)
+    logger.info("[2FA] 重认证 authorize URL 已获取")
     human_delay("api")
     _follow_reauth(session, auth_url)
+    logger.info("[2FA] 已跟随重认证 authorize URL")
     human_delay("navigate")
 
     if otp_code is None:
@@ -391,21 +453,31 @@ def setup_2fa(session: BrowserSession, email: str, otp_code: str | None = None) 
             from core.email_provider import wait_for_otp
             logger.info("[2FA] 自动等待邮箱重认证 OTP...")
             otp_code = wait_for_otp(email, after_ts=reauth_otp_after_ts)
+            logger.info("[2FA] 已收到邮箱重认证 OTP")
         else:
             logger.info("")
             logger.info("[2FA] 请检查邮箱，输入新收到的 6 位验证码")
             otp_code = input(">>> 2FA 验证码: ").strip()
+            logger.info("[2FA] 已手动输入邮箱重认证 OTP")
 
     human_delay("otp_input")
+    logger.info("[2FA] 正在提交邮箱重认证 OTP...")
     continue_url = _validate_reauth_otp(session, otp_code)
+    logger.info("[2FA] 邮箱重认证 OTP 验证通过，continue_url=%s", continue_url)
     human_delay("api")
+    logger.info("[2FA] 正在交换新 token...")
     new_token = _exchange_new_token(session, continue_url)
+    logger.info("[2FA] 已拿到新 token")
     human_delay("api")
 
     # 阶段二：enroll + activate
+    logger.info("[2FA] 阶段2：开始 enroll TOTP")
     secret, session_id = _enroll_totp(session, new_token)
+    logger.info("[2FA] enroll 成功，session_id=%s", session_id)
     human_delay("form")
+    logger.info("[2FA] 正在激活 TOTP enrollment")
     _activate_totp(session, new_token, secret, session_id)
+    logger.info("[2FA] TOTP 激活完成")
 
     logger.info("=" * 60)
     logger.info(f"✅ 2FA 设置完成! Secret: {secret[:4]}...{secret[-4:]}")
@@ -447,7 +519,6 @@ def save_account_data(
         user_name=user.get("name"),
         plan_type=account.get("planType"),
         expires_at=extra.get("expires"),
-        device_id=extra.get("device_id"),
         proxy_used=proxy_used,
         email_source=email_source,
         extra=extra,
@@ -466,6 +537,37 @@ def save_account_data(
     )
     logger.info(f"[Save] 账号已写入 DB, id={row_id}, email={email}")
     logger.info(f"[Save] 批次归档目录: {batch_folder}")
+
+    auto_twofa = False
+    try:
+        from config import twofa as _twofa_cfg
+
+        auto_twofa = bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
+    except Exception:
+        auto_twofa = False
+    if auto_twofa and not str(totp_secret or "").strip():
+        try:
+            from core.twofa_service import enqueue_account_totp_setup
+
+            queued = enqueue_account_totp_setup(
+                account_id=row_id,
+                email=email,
+                access_token=access_token,
+                trigger="registration_auto",
+                proxy=proxy_used,
+            )
+            if queued.get("accepted"):
+                logger.info(f"[2FA] 注册后自动开启 2FA 已入队: id={row_id}, email={email}")
+            elif queued.get("busy"):
+                logger.info(f"[2FA] 账号已有 2FA 任务，注册流程不重复入队: id={row_id}, email={email}")
+            else:
+                logger.warning(f"[2FA] 注册后自动开启 2FA 入队失败（不影响注册结果）: {email}, {queued.get('error')}")
+        except Exception as exc:
+            logger.warning(
+                f"[2FA] 注册后自动开启 2FA 入队异常（不影响注册结果）: "
+                f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
+            )
+
     if auto_plan_check is None:
         try:
             from config import register as _register_cfg

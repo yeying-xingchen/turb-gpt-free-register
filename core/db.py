@@ -101,11 +101,64 @@ def _generic_api_email_line(row: dict) -> str:
     ])
 
 
+def _extract_registration_password(row: dict) -> str:
+    extra_raw = row.get("extra_json")
+    if isinstance(extra_raw, str) and extra_raw.strip():
+        try:
+            extra = json.loads(extra_raw)
+        except Exception:
+            extra = {}
+    elif isinstance(extra_raw, dict):
+        extra = extra_raw
+    else:
+        extra = {}
+    return str(extra.get("registration_password") or row.get("registration_password") or "").strip()
+
+
+def _looks_like_email_material_segment(segment: str) -> bool:
+    seg = str(segment or "").strip()
+    if not seg:
+        return False
+    if seg.startswith("M.") or seg.startswith("m."):
+        return True
+    if len(seg) >= 32 and "-" in seg and seg.count("-") >= 4:
+        return True
+    if any(ch in seg for ch in ("@", ":", "/", "\\")):
+        return True
+    return False
+
+
+def _ensure_password_in_material_line(base: str, password: str) -> str:
+    base = str(base or "").strip()
+    password = str(password or "").strip()
+    if not password:
+        return base
+    parts = [p for p in base.split("----") if p != ""] if base else []
+    if not parts:
+        return password
+    if len(parts) == 1:
+        if parts[0] == password:
+            return base
+        return "----".join([parts[0], password])
+    if parts[1] == password:
+        return base
+    if _looks_like_email_material_segment(parts[1]):
+        parts.insert(1, password)
+        return "----".join(parts)
+    return base
+
+
 def _account_line(row: dict) -> str:
     base = row.get("original_email_line") or row.get("email") or ""
+    email_password = str(row.get("password") or "").strip()
+    base = _ensure_password_in_material_line(base, email_password)
     token = row.get("access_token") or ""
+    gpt_password = _extract_registration_password(row) or "未设置"
     totp = row.get("totp_secret") or ""
-    return f"{base}----{token}----{totp}" if totp else f"{base}----{token}"
+    parts = [base, token, gpt_password]
+    if totp:
+        parts.append(totp)
+    return "----".join(parts)
 
 
 def _registered_email_line(row: dict) -> str:
@@ -692,7 +745,6 @@ def insert_account(
             "user_name": user_name if user_name is not None else row.get("user_name"),
             "plan_type": plan_type if plan_type is not None else row.get("plan_type"),
             "expires_at": expires_at if expires_at is not None else row.get("expires_at"),
-            "device_id": device_id if device_id is not None else row.get("device_id"),
             "proxy_used": proxy_used if proxy_used is not None else row.get("proxy_used"),
             "email_source": email_source if email_source is not None else row.get("email_source"),
             "extra_json": extra_json if extra_json is not None else row.get("extra_json"),
@@ -819,8 +871,6 @@ def update_account_codex_agent(acc_id: int, result: dict | None = None) -> bool:
             "codex_agent_proxy_mode",
             "codex_agent_proxy_used",
             "codex_agent_proxy_fallback_reason",
-            "codex_agent_device_id",
-            "codex_agent_oai_session_id",
             "codex_agent_attempt_count",
             "codex_agent_max_attempts",
             "codex_agent_request_timeout",
@@ -1217,7 +1267,7 @@ def list_account_plan_check_statuses(
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
-        "live_check_device_id", "live_check_proxy_used", "live_check_fingerprint_text",
+        "live_check_proxy_used", "live_check_fingerprint_text",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
@@ -1230,6 +1280,9 @@ def list_account_plan_check_statuses(
         "codex_agent_status", "codex_agent_message",
         "codex_agent_runtime_id", "codex_agent_sub2api_url",
         "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
+        "totp_setup_status", "totp_setup_ok", "totp_setup_error",
+        "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
+        "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
     )
     with _LOCK:
         all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q)
@@ -1246,6 +1299,7 @@ def list_account_plan_check_statuses(
                     continue
                 if value is not None and value != "":
                     item[key] = value
+            item["totp_enabled"] = bool(str(row.get("totp_secret") or "").strip())
             plan = str(row.get("current_plan_type") or row.get("plan_type") or "").lower()
             if not any(x in plan for x in ("plus", "pro", "team", "go")):
                 for expire_key in ("expires_at", "plan_expires_at", "plan_renews_at", "renews_at"):
@@ -1271,6 +1325,14 @@ def list_account_plan_check_statuses(
                     "extract_link_status": row.get("extract_link_status"),
                     "codex_status": row.get("codex_status"),
                     "codex_agent_status": row.get("codex_agent_status"),
+                    "totp_setup_status": row.get("totp_setup_status"),
+                    "totp_setup_ok": row.get("totp_setup_ok"),
+                    "totp_setup_error": row.get("totp_setup_error"),
+                    "totp_setup_message": row.get("totp_setup_message"),
+                    "totp_setup_checked_at": row.get("totp_setup_checked_at"),
+                    "totp_setup_started_at": row.get("totp_setup_started_at"),
+                    "totp_setup_completed_at": row.get("totp_setup_completed_at"),
+                    "totp_enabled": bool(str(row.get("totp_secret") or "").strip()),
                 }
                 for row in all_rows
             ],
@@ -1377,9 +1439,6 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
                 row["plan_type"] = account.get("planType")
             if session.get("expires"):
                 row["expires_at"] = session.get("expires")
-            if result.get("device_id"):
-                row["device_id"] = result.get("device_id")
-            row["live_check_device_id"] = result.get("device_id") or row.get("live_check_device_id")
             row["live_check_proxy_used"] = result.get("proxy_used") or row.get("live_check_proxy_used")
             row["live_check_fingerprint_text"] = result.get("fingerprint_text") or row.get("live_check_fingerprint_text")
             if result.get("fingerprint"):
@@ -1389,6 +1448,99 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
         row["copy_line"] = _account_line(row)
         _save_accounts(rows)
         return True
+
+
+def claim_account_totp_setup(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用账号 2FA 设置任务；已有未超时任务时返回 False。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("totp_setup_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "totp_setup_queued_at" if current_status == "queued" else "totp_setup_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["totp_setup_status"] = "queued"
+        row["totp_setup_ok"] = False
+        row["totp_setup_trigger"] = str(trigger or "manual")
+        row["totp_setup_queued_at"] = now
+        row["totp_setup_started_at"] = None
+        row["totp_setup_completed_at"] = None
+        row["totp_setup_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_totp_setup_running(acc_id: int) -> bool:
+    """把 2FA 设置任务标记为运行中。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("totp_setup_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row["totp_setup_status"] = "running"
+        row["totp_setup_started_at"] = now
+        row["totp_setup_error"] = None
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def update_account_totp_secret(acc_id: int, result: dict | None = None) -> bool:
+    """更新账号 2FA/TOTP 设置结果。"""
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        status = str(result.get("status") or ("success" if result.get("ok") else "failed"))
+        ok = bool(result.get("ok")) and status == "success"
+        row["totp_setup_status"] = status
+        row["totp_setup_ok"] = ok
+        row["totp_setup_checked_at"] = result.get("checked_at") or _now()
+        if status in {"success", "failed", "stopped"}:
+            row["totp_setup_completed_at"] = _now()
+        row["totp_setup_error"] = None if ok or status == "running" else result.get("error")
+        secret = str(result.get("totp_secret") or "").strip()
+        if ok and secret:
+            row["totp_secret"] = secret
+        if result.get("message") is not None:
+            row["totp_setup_message"] = result.get("message")
+        row["copy_line"] = _account_line(row)
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
+def recover_interrupted_totp_setups() -> int:
+    """服务启动时恢复上次进程中断的 2FA 设置状态。"""
+    with _LOCK:
+        rows = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in rows:
+            if row.get("totp_setup_status") not in {"queued", "running"}:
+                continue
+            row["totp_setup_status"] = "failed"
+            row["totp_setup_ok"] = False
+            row["totp_setup_error"] = "WebUI 重启导致 2FA 设置中断，请重新开启"
+            row["totp_setup_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(rows)
+        return recovered
 
 
 def claim_account_live_check(acc_id: int, trigger: str = "manual") -> bool:
@@ -2385,7 +2537,6 @@ def _migrate_legacy_sqlite() -> dict:
                     user_name=row["user_name"],
                     plan_type=row["plan_type"],
                     expires_at=row["expires_at"],
-                    device_id=row["device_id"],
                     proxy_used=row["proxy_used"],
                     email_source=row["email_source"],
                     extra=json.loads(row["extra_json"]) if row["extra_json"] else None,
@@ -2427,7 +2578,6 @@ def migrate_legacy_files() -> dict:
                     user_name=user.get("name"),
                     plan_type=account.get("planType"),
                     expires_at=extra.get("expires"),
-                    device_id=extra.get("device_id"),
                     extra=extra,
                 )
                 summary["accounts_imported"] += 1

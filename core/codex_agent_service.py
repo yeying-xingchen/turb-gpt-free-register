@@ -134,7 +134,7 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
             attempt_count = attempt
             _wait_for_rate_slot()
             try:
-                env = BrowserSession(proxy=route["proxy"], detect_exit_geo=False)
+                env = BrowserSession(proxy=route["proxy"], detect_exit_geo=False, fingerprint_seed=f"account:{email.lower()}")
                 logger.info(
                     "[CodexAgent] 独立环境: %s attempt=%s/%s route=%s proxy=%s did=%s session=%s profile_ua=%s",
                     email,
@@ -256,8 +256,6 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
             "proxy_mode": route_meta.get("proxy_mode"),
             "proxy_used": route_meta.get("proxy_used"),
             "proxy_fallback_reason": route_meta.get("proxy_fallback_reason"),
-            "device_id": getattr(env, "device_id", ""),
-            "oai_session_id": getattr(env, "oai_session_id", ""),
             "attempt_count": attempt_count,
             "max_attempts": attempts,
             "request_timeout": timeout_seconds,
@@ -275,8 +273,6 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
             "proxy_mode": route_meta.get("proxy_mode"),
             "proxy_used": route_meta.get("proxy_used"),
             "proxy_fallback_reason": route_meta.get("proxy_fallback_reason"),
-            "device_id": getattr(env, "device_id", ""),
-            "oai_session_id": getattr(env, "oai_session_id", ""),
             "attempt_count": attempt_count,
             "max_attempts": attempts,
             "request_timeout": timeout_seconds,
