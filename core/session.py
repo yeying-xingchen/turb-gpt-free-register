@@ -609,6 +609,15 @@ class BrowserSession:
             remain = max(0, int(self.blocked_until - time.time()))
             raise RuntimeError(f"当前 BrowserSession 已熔断冷却（剩余 {remain}s）：{self.blocked_reason}")
 
+    def reset_circuit_breaker(self) -> None:
+        """清理一次可选预热产生的本地熔断状态。
+
+        某些 best-effort bootstrap 接口返回 403 时，不代表后续正式认证接口
+        不可用；调用方完成错误隔离后可显式恢复本会话继续执行。
+        """
+        self.blocked_until = 0.0
+        self.blocked_reason = ""
+
     @staticmethod
     def _parse_retry_after(value: str | None) -> int:
         if not value:

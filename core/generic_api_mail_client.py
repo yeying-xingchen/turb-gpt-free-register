@@ -491,12 +491,8 @@ def _fetch_inline_messages_page_otp(
 
 
 def pick_account() -> GenericApiEmailAccount:
-    """领取一个可用通用 API 邮箱。"""
+    """直接从 SQLite 邮箱库领取一个可用通用 API 邮箱。"""
     from core.db import claim_next_generic_api_email, generic_api_email_pool_summary
-
-    inserted, skipped = import_from_file()
-    if inserted:
-        logger.info(f"[GenericAPI] 已自动从 {_ACCOUNTS_FILE.name} 导入 {inserted} 个邮箱（跳过 {skipped} 个）")
 
     row = claim_next_generic_api_email()
     if row is None:

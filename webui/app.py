@@ -3,7 +3,7 @@
 Flask 本地控制台。
 
 复用现有后端：
-    core.db                     —— 账号 / 邮箱池 / 任务的文件持久化与查询
+    core.db                     —— 账号 / 邮箱池 / 任务的 SQLite 持久化与查询
     core.registration_service   —— 线程池批量注册 + 任务日志
     webui.config_editor         —— 安全读写 config/*.py
 
@@ -402,16 +402,18 @@ def create_app(auth_code: str | None = None) -> Flask:
         plan_filter = str(request.args.get("plan", default="") or "").lower()
         codex_filter = str(request.args.get("codex_status", default="") or "").strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
+        date_from = str(request.args.get("date_from", default="") or "").strip() or None
+        date_to = str(request.args.get("date_to", default="") or "").strip() or None
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
         if page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 
@@ -998,9 +1000,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         }), 202
 
     def _codex_agent_auth_for_account(acc: dict) -> tuple[str, str]:
-        """返回账号已生成的 Codex Agent auth.json 文本与下载文件名。"""
+        """从 SQLite 返回账号已生成的 Codex Agent auth.json 文本与下载文件名。"""
         import json as _json
-        from pathlib import Path as _Path
 
         email = str(acc.get("email") or "").strip()
         safe_email = "".join(ch if ch.isalnum() or ch in ("@", ".", "-", "_") else "_" for ch in (email or f"account-{acc.get('id')}"))
@@ -1014,11 +1015,9 @@ def create_app(auth_code: str | None = None) -> Flask:
                 token_text = token_text + ("\n" if not token_text.endswith("\n") else "")
             return token_text, filename
 
-        auth_path = str(acc.get("codex_agent_auth_path") or "").strip()
-        if auth_path:
-            p = _Path(auth_path)
-            if p.exists() and p.is_file():
-                return p.read_text(encoding="utf-8"), p.name or filename
+        stored = db.get_codex_agent_credential(int(acc.get("id") or 0))
+        if stored:
+            return stored
 
         raise RuntimeError("该账号还没有生成 Codex Agent Token")
 
@@ -1414,26 +1413,20 @@ def create_app(auth_code: str | None = None) -> Flask:
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
-        fetch_limit = 1_000_000 if (paged or q) else limit
-        if source == "all":
-            rows = []
-            rows += _with_pool_source(db.list_outlook_pool(status=status, limit=fetch_limit), "outlook")
-            rows += _with_pool_source(db.list_generic_api_email_pool(status=status, limit=fetch_limit), "generic_api")
-            rows += _with_pool_source(db.list_domain_email_pool(status=status, limit=fetch_limit), "cloudflare_domain")
-            rows = sorted(rows, key=lambda x: str(x.get("created_at") or x.get("imported_at") or x.get("used_at") or ""), reverse=True)
-        elif source == "generic_api":
-            rows = _with_pool_source(db.list_generic_api_email_pool(status=status, limit=fetch_limit), "generic_api")
-        elif source == "cloudflare_domain":
-            rows = _with_pool_source(db.list_domain_email_pool(status=status, limit=fetch_limit), "cloudflare_domain")
-        else:
-            rows = _with_pool_source(db.list_outlook_pool(status=status, limit=fetch_limit), "outlook")
-        if q:
-            rows = [r for r in rows if _matches_query(r, q)]
         if paged or page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
-            return jsonify(_paginate_items(rows, page=page, page_size=page_size))
-        return jsonify(rows[:limit])
+            offset = (page - 1) * page_size
+            result = db.list_email_pool_page(
+                source=source, status=status, q=q, limit=page_size, offset=offset
+            )
+            result.update({"ok": True, "page": page, "page_size": page_size})
+            return jsonify(result)
+        # 兼容旧接口仍返回数组，但查询本身也只从 SQLite 读取 limit 条。
+        result = db.list_email_pool_page(
+            source=source, status=status, q=q, limit=max(1, int(limit or 1)), offset=0
+        )
+        return jsonify(result["items"])
 
     @app.post("/api/outlook/import")
     def api_outlook_import():
@@ -1664,14 +1657,10 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     @app.get("/api/codex")
     def api_codex_list():
-        rows = db.list_codex_accounts(
-            archived=str(request.args.get("archived", default="0") or "0").lower(),
-            date_from=str(request.args.get("date_from", default="") or "").strip() or None,
-            date_to=str(request.args.get("date_to", default="") or "").strip() or None,
-        )
         q = str(request.args.get("q", default="") or "").strip()
-        if q:
-            rows = [r for r in rows if _matches_query(r, q)]
+        archived = str(request.args.get("archived", default="0") or "0").lower()
+        date_from = str(request.args.get("date_from", default="") or "").strip() or None
+        date_to = str(request.args.get("date_to", default="") or "").strip() or None
         limit = request.args.get("limit", default=500, type=int)
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
@@ -1679,13 +1668,29 @@ def create_app(auth_code: str | None = None) -> Flask:
         if paged or page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
-            result = _paginate_items(rows, page=page, page_size=page_size)
+            result = db.list_codex_accounts_page(
+                archived=archived,
+                date_from=date_from,
+                date_to=date_to,
+                q=q,
+                limit=page_size,
+                offset=(page - 1) * page_size,
+            )
+            result.update({"ok": True, "page": page, "page_size": page_size})
             result["accounts"] = result.pop("items")
             result["summary"] = db.codex_accounts_summary()
             return jsonify(result)
+        result = db.list_codex_accounts_page(
+            archived=archived,
+            date_from=date_from,
+            date_to=date_to,
+            q=q,
+            limit=max(1, int(limit or 1)),
+            offset=0,
+        )
         return jsonify({
             "summary": db.codex_accounts_summary(),
-            "accounts": rows[:limit],
+            "accounts": result["items"],
         })
 
     @app.post("/api/codex/archive")
@@ -2229,21 +2234,27 @@ def create_app(auth_code: str | None = None) -> Flask:
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
-        fetch_limit = 1_000_000 if (paged or page_arg is not None or page_size_arg is not None) else limit
         from config import email as _email_cfg
         manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
-        rows = db.list_jobs(limit=fetch_limit)
-        for row in rows:
-            row["manual_otp_required"] = manual_otp_required
-            row.update(svc.get_retry_info(row))
         if paged or page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
-            result = _paginate_items(rows, page=page, page_size=page_size)
-            result["items"] = [_compact_job_for_list(r) for r in (result.get("items") or [])]
-            result["status_counts"] = _job_status_counts(rows)
+            result = db.list_jobs_page(
+                limit=page_size, offset=(page - 1) * page_size
+            )
+            rows = result.get("items") or []
+            for row in rows:
+                row["manual_otp_required"] = manual_otp_required
+                row.update(svc.get_retry_info(row))
+            result.update({"ok": True, "page": page, "page_size": page_size})
+            result["items"] = [_compact_job_for_list(r) for r in rows]
+            result["status_counts"] = db.job_status_counts()
             result["compact"] = True
             return jsonify(result)
+        rows = db.list_jobs(limit=max(1, int(limit or 1)))
+        for row in rows:
+            row["manual_otp_required"] = manual_otp_required
+            row.update(svc.get_retry_info(row))
         return jsonify(rows)
 
     @app.post("/api/jobs")

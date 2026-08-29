@@ -3178,8 +3178,10 @@ async function pollAccountPlanStatuses() {
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
     const codex = getAccountsCodexFilter();
     const q = getAccountsQuery();
+    const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
+    const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&q=${encodeURIComponent(q)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -5295,7 +5297,7 @@ function renderCodex() {
       <td class="col-time" title="${esc(r.expired || '-')}">${esc(r.expired || '-')}</td>
       <td class="col-actions">
         <div class="acc-v2-actions">
-          <button type="button" class="primary" data-codex-download="${esc(r.filename)}" title="下载本地 codex_accounts/ 中的 JSON/回执">本地下载</button>
+          <button type="button" class="primary" data-codex-download="${esc(r.filename)}" title="从 SQLite 下载 JSON/回执">下载凭证</button>
           <button type="button" class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
           <div class="acc-v2-more">
             <button type="button" class="acc-v2-more-btn" data-codex-more-toggle aria-haspopup="true">更多</button>
@@ -5520,7 +5522,7 @@ async function codexDownloadBulkCpa() {
 async function codexDeleteBulk() {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
-  if (!confirm(`确定删除选中的 ${filenames.length} 个 Codex 凭证吗？\n\n会删除本地 codex_accounts/ 下的 JSON 文件，并清理导出标记。此操作不可撤销。`)) return;
+  if (!confirm(`确定删除选中的 ${filenames.length} 个 Codex 凭证吗？\n\n会删除 SQLite 中的凭证记录。此操作不可撤销。`)) return;
   const btn = $('#btnCodexDeleteBulkV2');
   if (btn) btn.disabled = true;
   try {

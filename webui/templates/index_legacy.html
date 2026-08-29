@@ -2782,7 +2782,7 @@ function renderCodex() {
       <td class="muted">${esc(r.mtime || '-')}</td>
       <td class="muted">${esc(r.expired || '-')}</td>
       <td class="actions">
-        <button class="primary" data-codex-download="${esc(r.filename)}" title="下载本地 codex_accounts/ 中的 JSON/回执">本地下载</button>
+        <button class="primary" data-codex-download="${esc(r.filename)}" title="从 SQLite 下载 JSON/回执">下载凭证</button>
         <button class="good" data-codex-download-cpa="${esc(r.filename)}" title="按邮箱从 CPA auth-files 下载真实 Codex JSON">从CPA下载</button>
         ${exported ? `<button data-codex-reset="${esc(r.filename)}" title="重新标记为未导出">重置标记</button>` : ''}
         <button class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
@@ -2902,7 +2902,7 @@ $('#btnCodexDownloadBulkCpa').addEventListener('click', async () => {
 $('#btnCodexDeleteBulk').addEventListener('click', async () => {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
-  if (!confirm(`确定删除选中的 ${filenames.length} 个 Codex 凭证吗？\n\n会删除本地 codex_accounts/ 下的 JSON 文件，并清理导出标记。此操作不可撤销。`)) return;
+  if (!confirm(`确定删除选中的 ${filenames.length} 个 Codex 凭证吗？\n\n会删除 SQLite 中的凭证记录。此操作不可撤销。`)) return;
   $('#btnCodexDeleteBulk').disabled = true;
   try {
     const r = await api('/api/codex/delete-bulk', {
