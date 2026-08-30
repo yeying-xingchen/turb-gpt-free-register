@@ -89,6 +89,27 @@ def acquire_email() -> str:
     raise RuntimeError(f"所有邮箱来源均领取失败: {sources}; last={last_exc}")
 
 
+def acquire_email_after_input(email: str | None = None) -> str:
+    """在浏览器已找到邮箱输入框后领取邮箱。
+
+    浏览器驱动把“找到输入框”和“领取邮箱”拆成两个阶段，避免页面加载、风控
+    或入口识别失败时提前消耗邮箱。传入已有邮箱时不重复领取，兼容固定邮箱模式。
+    """
+    current = str(email or "").strip()
+    if current:
+        return current
+
+    from config import email as _email_cfg
+
+    if not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", False)):
+        raise RuntimeError("页面已找到邮箱输入框，但自动取邮箱未启用且未配置 REGISTER_EMAIL")
+    allocated = str(acquire_email() or "").strip()
+    if not allocated:
+        raise RuntimeError("邮箱服务返回了空邮箱地址")
+    logger.info("[EmailProvider] 已找到邮箱输入框，开始分配邮箱: %s", allocated)
+    return allocated
+
+
 def resolve_email_source(email: str) -> str:
     """根据邮箱在各池中的归属判断实际来源。"""
     from core.gptmail_client import get_account_context as get_gptmail_context

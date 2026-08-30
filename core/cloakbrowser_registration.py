@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from typing import Callable
 
 from config import cloakbrowser as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.cloakbrowser_driver import build_cloak_driver
-from core.email_provider import wait_for_otp, resolve_email_source
+from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
@@ -23,7 +24,15 @@ from core.roxy_registration import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
-def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = None, otp_code: str = None, batch_dir: Path | None = None) -> dict:
+def run_cloak_registration(
+    email: str | None,
+    name: str,
+    birthday: str,
+    proxy: str = None,
+    otp_code: str = None,
+    batch_dir: Path | None = None,
+    on_email_acquired: Callable[[str], None] | None = None,
+) -> dict:
     """CloakBrowser 自动化注册入口。"""
     driver = None
     opened = None
@@ -40,7 +49,20 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
         _maybe_accept(driver)
         _check_manual_stop()
 
-        next_state = _submit_email_and_wait_next(driver, email, attempts=3)
+        def _email_supplier_after_input() -> str:
+            nonlocal email
+            _check_manual_stop()
+            email = acquire_email_after_input(email)
+            if on_email_acquired:
+                on_email_acquired(email)
+            return email
+
+        next_state = _submit_email_and_wait_next(
+            driver,
+            email,
+            attempts=3,
+            email_supplier=_email_supplier_after_input,
+        )
         _check_manual_stop()
 
         # 如果邮箱提交后直接进入验证码页，也尝试点击“使用密码继续”进入密码创建页；
@@ -149,8 +171,9 @@ def run_cloak_registration(email: str, name: str, birthday: str, proxy: str = No
         logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
         try:
-            from core.email_provider import release_email
-            release_email(email, status="failed" if create_acknowledged else "available", note=f"Cloak注册失败: {str(exc)[:180]}")
+            if email:
+                from core.email_provider import release_email
+                release_email(email, status="failed" if create_acknowledged else "available", note=f"Cloak注册失败: {str(exc)[:180]}")
         except Exception:
             pass
         return {"success": False, "email": email, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
