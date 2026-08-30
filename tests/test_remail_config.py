@@ -32,6 +32,21 @@ class RemailConfigTests(unittest.TestCase):
         self.assertEqual(fields["REMAIL_PROJECT_ID"]["type"], "int")
         self.assertEqual(fields["REMAIL_EMAIL_SUFFIX"]["type"], "str")
 
+    def test_remail_promo_is_rendered_after_section_help(self):
+        modern = Path("webui/templates/index.html").read_text(encoding="utf-8")
+        legacy = Path("webui/templates/index_legacy.html").read_text(encoding="utf-8")
+        promo = "通过作者卡网购买积分9折优惠"
+        self.assertIn(promo, modern)
+        self.assertIn(promo, legacy)
+        self.assertIn(
+            'const sectionHelp = current.help\n    ? `<p class="config-section-v2-subhelp">${esc(current.help)}${promo}</p>`\n    : promo;',
+            modern,
+        )
+        self.assertIn(
+            '${help ? `<span class="hint">${esc(help)}</span>` : \'\'}${promo}',
+            legacy,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

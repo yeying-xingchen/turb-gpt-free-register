@@ -985,7 +985,7 @@
       background: #fafbfc;
     }
     .accounts-filter-v2 .acc-v2-search-wrap {
-      flex: 0 1 320px; width: 320px; max-width: 100%; min-width: 200px; padding: 4px 8px;
+      flex: 0 1 260px; width: 260px; max-width: 100%; min-width: 200px; padding: 4px 8px;
     }
     .accounts-filter-v2 .acc-v2-search-wrap input {
       width: 100%; min-width: 0; min-height: 32px !important; margin: 0;
@@ -1047,6 +1047,13 @@
     .accounts-filter-v2 .el-input-number__increase svg,
     .accounts-filter-v2 .el-input-number__decrease svg {
       width: 11px; height: 11px;
+    }
+    @media (max-width: 900px) {
+      .accounts-filter-v2 { flex-wrap: wrap; }
+      .accounts-filter-v2 .acc-v2-btn-group { flex-wrap: wrap; }
+      .accounts-filter-v2 .acc-v2-search-wrap {
+        flex-basis: 100%; width: 100%;
+      }
     }
     #accountsToolbarV2 { padding-top: 12px; }
 
@@ -1867,6 +1874,13 @@
     .config-section-v2-subhelp {
       margin: 12px 0 0; font-size: 13px; color: #909399; line-height: 1.5;
     }
+    .remail-promo-notice {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin: 0 0 0 10px; padding: 8px 12px;
+      color: #b42318; background: #fff1f0; border: 1px solid #fecdca;
+      border-radius: 8px; font-size: 13px; font-weight: 700; line-height: 1.4;
+      vertical-align: middle; white-space: nowrap;
+    }
     .config-switches-v2 + .config-section-v2-body {
 
       margin-top: 20px;
@@ -2182,6 +2196,15 @@
               <option value="deactivated">账号废号</option>
             </select>
           </label>
+          <label class="acc-v2-inline" title="按账号 2FA/TOTP 状态筛选账号">
+            <select id="totpStatusFilterV2">
+              <option value="">2FA：全部</option>
+              <option value="enabled">2FA：已开启</option>
+              <option value="disabled">2FA：未开启</option>
+              <option value="pending">2FA：设置中</option>
+              <option value="failed">2FA：设置失败</option>
+            </select>
+          </label>
           <div class="acc-v2-date-select" id="dateSelectAccountsV2">
             <button type="button" class="acc-v2-date-select-btn" id="btnDateFilterAccountsV2" title="按注册时间筛选日期范围">📅 日期筛选</button>
             <div class="acc-v2-date-select-menu" id="dateFilterPanelAccountsV2"></div>
@@ -2191,7 +2214,6 @@
             <input type="date" id="dateToAccountsV2">
           </div>
           <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveTopV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
 
         </div>
       </div>
@@ -3153,6 +3175,10 @@ function getAccountsCodexFilter() {
   const el = document.getElementById('codexStatusFilterV2');
   return (el ? el.value : '').trim();
 }
+function getAccountsTotpFilter() {
+  const el = document.getElementById('totpStatusFilterV2');
+  return (el ? el.value : '').trim();
+}
 function getCodexBulkWorkers() {
   const el = document.getElementById('codexBulkWorkersV2');
   return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
@@ -3164,11 +3190,12 @@ async function loadAccounts() {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
     const codex = getAccountsCodexFilter();
+    const totp = getAccountsTotpFilter();
     const q = getAccountsQuery();
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -3184,11 +3211,12 @@ async function pollAccountPlanStatuses() {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
     const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
     const codex = getAccountsCodexFilter();
+    const totp = getAccountsTotpFilter();
     const q = getAccountsQuery();
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -3933,6 +3961,12 @@ async function refreshAccountsList(btn) {
   }, 250));
   const codexV2 = $('#codexStatusFilterV2');
   if (codexV2) codexV2.addEventListener('change', () => {
+    ACCOUNT_SELECTED.clear();
+    PAGERS.accounts.page = 1;
+    loadAccounts();
+  });
+  const totpV2 = $('#totpStatusFilterV2');
+  if (totpV2) totpV2.addEventListener('change', () => {
     ACCOUNT_SELECTED.clear();
     PAGERS.accounts.page = 1;
     loadAccounts();
@@ -5996,6 +6030,12 @@ function renderSectionedConfigSectionV2(name, fields, sectionForKey, preferred, 
   const current = bySection[active] || { help: '', fields: [] };
   const switches = current.fields.filter(f => f.type === 'bool');
   const inputs = current.fields.filter(f => f.type !== 'bool');
+  const promo = name === '邮箱 / OTP' && active === 'Remail'
+    ? '<span class="remail-promo-notice" role="note">通过作者卡网购买积分9折优惠</span>'
+    : '';
+  const sectionHelp = current.help
+    ? `<p class="config-section-v2-subhelp">${esc(current.help)}${promo}</p>`
+    : promo;
   let extra = '';
   if (name === '邮箱 / OTP' && active === 'CloudMail') {
     extra = renderCloudMailTokenToolsV2();
@@ -6010,7 +6050,7 @@ function renderSectionedConfigSectionV2(name, fields, sectionForKey, preferred, 
           </button>
         `).join('')}
       </div>
-      ${current.help ? `<p class="config-section-v2-subhelp">${esc(current.help)}</p>` : ''}
+      ${sectionHelp}
       ${switches.length ? `<div class="config-switches-v2">${switches.map(f => renderFeatureSwitchField(f, { withIcon: false })).join('')}</div>` : ''}
       ${inputs.length ? `<div class="config-section-v2-body">${inputs.map(renderConfigPlainFieldV2).join('')}</div>` : ''}
       ${extra}

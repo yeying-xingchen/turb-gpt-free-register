@@ -393,16 +393,18 @@ def _query_collection_page(collection: str, *, status: str | None = None,
 def _account_filter_sql(
     plan_filter: str | None = None,
     codex_filter: str | None = None,
+    totp_filter: str | None = None,
 ) -> tuple[list[str], list[Any]]:
-    """把账号列表的兼容过滤条件下推到 SQLite。
+    """把账号列表的套餐、Codex、2FA 过滤条件下推到 SQLite。
 
-    套餐、Codex 状态仍保存在账号 payload 中，因此这里使用 SQLite JSON1
+    套餐、Codex、2FA 状态仍保存在账号 payload 中，因此这里使用 SQLite JSON1
     直接过滤，而不是先把整张 accounts 表反序列化到 Python 再切页。
     """
     where: list[str] = []
     params: list[Any] = []
     plan = str(plan_filter or "").strip().lower()
     codex = str(codex_filter or "").strip().lower()
+    totp = str(totp_filter or "").strip().lower()
 
     plan_expr = (
         "lower(COALESCE(NULLIF(CAST(json_extract(payload, '$.current_plan_type') AS TEXT), ''), "
@@ -428,6 +430,26 @@ def _account_filter_sql(
         else:
             where.append(f"{status_expr} = ?")
         params.append(codex)
+
+    totp_secret_expr = "lower(COALESCE(CAST(json_extract(payload, '$.totp_secret') AS TEXT), ''))"
+    totp_setup_expr = "lower(COALESCE(CAST(json_extract(payload, '$.totp_setup_status') AS TEXT), ''))"
+    if totp and totp not in {"all", "*"}:
+        if totp in {"enabled", "on", "active"}:
+            where.append(f"length(trim({totp_secret_expr})) > 0")
+        elif totp in {"disabled", "off", "not_enabled", "unset"}:
+            where.append(f"length(trim({totp_secret_expr})) = 0")
+        elif totp in {"pending", "setup", "setting", "queued", "running"}:
+            where.append(f"{totp_setup_expr} IN (?, ?)")
+            params.extend(["queued", "running"])
+        elif totp == "failed":
+            where.append(f"{totp_setup_expr} = ?")
+            params.append("failed")
+        elif totp == "stopped":
+            where.append(f"{totp_setup_expr} = ?")
+            params.append("stopped")
+        else:
+            where.append(f"{totp_setup_expr} = ?")
+            params.append(totp)
     return where, params
 
 
@@ -1287,6 +1309,25 @@ def _matches_codex_status_filter(row: dict, codex_filter: str | None) -> bool:
     return status == codex_filter
 
 
+def _matches_totp_status_filter(row: dict, totp_filter: str | None) -> bool:
+    """按 2FA/TOTP 是否已配置及设置任务状态筛选账号。"""
+    totp_filter = str(totp_filter or "").strip().lower()
+    if not totp_filter or totp_filter in {"all", "*"}:
+        return True
+
+    enabled = bool(str(row.get("totp_secret") or "").strip())
+    setup_status = str(row.get("totp_setup_status") or "").strip().lower()
+    if totp_filter in {"enabled", "on", "active"}:
+        return enabled
+    if totp_filter in {"disabled", "off", "not_enabled", "unset"}:
+        return not enabled
+    if totp_filter in {"pending", "setup", "setting", "queued", "running"}:
+        return setup_status in {"queued", "running"}
+    if totp_filter in {"failed", "stopped"}:
+        return setup_status == totp_filter
+    return setup_status == totp_filter
+
+
 def _filtered_decorated_accounts(
     archived: str | bool | None = False,
     plan_filter: str | None = None,
@@ -1294,6 +1335,7 @@ def _filtered_decorated_accounts(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    totp_filter: str | None = None,
 ) -> list[dict]:
     rows = _load_accounts()
     if archived in (True, "1", "true", "yes", "only"):
@@ -1305,6 +1347,7 @@ def _filtered_decorated_accounts(
     decorated = [_decorate_account(r) for r in rows]
     decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
     decorated = [r for r in decorated if _matches_codex_status_filter(r, codex_filter)]
+    decorated = [r for r in decorated if _matches_totp_status_filter(r, totp_filter)]
     decorated = [r for r in decorated if _account_matches_query(r, q)]
     # 按创建时间筛选（date_from/date_to 为 ISO 字符串或 YYYY-MM-DD）
     if date_from or date_to:
@@ -1334,6 +1377,7 @@ def list_account_plan_check_statuses(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    totp_filter: str | None = None,
 ) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
@@ -1363,7 +1407,11 @@ def list_account_plan_check_statuses(
     with _LOCK:
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
-        extra_where, extra_params = _account_filter_sql(plan_filter, codex_filter)
+        extra_where, extra_params = _account_filter_sql(
+            plan_filter=plan_filter,
+            codex_filter=codex_filter,
+            totp_filter=totp_filter,
+        )
         candidates, total, latest = _query_collection_page(
             "accounts",
             archived=archived,
@@ -1438,6 +1486,7 @@ def list_accounts(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    totp_filter: str | None = None,
 ) -> list[dict]:
     # 非分页兼容接口也走同一条 SQL 分页路径，避免 limit=500 时先读取整张表。
     result = list_accounts_page(
@@ -1449,6 +1498,7 @@ def list_accounts(
         q=q,
         date_from=date_from,
         date_to=date_to,
+        totp_filter=totp_filter,
     )
     return result["items"]
 
@@ -1462,11 +1512,16 @@ def list_accounts_page(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    totp_filter: str | None = None,
 ) -> dict:
     with _LOCK:
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
-        extra_where, extra_params = _account_filter_sql(plan_filter, codex_filter)
+        extra_where, extra_params = _account_filter_sql(
+            plan_filter=plan_filter,
+            codex_filter=codex_filter,
+            totp_filter=totp_filter,
+        )
         candidates, total, latest = _query_collection_page(
             "accounts",
             archived=archived,
