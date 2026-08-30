@@ -165,11 +165,11 @@ REMAIL_PROJECT_ID = 2
 # 项目下单的邮箱后缀；outlook.com 为微软邮箱商品的常用选择。
 REMAIL_EMAIL_SUFFIX = "outlook.com"
 
-# code 为短效接码；purchase 为可重复收件的长效购买。
-REMAIL_SERVICE_MODE = "code"
+# code 为短效接码；purchase 为可重复收件的长效购买，默认使用 purchase。
+REMAIL_SERVICE_MODE = "purchase"
 
-# private_first 优先使用自己的库存；public_only 只使用公开库存。
-REMAIL_SUPPLY_POLICY = "private_first"
+# private_first 优先使用自己的库存；public_only 只使用公开库存，默认使用 public_only。
+REMAIL_SUPPLY_POLICY = "public_only"
 
 # 下单响应未立即返回 service token 时，等待订单详情补齐凭证的最长秒数。
 REMAIL_ORDER_WAIT_SECONDS = 30

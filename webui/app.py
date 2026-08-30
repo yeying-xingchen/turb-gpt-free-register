@@ -2356,7 +2356,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             except (TypeError, ValueError):
                 project_id = 0
             suffix = str(getattr(_email_cfg, "REMAIL_EMAIL_SUFFIX", "") or "").strip()
-            service_mode = str(getattr(_email_cfg, "REMAIL_SERVICE_MODE", "code") or "code").strip().lower()
+            service_mode = str(getattr(_email_cfg, "REMAIL_SERVICE_MODE", "purchase") or "purchase").strip().lower()
             if not api_base:
                 return jsonify({
                     "ok": False,

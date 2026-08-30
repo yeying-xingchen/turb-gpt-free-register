@@ -270,12 +270,13 @@ REMAIL_API_BASE=https://remail.aishop6.com
 REMAIL_API_KEY=你的_Remail_API_Key
 REMAIL_PROJECT_ID=项目ID
 REMAIL_EMAIL_SUFFIX=outlook.com
+REMAIL_SERVICE_MODE=purchase
+REMAIL_SUPPLY_POLICY=public_only
 ```
 
-`REMAIL_SUPPLY_POLICY` 可填 `private_first`（默认）或 `public_only`。每个注册任务会创建一个
-`serviceMode=code`（或按配置改为 `purchase`）订单，验证码通过 `/v1/pickup` 获取；Remail
-订单余额和对应项目库存需可用。开启 2FA/Codex 等需要重复收件的流程时，建议使用
-`REMAIL_SERVICE_MODE=purchase`。
+`REMAIL_SERVICE_MODE` 默认为 `purchase`（长效购买，可重复收件），也可改为 `code`（短效接码）。
+`REMAIL_SUPPLY_POLICY` 默认为 `public_only`，也可改为 `private_first`。每个注册任务会创建一个
+对应模式的订单，验证码通过 `/v1/pickup` 获取；Remail 订单余额和对应项目库存需可用。
 
 ---
 
