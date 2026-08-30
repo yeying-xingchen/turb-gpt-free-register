@@ -317,7 +317,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail",
+        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail,remail",
     },
     {
         "key": "GPTMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -431,6 +431,41 @@ EDITABLE_FIELDS = [
     {
         "key": "CLOUDMAIL_RANDOM_LOCAL_LENGTH", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
         "label": "CloudMail随机名前缀长度", "help": "生成邮箱 local-part 的长度，建议 10-16",
+    },
+    {
+        "key": "REMAIL_API_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Remail API 地址", "help": "默认 https://remail.aishop6.com；也可填写文档地址 https://remail.aishop6.com/docs",
+        "external_url": "https://remail.aishop6.com/register?aff=AFFLGYQMTYIXH",
+        "external_label": "打开 Remail 官网",
+    },
+    {
+        "key": "REMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Remail API Key", "help": "Remail 控制台生成的 rk- 开头 API Key；选择 remail 来源时必填，保存在 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "REMAIL_PROJECT_ID", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "Remail 项目 ID", "help": "Remail API 项目列表中的 projectId，用于匹配 ChatGPT/OpenAI 验证码项目",
+    },
+    {
+        "key": "REMAIL_EMAIL_SUFFIX", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Remail 邮箱后缀", "help": "下单时使用的邮箱后缀，默认 outlook.com；不要填写完整邮箱",
+    },
+    {
+        "key": "REMAIL_SERVICE_MODE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Remail 服务模式", "help": "code=短效接码（默认，只收一封）；purchase=长效购买（可重复收件）",
+    },
+    {
+        "key": "REMAIL_SUPPLY_POLICY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Remail 库存策略", "help": "private_first 优先自有库存；public_only 只使用公开库存",
+    },
+    {
+        "key": "REMAIL_ORDER_WAIT_SECONDS", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "Remail 订单等待(秒)", "help": "下单后未立即返回 service token 时等待订单补齐凭证，默认 30 秒",
+    },
+    {
+        "key": "REMAIL_REQUEST_TIMEOUT", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "Remail 请求超时(秒)", "help": "Remail API 单次 HTTP 请求超时，默认 20 秒",
     },
     # ---- 浏览器地区画像 ----
     {

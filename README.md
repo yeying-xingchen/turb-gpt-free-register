@@ -49,6 +49,7 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 - Cloudflare Worker 临时邮箱：自动创建 + JWT 取码（`cloudflare`，兼容 cloudflare_temp_email）
 - 通用 API 邮箱：`email----取码地址`
 - GPTMail 临时邮箱 API：运行时随机生成邮箱并自动收取验证码
+- Remail 开放 API：按项目下单短效邮箱并自动收取验证码（`remail`）
 - `EMAIL_SOURCE` 支持多个来源组合，例如：
 
 ```python
@@ -128,6 +129,7 @@ cp .env.example .env
 - `ROXY_API_TOKEN`
 - `QQ_IMAP_PASSWORD`
 - `CLOUDFLARE_API_KEY` / `CLOUDFLARE_CUSTOM_AUTH`（`EMAIL_SOURCE=cloudflare` 时）
+- `REMAIL_API_KEY`（`EMAIL_SOURCE=remail` 时）
 - `CPA_MANAGEMENT_KEY`
 - `SMS_API_KEY`
 - `L_ADMIN_AUTH_CODE`
@@ -247,6 +249,33 @@ Cloudflare Email Routing 需要把域名邮件转发到 QQ 邮箱。此模式不
 
 - `api-key`获取页面：https://mailnest.top/account
 - 项目代码获取页面：https://mailnest.top/buy-email。默认为`chatgpt001`，可以直接使用
+
+#### Remail 开放 API
+
+Remail API 文档：[https://remail.aishop6.com/docs](https://remail.aishop6.com/docs)。该服务使用 API Key
+按项目创建短效接码订单，订单返回的邮箱和 service token 会自动用于后续取码。
+
+在 WebUI「配置 → 邮箱 / OTP」填写：
+
+- `REMAIL_API_KEY`：Remail 控制台生成的 `rk-` 开头 API Key；
+- `REMAIL_PROJECT_ID`：Remail「项目」列表中用于 ChatGPT/OpenAI 验证码的 `projectId`；
+- `REMAIL_EMAIL_SUFFIX`：下单后缀，微软邮箱通常填 `outlook.com`。
+
+然后设置：
+
+```dotenv
+USE_EMAIL_SERVICE=True
+EMAIL_SOURCE=remail
+REMAIL_API_BASE=https://remail.aishop6.com
+REMAIL_API_KEY=你的_Remail_API_Key
+REMAIL_PROJECT_ID=项目ID
+REMAIL_EMAIL_SUFFIX=outlook.com
+```
+
+`REMAIL_SUPPLY_POLICY` 可填 `private_first`（默认）或 `public_only`。每个注册任务会创建一个
+`serviceMode=code`（或按配置改为 `purchase`）订单，验证码通过 `/v1/pickup` 获取；Remail
+订单余额和对应项目库存需可用。开启 2FA/Codex 等需要重复收件的流程时，建议使用
+`REMAIL_SERVICE_MODE=purchase`。
 
 ---
 

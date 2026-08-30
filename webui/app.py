@@ -2348,7 +2348,41 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "ok": False,
                     "error": "已选择 cloudmail 邮箱来源，请填写 CloudMail Token（配置 → 邮箱 / OTP）。",
                 }), 400
-        if "gptmail" in sources or "mailnest" in sources or "cloudmail" in sources or "cloudflare" in sources:
+        if "remail" in sources:
+            api_base = str(getattr(_email_cfg, "REMAIL_API_BASE", "") or "").strip()
+            api_key = str(getattr(_email_cfg, "REMAIL_API_KEY", "") or "").strip()
+            try:
+                project_id = int(getattr(_email_cfg, "REMAIL_PROJECT_ID", 2) or 0)
+            except (TypeError, ValueError):
+                project_id = 0
+            suffix = str(getattr(_email_cfg, "REMAIL_EMAIL_SUFFIX", "") or "").strip()
+            service_mode = str(getattr(_email_cfg, "REMAIL_SERVICE_MODE", "code") or "code").strip().lower()
+            if not api_base:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 remail 邮箱来源，请填写 Remail API 地址（配置 → 邮箱 / OTP）。",
+                }), 400
+            if not api_key:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 remail 邮箱来源，请填写 Remail API Key（配置 → 邮箱 / OTP）。",
+                }), 400
+            if project_id <= 0:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 remail 邮箱来源，请填写 Remail 项目 ID（配置 → 邮箱 / OTP）。",
+                }), 400
+            if not suffix:
+                return jsonify({
+                    "ok": False,
+                    "error": "已选择 remail 邮箱来源，请填写 Remail 邮箱后缀（例如 outlook.com）。",
+                }), 400
+            if service_mode not in ("code", "purchase"):
+                return jsonify({
+                    "ok": False,
+                    "error": "Remail 服务模式只能填写 code 或 purchase（配置 → 邮箱 / OTP）。",
+                }), 400
+        if "gptmail" in sources or "mailnest" in sources or "cloudmail" in sources or "remail" in sources or "cloudflare" in sources:
             # 临时邮箱在任务开始时动态生成，不需要本地邮箱池容量提示。
             warning = ""
         elif "cloudflare_domain" in sources:

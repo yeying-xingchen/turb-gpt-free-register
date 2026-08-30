@@ -1817,6 +1817,13 @@
       line-height: 1.45; white-space: normal; overflow: visible;
       overflow-wrap: anywhere; word-break: break-word;
     }
+    .config-field-wrap { min-width: 0; }
+    .config-field-wrap > label.fld { margin-bottom: 0; }
+    .config-external-link {
+      display: inline-flex; align-items: center; gap: 4px; margin-top: 7px;
+      color: #377DFF; font-size: 12px; font-weight: 500; text-decoration: none;
+    }
+    .config-external-link:hover { text-decoration: underline; }
     .config-section-v2-actions {
       margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px;
     }
@@ -5595,6 +5602,7 @@ function emailConfigSectionForKey(key) {
   if (key.startsWith('GPTMAIL_')) return ['GPTMail', 'GPTMail 临时邮箱 API 配置'];
   if (key.startsWith('MAIL_NEST_')) return ['MailNest', 'MailNest / 迈巢临时邮箱 API 配置'];
   if (key.startsWith('CLOUDMAIL_')) return ['CloudMail', 'CloudMail 域名随机邮箱、Token 和收信 API 配置'];
+  if (key.startsWith('REMAIL_')) return ['Remail', 'Remail 开放 API、项目下单和取件配置'];
   if (key.startsWith('OUTLOOK_')) return ['Outlook 邮箱池', 'Outlook 邮箱池和取件模式配置'];
   if (key.startsWith('CLOUDFLARE_')) return ['Cloudflare 临时邮箱', 'Cloudflare Worker 临时邮箱 API、鉴权与路径配置'];
   if (['EMAIL_DOMAIN','QQ_EMAIL','QQ_IMAP_PASSWORD'].includes(key)) return ['Cloudflare 域名邮箱', 'Cloudflare 转发到 QQ 邮箱后的 IMAP 收信配置'];
@@ -5869,6 +5877,12 @@ function renderFeatureSwitchField(f, opts = {}) {
     </div>
   `;
 }
+function renderConfigExternalLink(f) {
+  const url = String(f.external_url || '').trim();
+  if (!/^https?:\/\//i.test(url)) return '';
+  const label = String(f.external_label || '打开官网');
+  return `<a class="config-external-link" href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+}
 function renderConfigPlainFieldV2(f) {
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   let control = '';
@@ -5884,13 +5898,16 @@ function renderConfigPlainFieldV2(f) {
     const ph = f.secret ? '保存在 .env，可留空' : '可留空';
     control = `<input type="${inputType}" data-key="${attrEsc(f.key)}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
   }
-  return `
+  const field = `
     <label class="fld">
       ${esc(f.label)}
       <span class="hint">${esc(f.help || '')}</span>
       ${control}
     </label>
   `;
+  return f.external_url
+    ? `<div class="config-field-wrap">${field}${renderConfigExternalLink(f)}</div>`
+    : field;
 }
 function renderMixedConfigSectionV2(name, fields, intro) {
   const slug = configGroupSlug(name);
@@ -6190,7 +6207,7 @@ function renderConfigSectionV2(name, fields) {
       name,
       fields,
       emailConfigSectionForKey,
-      ['通用邮箱 / OTP', 'GPTMail', 'MailNest', 'CloudMail', 'Outlook 邮箱池', 'Cloudflare 临时邮箱', 'Cloudflare 域名邮箱', '其他邮箱配置'],
+      ['通用邮箱 / OTP', 'GPTMail', 'MailNest', 'CloudMail', 'Remail', 'Outlook 邮箱池', 'Cloudflare 临时邮箱', 'Cloudflare 域名邮箱', '其他邮箱配置'],
       { get: () => CONFIG_EMAIL_ACTIVE_SECTION_V2, set: v => { CONFIG_EMAIL_ACTIVE_SECTION_V2 = v; } },
       'email-section-v2'
     );
