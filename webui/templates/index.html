@@ -579,6 +579,7 @@
     .jobs-table-v2 .col-status { width: 110px; }
     .jobs-table-v2 .col-email { min-width: 200px; width: 24%; }
     .jobs-table-v2 .col-time { width: 170px; }
+    .jobs-table-v2 .col-traffic { width: 120px; white-space: nowrap; }
     .jobs-table-v2 .col-error { width: auto; min-width: 160px; }
     .jobs-table-v2 .col-actions {
       width: 168px; overflow: visible; text-overflow: clip; white-space: nowrap;
@@ -2140,7 +2141,7 @@
         <table class="jobs-table-v2">
           <colgroup>
             <col class="col-check"><col class="col-id"><col class="col-status"><col class="col-email">
-            <col class="col-time"><col class="col-time"><col class="col-error"><col class="col-actions">
+            <col class="col-time"><col class="col-time"><col class="col-traffic"><col class="col-error"><col class="col-actions">
           </colgroup>
           <thead>
             <tr>
@@ -2150,6 +2151,7 @@
               <th class="col-email">邮箱</th>
               <th class="col-time">开始</th>
               <th class="col-time">完成</th>
+              <th class="col-traffic">流量</th>
               <th class="col-error">错误</th>
               <th class="col-actions">操作</th>
             </tr>
@@ -2698,6 +2700,17 @@ function formatDateTime(v) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+function formatTraffic(t) {
+  if (!t || !t.available) return '-';
+  const n = (v) => Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0;
+  const fmt = (v) => {
+    v = n(v);
+    if (v < 1024) return `${Math.round(v)} B`;
+    if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KiB`;
+    return `${(v / 1024 / 1024).toFixed(2)} MiB`;
+  };
+  return `<span title="上传 ${fmt(t.upload_bytes)}，下载 ${fmt(t.download_bytes)}，${n(t.request_count)} 个请求">${fmt(t.total_bytes)}</span>`;
+}
 function jobsV2OpIcons() {
   return {
     view: `<svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`,
@@ -2905,6 +2918,7 @@ function renderJobs() {
         <td class="col-email" title="${esc(j.email || '-')}">${esc(j.email || '-')}</td>
         <td class="col-time" title="${esc(started)}">${esc(started)}</td>
         <td class="col-time" title="${esc(completed)}">${esc(completed)}</td>
+        <td class="col-traffic">${formatTraffic(j.network_traffic)}</td>
         <td class="col-error" title="${esc(err)}">${esc(err ? short(err, 60) : '-')}</td>
         <td class="col-actions">
           <div class="jobs-v2-ops">
@@ -2916,7 +2930,7 @@ function renderJobs() {
           </div>
         </td>
       </tr>`;
-    }).join('') || '<tr><td colspan="8" style="text-align:center;color:#909399;padding:28px;">暂无任务</td></tr>';
+    }).join('') || '<tr><td colspan="9" style="text-align:center;color:#909399;padding:28px;">暂无任务</td></tr>';
   }
 
 

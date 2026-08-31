@@ -81,6 +81,7 @@ EMAIL_SOURCE = "outlook,generic_api"
 - 动态调整注册线程数，提交后新任务立即使用最新值。
 - 批量补跑 Codex，补跑线程数每次提交即时生效。
 - 管理账号、邮箱池、Codex 凭证；账号页支持复制全部/选中整行，邮箱池列表展示导入时间、已用时间和状态。
+- Roxy/Cloak/Browser Use/Skyvern 浏览器注册完成后统计整个浏览器会话的上传、下载和总流量，任务列表与账号扩展信息均会保存结果。
 - 配置页支持热加载，保存后无需重启。
 - Roxy 团队/项目可在配置页获取并保存。
 
@@ -90,6 +91,16 @@ EMAIL_SOURCE = "outlook,generic_api"
 - 数据库启用 WAL、超时等待和常用字段索引，WebUI 的账号、套餐状态、邮箱库、Codex 和任务分页直接执行 SQLite `COUNT(*) + LIMIT/OFFSET`，不再先读取全量数据后由 Python 切片。
 - 首次启动会自动把现有 JSON/历史 SQLite 数据迁移到新数据库；迁移完成后不再读写账号、任务、邮箱池和 Codex 凭证 JSON/TXT 文件。
 - `turb.sqlite3*` 属于运行时数据，已加入 `.gitignore`，请纳入备份策略。
+
+### 浏览器网络流量统计
+
+浏览器驱动会从打开注册页开始统计，到注册后停留结束、浏览器关闭前完成汇总。结果包含：
+
+- 上传字节、下载字节、总字节数；
+- HTTP 请求数、失败/未完成请求数；
+- WebSocket 帧 payload 字节（如流程使用 WebSocket）。
+
+现代/Legacy WebUI 的注册任务列表会显示总流量，完整结构保存在任务记录的 `network_traffic` 和成功账号的 `extra_json` 中。统计为浏览器侧可观测的请求/响应流量，不包含 TLS/IP/代理隧道额外开销，也不包含邮箱 API、Roxy API 或 CDP 控制通道流量。
 
 ---
 
@@ -763,6 +774,7 @@ ENABLE_CODEX_AUTO = False
 │   ├── register.py                 # 默认注册信息
 │   └── ...
 ├── core/
+│   ├── browser_traffic.py          # 浏览器注册 HTTP/WebSocket 流量统计
 │   ├── roxy_registration.py        # Roxy / 浏览器注册页面流程
 │   ├── cloakbrowser_registration.py # Cloak 注册入口
 │   ├── cloakbrowser_driver.py      # Cloak Playwright→Selenium 风格适配层

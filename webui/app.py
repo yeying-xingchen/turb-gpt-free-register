@@ -202,6 +202,10 @@ def _compact_job_for_list(row: dict) -> dict:
     if err:
         # 列表只需要摘要；完整错误和堆栈看“任务日志”。
         out["error_message"] = err[:240] + ("…" if len(err) > 240 else "")
+    traffic = row.get("network_traffic")
+    if isinstance(traffic, dict) and traffic.get("available"):
+        # 流量统计只包含字节计数，不带 URL/Header/请求体，可直接随任务列表返回。
+        out["network_traffic"] = traffic
     return out
 
 

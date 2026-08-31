@@ -22,6 +22,7 @@ from typing import Any, Callable
 from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, _post_register_dwell_seconds
+from core.browser_traffic import PlaywrightTrafficTracker
 from core.browser_use_client import BrowserUseClient
 from core.email_provider import acquire_email_after_input, resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
@@ -2582,6 +2583,8 @@ def run_browser_use_registration(
     browser = None
     context = None
     page = None
+    traffic_tracker: PlaywrightTrafficTracker | None = None
+    network_traffic: dict[str, Any] | None = None
 
     logger.info(
         "[%s] 开始注册：%s proxyCountry=%s profileId=%s local_proxy_arg=%s",
@@ -2609,6 +2612,17 @@ def run_browser_use_registration(
             page = context.pages[0] if context.pages else context.new_page()
             page.set_default_timeout(_timeout_ms())
             page.set_default_navigation_timeout(_timeout_ms(getattr(_cfg, "BROWSER_USE_NAVIGATION_TIMEOUT", 90)))
+            try:
+                # 从拿到远端 BrowserContext 后立即监听，覆盖后续所有 page/popup 的注册请求。
+                traffic_tracker = PlaywrightTrafficTracker(context, label=cloud_label)
+            except Exception as exc:
+                # 统计失败不应影响注册主流程。
+                logger.warning(
+                    "[%s] 初始化浏览器流量统计失败，继续注册：%s: %s",
+                    cloud_label,
+                    type(exc).__name__,
+                    str(exc)[:180],
+                )
             if _should_apply_cloud_automation_mask(provider_prefix):
                 _apply_cloud_browser_automation_mask(
                     context,
@@ -2828,6 +2842,9 @@ def run_browser_use_registration(
                         "[BrowserUse][Codex] ENABLE_CODEX_AUTO=True，注册成功后自动执行 Codex OAuth：driver=%s",
                         oauth_driver,
                     )
+                    if traffic_tracker is not None:
+                        # Codex OAuth 会使用另一套浏览器 session；这里的统计口径只覆盖注册浏览器。
+                        network_traffic = traffic_tracker.stop()
                     # Codex OAuth 会创建自己的授权 session。先关闭注册阶段的 Browser Use
                     # CDP 连接，避免注册浏览器继续占用远端会话/代理资源并干扰后续 OAuth。
                     _close_browser_use_session(browser, reason="即将执行 Codex OAuth")
@@ -2852,6 +2869,10 @@ def run_browser_use_registration(
                     "message": f"{type(exc).__name__}: {str(exc)[:220]}",
                 }
 
+            # 统计窗口在浏览器关闭前结束；注册后停留期间的页面请求也计入。
+            _post_register_dwell(page, context, provider_prefix=provider_prefix, email=email)
+            if network_traffic is None and traffic_tracker is not None:
+                network_traffic = traffic_tracker.stop()
             account_id = save_account_data(
                 email=email,
                 access_token=access_token,
@@ -2871,9 +2892,9 @@ def run_browser_use_registration(
                     },
                     "registration_password": openai_password,
                     "codex": codex_result,
+                    "network_traffic": network_traffic,
                 },
             )
-            _post_register_dwell(page, context, provider_prefix=provider_prefix, email=email)
             _t_all.done("success")
             return {
                 "success": True,
@@ -2882,9 +2903,15 @@ def run_browser_use_registration(
                 "access_token": access_token,
                 "totp_secret": totp_secret,
                 "codex": codex_result,
+                "network_traffic": network_traffic,
                 "error": None,
             }
     except Exception as exc:
+        if traffic_tracker is not None:
+            try:
+                network_traffic = traffic_tracker.stop()
+            except Exception:
+                pass
         logger.error("[BrowserUse] 注册失败：%s: %s", type(exc).__name__, exc)
         logger.debug("[BrowserUse] 失败详情", exc_info=True)
         try:
@@ -2900,10 +2927,16 @@ def run_browser_use_registration(
         return {
             "success": False,
             "email": email,
+            "network_traffic": network_traffic,
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
         # 任务结束统一关闭连接，避免云浏览器/CDP 残留占用。
+        if traffic_tracker is not None:
+            try:
+                traffic_tracker.stop()
+            except Exception:
+                pass
         try:
             if browser is not None:
                 browser.close()

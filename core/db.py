@@ -2549,6 +2549,7 @@ def _new_job_row(
         "started_at": None,
         "completed_at": None,
         "account_id": account_id,
+        "network_traffic": None,
         "created_at": _now(),
     }
 
@@ -2623,6 +2624,7 @@ def update_job(
     started_at: str | None = None,
     completed_at: str | None = None,
     account_id: int | None = None,
+    network_traffic: dict | None = None,
 ) -> None:
     with _LOCK:
         rows = _load_jobs()
@@ -2641,6 +2643,8 @@ def update_job(
             row["completed_at"] = completed_at
         if account_id is not None:
             row["account_id"] = account_id
+        if network_traffic is not None:
+            row["network_traffic"] = dict(network_traffic)
         _save_jobs(rows)
 
 
