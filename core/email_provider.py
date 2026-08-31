@@ -111,7 +111,14 @@ def acquire_email_after_input(email: str | None = None) -> str:
 
 
 def resolve_email_source(email: str) -> str:
-    """根据邮箱在各池中的归属判断实际来源。"""
+    """根据邮箱判断实际来源，已注册账号优先使用落库来源。"""
+    # 已注册账号的 email_source 是注册时的最终来源。必须先读它，不能因为
+    # 当前进程里恰好残留了其它邮箱池上下文，或邮箱池顺序发生变化，就把同一
+    # 地址误判到另一个服务商。
+    registered_source = _registered_email_source(email)
+    if registered_source:
+        return registered_source
+
     from core.gptmail_client import get_account_context as get_gptmail_context
     if get_gptmail_context(email):
         return "gptmail"
