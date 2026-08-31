@@ -804,7 +804,9 @@ function formatTraffic(t) {
     if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KiB`;
     return `${(v / 1024 / 1024).toFixed(2)} MiB`;
   };
-  return `<span title="上传 ${fmt(t.upload_bytes)}，下载 ${fmt(t.download_bytes)}，${n(t.request_count)} 个请求">${fmt(t.total_bytes)}</span>`;
+  const j = t.js_coverage;
+  const jsHint = j && j.enabled ? `，JS脚本 ${n(j.script_count)}（执行 ${n(j.executed_script_count)}，候选 ${n(j.candidate_script_count)}）` : '';
+  return `<span title="上传 ${fmt(t.upload_bytes)}，下载 ${fmt(t.download_bytes)}，${n(t.request_count)} 个请求${jsHint}">${fmt(t.total_bytes)}</span>`;
 }
 function copyId(v) { if (!v) return ''; const id = 'c'+(++copySeq); copyStore.set(id, v); return id; }
 function cbtn(label, value, cls='') { const id = copyId(value); return `<button class="${cls}" data-copy-id="${id}" ${id?'':'disabled'}>${label}</button>`; }

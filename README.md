@@ -81,7 +81,7 @@ EMAIL_SOURCE = "outlook,generic_api"
 - 动态调整注册线程数，提交后新任务立即使用最新值。
 - 批量补跑 Codex，补跑线程数每次提交即时生效。
 - 管理账号、邮箱池、Codex 凭证；账号页支持复制全部/选中整行，邮箱池列表展示导入时间、已用时间和状态。
-- Roxy/Cloak/Browser Use/Skyvern 浏览器注册完成后统计整个浏览器会话的上传、下载和总流量，任务列表与账号扩展信息均会保存结果。
+- Roxy/Cloak 浏览器注册完成后统计整个浏览器会话的上传、下载和总流量，任务列表与账号扩展信息均会保存结果；Browser Use/Skyvern 云端浏览器不启用本地流量监听、资源拦截或 JS 覆盖率采集。
 - 配置页支持热加载，保存后无需重启。
 - Roxy 团队/项目可在配置页获取并保存。
 
@@ -101,6 +101,65 @@ EMAIL_SOURCE = "outlook,generic_api"
 - WebSocket 帧 payload 字节（如流程使用 WebSocket）。
 
 现代/Legacy WebUI 的注册任务列表会显示总流量，完整结构保存在任务记录的 `network_traffic` 和成功账号的 `extra_json` 中。统计为浏览器侧可观测的请求/响应流量，不包含 TLS/IP/代理隧道额外开销，也不包含邮箱 API、Roxy API 或 CDP 控制通道流量。
+
+#### 省流量模式
+
+在 WebUI「浏览器画像」中开启「本地浏览器省流量模式」，或在 `.env` 设置（仅 Roxy/Cloak 生效）：
+
+```dotenv
+BROWSER_DATA_SAVER_MODE=True
+BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES=["image", "media"]
+# URL glob 列表；WebUI 中则是一行一条
+BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS='["**://auth.openai.com/awe/api/v2/rum**", "**://chatgpt.com/ces/statsc/flush**", "**://connect.facebook.net/**", "**://analytics.tiktok.com/**", "**://snap.licdn.com/**", "**://bat.bing.com/**", "**://accounts.google.com/gsi/client**"]'
+```
+
+Roxy/Selenium 会在启动参数中关闭图片加载，并使用 Chrome CDP 拦截常见图片、媒体等 URL 后缀及配置的 URL glob（因此也能覆盖无扩展名资源）；Cloak 使用 Playwright 按资源类型和 URL glob 拦截。Browser Use/Skyvern 是云端浏览器，不安装本地省流量拦截器，始终保留完整页面资源。默认只拦截 `image`、`media`，以及配置中列出的 RUM/广告统计 URL，不会按类型拦截登录所需的核心脚本、接口和 WebSocket。Playwright 会放行带验证码/challenge 关键词的 URL；Roxy 的 Chromium 图片开关和 CDP URL 黑名单无法提供 URL 例外规则，若页面出现验证码或布局异常，关闭该模式后重试。
+
+Job 208 的明细显示，当前规则实际拦截了 5 个第三方脚本（Google GSI、Facebook、TikTok、LinkedIn、Bing）以及 380 次 RUM 请求；邮箱/密码注册成功。注册侧下载约 9.92 MiB，其中脚本约 8.90 MiB，主要来自 ChatGPT 核心 CDN chunk。
+
+当前默认规则只包含 RUM/广告统计和 Google GSI。邮箱/密码注册不使用 Google 登录，因此可以保留 GSI 规则；如果将来启用 Google 登录，需从「省流量 URL 屏蔽规则」中移除以下行：
+
+```text
+**://accounts.google.com/gsi/client**
+```
+
+疑似 CES 遥测的 `**://chatgpt.com/ces/v1/rgstr` 约 277 KiB/轮，也可在单独验证注册成功率后加入。
+
+不要屏蔽 `chatgpt.com/cdn/assets/*.js`、`auth-cdn.oaistatic.com/assets/*.js`、`sentinel.openai.com`、`chatgpt.com/backend-api/sentinel/*`、`ab.chatgpt.com/v1/initialize`、`chatgpt.com/realtime/wm` 和注册/OTP/session API。Job 207 屏蔽 `7aaae702-*.js` 后出现 OTP 输入框缺失；Job 208 放行该 chunk 后完整成功，因此不能仅凭低函数执行比例屏蔽 CDN chunk。URL 规则填写 `[]` 可恢复为仅按资源类型拦截，空白则使用内置默认规则。
+
+如需拦截 CSS，可加入 `stylesheet`：
+
+```dotenv
+BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES=["image", "media", "stylesheet"]
+```
+
+CSS 通常不是注册接口必需，但会影响隐藏元素、布局和可见性判断，建议先单独测试；出现元素找不到或点击异常时移除 `stylesheet`。
+
+#### 资源明细日志
+
+需要分析注册流程中哪些资源占流量时，开启：
+
+```dotenv
+BROWSER_TRAFFIC_DETAIL_LOG=True
+BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES=2000
+```
+
+启用统计的 Roxy/Cloak 注册任务结束后，日志会输出 `[资源明细]` 行，包含资源 URL、类型、HTTP 方法、状态码、上传大小、下载大小、响应 body/header 大小，以及 `failed`、`blocked`、`unfinished`、`cache` 状态；明细按单请求总字节从大到小排列。Browser Use/Skyvern 云端浏览器不启用该监听。`ws_upload/ws_download` 表示 WebSocket 帧 payload。Playwright 缓存状态在无法从 API 确认时显示 `unknown`，Selenium/CDP 能识别时显示 `hit` 或 `miss`。URL 查询参数值、data/blob URL 内容不会写入日志。
+
+把一轮注册的 `[资源明细]` 日志发回后，可以按域名、路径、资源类型和实际字节量判断下一步是否适合继续拦截；`stylesheet`、`font` 等类型需要结合注册是否受影响再启用。
+
+#### JS 执行函数覆盖率
+
+需要确认某个 CDN chunk 是否在 Roxy/Cloak 注册流程中真正执行时，开启：
+
+```dotenv
+BROWSER_JS_COVERAGE_LOG=True
+BROWSER_JS_COVERAGE_MAX_ENTRIES=1000
+```
+
+Roxy/Selenium 会在当前 Chrome target 上启用 CDP `Profiler.startPreciseCoverage`，Cloak 会为已发现的 Chromium Page 建立 CDP session；Browser Use/Skyvern 不启用 JS 覆盖率监听。任务结束时日志包含：`[JS执行汇总]`、每个脚本的 `[JS脚本]`、实际执行函数的 `[JS执行]`（函数名、调用次数、`startOffset-endOffset:count`）以及“本次未观察到执行范围”的 `[JS候选]`。`network_traffic.js_coverage` 会保存脚本级摘要和候选 URL，逐函数 offset 只写日志，不保存源码、参数或返回值。
+
+`[JS候选]` 仅表示该轮覆盖率没有观察到执行代码，不能单独证明可以屏蔽：先用一轮未屏蔽核心脚本的成功注册作为基线，再一次只屏蔽一个候选并对比 OTP、session、资料页和成功率。脚本若来自 `data:`/`blob:`/扩展页不会列为 URL 屏蔽候选；跨 popup/多 target 的 Selenium 页面只覆盖当前 CDP target。若 CDP Profiler 不受当前指纹浏览器支持，日志会标记 `supported=False`，不会影响注册流程。
 
 ---
 
@@ -774,6 +833,7 @@ ENABLE_CODEX_AUTO = False
 │   ├── register.py                 # 默认注册信息
 │   └── ...
 ├── core/
+│   ├── browser_data_saver.py       # Roxy/Cloak 本地浏览器省流量资源拦截
 │   ├── browser_traffic.py          # 浏览器注册 HTTP/WebSocket 流量统计
 │   ├── roxy_registration.py        # Roxy / 浏览器注册页面流程
 │   ├── cloakbrowser_registration.py # Cloak 注册入口
