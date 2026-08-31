@@ -138,6 +138,7 @@ class AccountLivenessTests(unittest.TestCase):
         success = {"ok": True, "status": "live", "access_token": "new-token"}
         with patch.object(live_service, "_QUEUE_SLOTS", slot), \
              patch.object(live_service.db, "mark_account_live_check_running", return_value=True), \
+             patch.object(live_service.db, "get_account", return_value={"email_source": "remail"}), \
              patch.object(live_service.db, "update_account_liveness"), \
              patch.object(live_service, "_append_log"), \
              patch.object(live_service, "resolve_plan_check_route", return_value={
@@ -155,7 +156,9 @@ class AccountLivenessTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(check.call_args_list[0].kwargs["proxy"], "socks5://proxy.example:1080")
+        self.assertEqual(check.call_args_list[0].kwargs["email_source"], "remail")
         self.assertEqual(check.call_args_list[1].kwargs["proxy"], "")
+        self.assertEqual(check.call_args_list[1].kwargs["email_source"], "remail")
         self.assertTrue(slot.released)
 
 

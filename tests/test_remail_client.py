@@ -118,6 +118,74 @@ class RemailClientTests(unittest.TestCase):
         self.assertEqual(kwargs["params"], {"email": "fresh@outlook.test", "token": "st-test-token"})
         self.assertNotIn("Authorization", kwargs["headers"])
 
+    @patch("core.remail_client._saved_context_metadata")
+    @patch("core.remail_client.requests.request")
+    def test_fetch_latest_otp_restores_saved_service_token_after_restart(self, request, saved):
+        saved.return_value = {
+            "source": "remail",
+            "email": "fresh@outlook.test",
+            "service_token": "st-saved-token",
+            "order_no": "R-SAVED",
+            "project_id": 2,
+            "email_suffix": "outlook.com",
+        }
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "items": [{
+                "id": 2,
+                "receivedAt": "2026-08-29T05:01:00Z",
+                "subject": "Your verification code",
+                "bodyPreview": "Your code is 654321",
+                "verificationCode": "654321",
+            }],
+        }
+        request.return_value = response
+
+        code = remail_client.fetch_latest_otp(
+            "FRESH@OUTLOOK.TEST",
+            after_ts=remail_client._parse_timestamp("2026-08-29T05:00:30Z"),
+            max_wait=1,
+            poll_interval=1,
+            settle_seconds=0,
+        )
+
+        self.assertEqual(code, "654321")
+        self.assertEqual(
+            request.call_args.args[:2],
+            ("GET", "https://remail.aishop6.com/v1/pickup"),
+        )
+        self.assertEqual(
+            request.call_args.kwargs["params"],
+            {"email": "FRESH@OUTLOOK.TEST", "token": "st-saved-token"},
+        )
+
+    @patch("core.remail_client._saved_context_metadata", return_value={})
+    @patch("core.remail_client.requests.request")
+    def test_restore_context_requires_exact_email_match(self, request, saved):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "items": [
+                {
+                    "orderNo": "R-WRONG",
+                    "deliveryEmail": "other@outlook.test",
+                    "serviceToken": "st-wrong",
+                },
+                {
+                    "orderNo": "R-EXACT",
+                    "deliveryEmail": "FRESH@OUTLOOK.TEST",
+                    "serviceToken": "st-exact",
+                },
+            ],
+        }
+        request.return_value = response
+
+        account = remail_client.restore_account_context("fresh@outlook.test")
+
+        self.assertIsNotNone(account)
+        self.assertEqual(account.email, "FRESH@OUTLOOK.TEST")
+        self.assertEqual(account.service_token, "st-exact")
+        self.assertEqual(request.call_args.kwargs["params"]["search"], "fresh@outlook.test")
+
     def test_pick_account_requires_project_id(self):
         with patch.object(email_config, "REMAIL_API_KEY", "rk-test-key", create=True), patch.object(
             email_config, "REMAIL_PROJECT_ID", 0, create=True

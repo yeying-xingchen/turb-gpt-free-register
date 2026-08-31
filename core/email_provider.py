@@ -146,12 +146,43 @@ def resolve_email_source(email: str) -> str:
     return parse_email_sources()[0]
 
 
+def _normalize_explicit_email_source(value: str | None) -> str | None:
+    """规范化调用方明确指定的邮箱来源。
+
+    已注册账号的 ``email_source`` 是注册时落库的单一来源，查活时应优先使用
+    这个值，而不是重新根据当前进程的临时邮箱上下文或全局 EMAIL_SOURCE 猜测。
+    这里也兼容历史数据里偶尔保存的逗号/分号分隔值，取其中第一个有效来源。
+    """
+    if value is None:
+        return None
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for item in raw.replace(";", ",").replace("|", ",").split(","):
+        source = str(item or "").strip().strip("\"'").lower()
+        if source in _VALID_SOURCES:
+            return source
+    return None
+
+
+def _registered_email_source(email: str) -> str | None:
+    """读取已注册账号落库的邮箱来源。"""
+    try:
+        from core import db
+
+        account = db.get_account_by_email(email)
+    except Exception:
+        return None
+    return _normalize_explicit_email_source((account or {}).get("email_source"))
+
+
 def wait_for_otp(
     email: str,
     after_ts: float,
     max_wait: int | None = None,
     poll_interval: int | None = None,
     settle_seconds: int | None = None,
+    email_source: str | None = None,
 ) -> str:
     """等待并返回该邮箱最新的 ChatGPT OTP（6 位数字字符串）。
 
@@ -184,7 +215,13 @@ def wait_for_otp(
     if settle_seconds is not None:
         extra_kwargs["settle_seconds"] = settle_seconds
 
-    source = resolve_email_source(email)
+    # 查活等已注册账号会传入注册时保存的来源；即使调用方没有显式传入，
+    # 这里也先读取账号落库来源，再按当前进程上下文/邮箱池/全局配置兜底。
+    source = (
+        _normalize_explicit_email_source(email_source)
+        or _registered_email_source(email)
+        or resolve_email_source(email)
+    )
     if source == "gptmail":
         from core.gptmail_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)

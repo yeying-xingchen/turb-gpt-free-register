@@ -282,6 +282,7 @@ def _validate_reauth_with_retry(
     email: str,
     otp_after_ts: float,
     max_otp_attempts: int = 3,
+    email_source: str | None = None,
 ) -> str:
     """提交 reauth OTP；验证码错误时重新发送并重新取码。"""
     current_otp: str | None = None
@@ -290,7 +291,11 @@ def _validate_reauth_with_retry(
         try:
             if current_otp is None:
                 logger.info("[查活] 等待重认证 OTP：%s（第 %s/%s 次）", email, attempt, max_otp_attempts)
-                current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                current_otp = wait_for_otp(
+                    email,
+                    after_ts=otp_after_ts,
+                    email_source=email_source,
+                )
             human_delay("otp_input")
             continue_url = _validate_reauth_otp(session, current_otp)
             if not continue_url:
@@ -327,7 +332,12 @@ def _validate_reauth_with_retry(
     raise last_exc if last_exc else RuntimeError("重认证 OTP 验证失败")
 
 
-def _login_via_reauth(session: BrowserSession, email: str, otp_after_ts: float) -> dict:
+def _login_via_reauth(
+    session: BrowserSession,
+    email: str,
+    otp_after_ts: float,
+    email_source: str | None = None,
+) -> dict:
     """按 2FA 已验证链路重新认证并刷新 ChatGPT session。"""
     auth_url = _trigger_reauth(session, email)
     logger.info("[查活] reauth authorize URL 已获取")
@@ -338,7 +348,12 @@ def _login_via_reauth(session: BrowserSession, email: str, otp_after_ts: float) 
         raise AccountUnusableError(f"账号已废弃（{dead_code}）", error_code=dead_code)
     human_delay("navigate")
     logger.info("[查活] 已跟随 reauth authorize URL，开始等待邮箱 OTP")
-    continue_url = _validate_reauth_with_retry(session, email, otp_after_ts)
+    continue_url = _validate_reauth_with_retry(
+        session,
+        email,
+        otp_after_ts,
+        email_source=email_source,
+    )
     logger.info("[查活] reauth OTP 验证通过，开始交换新 token")
     human_delay("api")
     return _follow_continue_and_fetch(
@@ -348,9 +363,19 @@ def _login_via_reauth(session: BrowserSession, email: str, otp_after_ts: float) 
     )
 
 
-def _login_via_email_otp(session: BrowserSession, email: str, otp_after_ts: float) -> dict:
+def _login_via_email_otp(
+    session: BrowserSession,
+    email: str,
+    otp_after_ts: float,
+    email_source: str | None = None,
+) -> dict:
     """完成邮箱 OTP 登录，并跟随 OAuth callback 后拉取 ChatGPT session。"""
-    validate_result = _validate_with_retry(session, email, otp_after_ts)
+    validate_result = _validate_with_retry(
+        session,
+        email,
+        otp_after_ts,
+        email_source=email_source,
+    )
     page = validate_result.get("page") if isinstance(validate_result, dict) else {}
     page = page if isinstance(page, dict) else {}
     page_type = str(page.get("type") or "")
@@ -363,12 +388,22 @@ def _login_via_email_otp(session: BrowserSession, email: str, otp_after_ts: floa
     return _follow_continue_and_fetch(session, continue_url, referer="https://auth.openai.com/email-verification")
 
 
-def _login_via_password_or_otp(session: BrowserSession, email: str, otp_after_ts: float) -> dict:
+def _login_via_password_or_otp(
+    session: BrowserSession,
+    email: str,
+    otp_after_ts: float,
+    email_source: str | None = None,
+) -> dict:
     """优先密码登录；如进入 MFA challenge 则自动用 TOTP 完成。"""
     password = _account_registration_password(email)
     if not password:
         logger.info("[查活] 未找到注册密码，继续使用邮箱 OTP：%s", email)
-        return _login_via_email_otp(session, email, otp_after_ts)
+        return _login_via_email_otp(
+            session,
+            email,
+            otp_after_ts,
+            email_source=email_source,
+        )
 
     logger.info("[查活] 账号存在密码，优先走密码登录：%s", email)
     password_result = _password_verify(session, password)
@@ -401,7 +436,12 @@ def _login_via_password_or_otp(session: BrowserSession, email: str, otp_after_ts
 
     if "email-verification" in continue_url or page_type in {"email_verification", "email_otp_send"}:
         logger.info("[查活] 密码登录后仍进入邮箱 OTP，继续完成邮箱验证：%s", email)
-        return _login_via_email_otp(session, email, otp_after_ts)
+        return _login_via_email_otp(
+            session,
+            email,
+            otp_after_ts,
+            email_source=email_source,
+        )
 
     if continue_url:
         logger.info("[查活] 密码登录直接给出回调地址，继续完成回调：%s", email)
@@ -421,14 +461,24 @@ def is_checking(email: str) -> bool:
         return key in _RUNNING
 
 
-def _validate_with_retry(session: BrowserSession, email: str, otp_after_ts: float, max_otp_attempts: int = 3) -> dict:
+def _validate_with_retry(
+    session: BrowserSession,
+    email: str,
+    otp_after_ts: float,
+    max_otp_attempts: int = 3,
+    email_source: str | None = None,
+) -> dict:
     current_otp = None
     last_exc: Exception | None = None
     for attempt in range(1, max_otp_attempts + 1):
         try:
             if current_otp is None:
                 logger.info("[查活] 等待登录 OTP：%s（第 %s/%s 次）", email, attempt, max_otp_attempts)
-                current_otp = wait_for_otp(email, after_ts=otp_after_ts)
+                current_otp = wait_for_otp(
+                    email,
+                    after_ts=otp_after_ts,
+                    email_source=email_source,
+                )
             result = validate_email_otp(session, current_otp, sentinel_header=None, so_header=None)
             return result
         except EmailOtpInvalidError as exc:
@@ -457,7 +507,13 @@ def _validate_with_retry(session: BrowserSession, email: str, otp_after_ts: floa
     raise last_exc if last_exc else RuntimeError("OTP 验证失败")
 
 
-def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: bool = True) -> dict:
+def check_account_liveness(
+    email: str,
+    proxy: str | None = None,
+    *,
+    clear_log: bool = True,
+    email_source: str | None = None,
+) -> dict:
     """
     重新登录账号并刷新最新 accessToken。
 
@@ -517,7 +573,12 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
             logger.info("[查活] 指纹摘要：%s", session.fingerprint_summary_text())
             _warm_authenticated_session(session, existing_access_token)
             human_delay("navigate")
-            session_info = _login_via_reauth(session, email, time.time())
+            session_info = _login_via_reauth(
+                session,
+                email,
+                time.time(),
+                email_source=email_source,
+            )
         else:
             # 兼容没有本地 AT 或已开启 TOTP 的记录。providers 不是 signin 的
             # 前置依赖，备用链只执行 CSRF → Signin，避免在 providers 403 时提前终止。
@@ -530,7 +591,12 @@ def check_account_liveness(email: str, proxy: str | None = None, *, clear_log: b
             if dead_code:
                 return {"ok": False, "status": "deactivated", "checked_at": checked_at, "error": dead_code}
 
-            session_info = _login_via_password_or_otp(session, email, otp_after_ts)
+            session_info = _login_via_password_or_otp(
+                session,
+                email,
+                otp_after_ts,
+                email_source=email_source,
+            )
         access_token = str(session_info.get("accessToken") or "")
         if not access_token:
             raise RuntimeError("重新登录后未拿到 accessToken")
