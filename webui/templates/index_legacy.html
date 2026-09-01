@@ -387,6 +387,15 @@
       color: var(--blue); font-size: 12px; font-weight: 700; text-decoration: none;
     }
     .config-external-link:hover { text-decoration: underline; }
+    .config-recommendations {
+      margin-top: 9px; padding: 10px 12px;
+      border: 1px solid #c3d4fb; border-radius: 8px; background: #f4f8ff;
+      font-size: 12px; line-height: 1.55; color: var(--muted);
+    }
+    .config-recommendations-title { color: var(--text); font-weight: 700; }
+    .config-recommendations-item { display: block; margin-top: 4px; }
+    .config-recommendations-item a { color: var(--blue); font-weight: 700; text-decoration: none; }
+    .config-recommendations-item a:hover { text-decoration: underline; }
     .config-count { opacity: .72; font-weight: 700; margin-left: 4px; }
     .roxy-workspace-box {
       grid-column: 1 / -1; border: 1px solid #c3d4fb; background: #eef4ff;
@@ -3061,9 +3070,10 @@ function renderConfigField(f) {
     html += `<input type="${inputType}" data-key="${attrEsc(f.key)}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
   }
   const field = html + `</label>`;
-  return f.external_url
+  const decorated = f.external_url
     ? `<div class="config-field-wrap">${field}${renderConfigExternalLink(f)}</div>`
     : field;
+  return decorated + renderConfigRecommendedLinks(f);
 }
 
 function renderConfigExternalLink(f) {
@@ -3071,6 +3081,18 @@ function renderConfigExternalLink(f) {
   if (!/^https?:\/\//i.test(url)) return '';
   const label = String(f.external_label || '打开官网');
   return `<a class="config-external-link" href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+}
+function renderConfigRecommendedLinks(f) {
+  const links = Array.isArray(f.recommended_links) ? f.recommended_links : [];
+  const items = links.map(item => {
+    const url = String(item?.url || '').trim();
+    if (!/^https?:\/\//i.test(url)) return '';
+    const label = String(item?.label || url);
+    const description = String(item?.description || '').trim();
+    return `<span class="config-recommendations-item"><a href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>${description ? `：${esc(description)}` : ''}</span>`;
+  }).filter(Boolean).join('');
+  if (!items) return '';
+  return `<div class="config-recommendations" role="note"><span class="config-recommendations-title">推荐家宽</span>${items}</div>`;
 }
 
 function configSubhead(title, help = '') {

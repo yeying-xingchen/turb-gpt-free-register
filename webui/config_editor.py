@@ -516,6 +516,18 @@ EDITABLE_FIELDS = [
     {
         "key": "PROXY_POOL", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
         "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理",
+        "recommended_links": [
+            {
+                "label": "IPRocket 家宽",
+                "url": "https://iprocket.io?viteCode=1PVNyLuJ",
+                "description": "高性价比家宽，可通过 TG 联系作者购买流量",
+            },
+            {
+                "label": "Rola-IP 家宽",
+                "url": "https://rola-ip.co/?code=0326C5HA",
+                "description": "Roxy 合作伙伴高质量家宽，注册可享 15% 优惠",
+            },
+        ],
     },
     {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",

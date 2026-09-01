@@ -1832,6 +1832,15 @@
       color: #377DFF; font-size: 12px; font-weight: 500; text-decoration: none;
     }
     .config-external-link:hover { text-decoration: underline; }
+    .config-recommendations {
+      margin-top: 9px; padding: 10px 12px;
+      border: 1px solid #e6f0ff; border-radius: 8px; background: #f7fbff;
+      font-size: 12px; line-height: 1.55; color: #606266;
+    }
+    .config-recommendations-title { color: #303133; font-weight: 600; }
+    .config-recommendations-item { display: block; margin-top: 4px; }
+    .config-recommendations-item a { color: #377DFF; font-weight: 500; text-decoration: none; }
+    .config-recommendations-item a:hover { text-decoration: underline; }
     .config-section-v2-actions {
       margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px;
     }
@@ -5933,6 +5942,18 @@ function renderConfigExternalLink(f) {
   const label = String(f.external_label || '打开官网');
   return `<a class="config-external-link" href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
 }
+function renderConfigRecommendedLinks(f) {
+  const links = Array.isArray(f.recommended_links) ? f.recommended_links : [];
+  const items = links.map(item => {
+    const url = String(item?.url || '').trim();
+    if (!/^https?:\/\//i.test(url)) return '';
+    const label = String(item?.label || url);
+    const description = String(item?.description || '').trim();
+    return `<span class="config-recommendations-item"><a href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>${description ? `：${esc(description)}` : ''}</span>`;
+  }).filter(Boolean).join('');
+  if (!items) return '';
+  return `<div class="config-recommendations" role="note"><span class="config-recommendations-title">推荐家宽</span>${items}</div>`;
+}
 function renderConfigPlainFieldV2(f) {
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   let control = '';
@@ -5955,9 +5976,10 @@ function renderConfigPlainFieldV2(f) {
       ${control}
     </label>
   `;
-  return f.external_url
+  const decorated = f.external_url
     ? `<div class="config-field-wrap">${field}${renderConfigExternalLink(f)}</div>`
     : field;
+  return decorated + renderConfigRecommendedLinks(f);
 }
 function renderMixedConfigSectionV2(name, fields, intro) {
   const slug = configGroupSlug(name);
