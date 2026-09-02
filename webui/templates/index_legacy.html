@@ -2601,7 +2601,7 @@ $('#copyAllLines').addEventListener('click', async () => {
 });
 
 // ---------- 邮箱池 ----------
-function poolKey(r) { return `${r.source || $('#poolSource')?.value || 'outlook'}|${r.email || ''}`; }
+function poolKey(r) { return `${r.source || $('#poolSource')?.value || 'all'}|${r.email || ''}`; }
 function poolLabel(src) {
   return ({outlook:'Outlook', generic_api:'通用API', cloudflare_domain:'域名邮箱'})[src] || src || '-';
 }
@@ -2623,7 +2623,7 @@ function renderOutlook() {
   const rows = OUTLOOK;
   $('#outlookBody').innerHTML = rows.map(r => `
     <tr>
-      <td><input type="checkbox" class="outlook-row-check" data-email="${esc(r.email)}" data-source="${esc(r.source || 'outlook')}" ${OUTLOOK_SELECTED.has(poolKey(r)) ? 'checked' : ''}></td>
+      <td><input type="checkbox" class="outlook-row-check" data-email="${esc(r.email)}" data-source="${esc(r.source || $('#poolSource')?.value || 'all')}" ${OUTLOOK_SELECTED.has(poolKey(r)) ? 'checked' : ''}></td>
       <td><div class="main-cell">${esc(r.email)}</div><div class="sub-cell mono">${esc(short(r.copy_line, 70))}</div></td>
       <td>${esc(poolLabel(r.source))}</td>
       <td>${pill(r.status)}</td>
@@ -2633,15 +2633,15 @@ function renderOutlook() {
       <td class="actions">
         ${cbtn('复制邮箱', r.copy_line)} ${cbtn('复制Token', r.access_token, 'primary')} ${cbtn('复制整行', r.account_copy_line, 'good')}
         ${r.status !== 'available'
-          ? `<button data-pool-act="available" data-email="${esc(r.email)}" data-source="${esc(r.source || 'outlook')}">恢复可用</button>`
+          ? `<button data-pool-act="available" data-email="${esc(r.email)}" data-source="${esc(r.source || $('#poolSource')?.value || 'all')}">恢复可用</button>`
           : ''}
         ${r.status !== 'disabled'
-          ? `<button data-pool-act="disabled" data-email="${esc(r.email)}" data-source="${esc(r.source || 'outlook')}">停用</button>`
+          ? `<button data-pool-act="disabled" data-email="${esc(r.email)}" data-source="${esc(r.source || $('#poolSource')?.value || 'all')}">停用</button>`
           : ''}
         ${r.status !== 'failed'
-          ? `<button data-pool-act="failed" data-email="${esc(r.email)}" data-source="${esc(r.source || 'outlook')}">标失败</button>`
+          ? `<button data-pool-act="failed" data-email="${esc(r.email)}" data-source="${esc(r.source || $('#poolSource')?.value || 'all')}">标失败</button>`
           : ''}
-        <button data-pool-act="delete" data-email="${esc(r.email)}" data-source="${esc(r.source || 'outlook')}" style="border-color:#e7a3a0;color:#b3261e;">删除</button>
+        <button data-pool-act="delete" data-email="${esc(r.email)}" data-source="${esc(r.source || $('#poolSource')?.value || 'all')}" style="border-color:#e7a3a0;color:#b3261e;">删除</button>
       </td>
     </tr>`).join('') || '<tr><td colspan="8" class="muted">邮箱池为空</td></tr>';
   updateOutlookSelectionUi(rows);
@@ -2702,7 +2702,11 @@ $('#outlookBody').addEventListener('click', async (e) => {
   try {
     if (poolAct === 'delete') {
       if (!confirm(`确定从邮箱池删除 ${email}？此操作不可撤销。`)) return;
-      await api('/api/outlook/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, source}) });
+      const r = await api('/api/outlook/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, source}) });
+      if (!r.deleted) {
+        showToast('删除失败：邮箱不存在或来源不匹配');
+        return;
+      }
       OUTLOOK_SELECTED.delete(`${source}|${email}`);
       showToast('已删除');
     } else {

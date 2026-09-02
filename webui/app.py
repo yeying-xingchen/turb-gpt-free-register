@@ -28,12 +28,15 @@ from webui import config_editor
 
 logger = logging.getLogger(__name__)
 
+_POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "cloudflare_domain"))
+
+
 def _pool_source_arg(default: str = "outlook") -> str:
-    src = (request.args.get("source") or "").strip()
+    src = str(request.args.get("source") or "").strip().lower()
     if not src and request.method == "POST":
         data = request.get_json(silent=True) or {}
-        src = (data.get("source") or data.get("type") or "").strip()
-    return src if src in ("all", "outlook", "generic_api", "cloudflare_domain") else default
+        src = str(data.get("source") or data.get("type") or "").strip().lower()
+    return src if src in _POOL_SOURCE_VALUES else default
 
 
 def _with_pool_source(rows: list[dict], source: str) -> list[dict]:
@@ -1574,60 +1577,74 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/outlook/delete")
     def api_outlook_delete():
-        """从邮箱池彻底删除一个邮箱：body {email}。"""
+        """从邮箱池彻底删除一个邮箱：body {email, source?}。"""
         data = request.get_json(silent=True) or {}
-        email = (data.get("email") or "").strip()
+        email = str(data.get("email") or "").strip()
         if not email:
             return jsonify({"ok": False, "error": "email 为空"}), 400
-        source = (data.get("source") or _pool_source_arg()).strip()
-        if source == "all":
-            source = "outlook"
-        deleted = (
-            db.delete_generic_api_email(email)
-            if source == "generic_api"
-            else db.delete_domain_email(email)
-            if source == "cloudflare_domain"
-            else db.delete_outlook(email)
+        raw_source = data.get("source") or data.get("type")
+        source = (
+            _pool_source_arg()
+            if not str(raw_source or "").strip()
+            else str(raw_source).strip().lower()
         )
+        if source not in _POOL_SOURCE_VALUES:
+            return jsonify({"ok": False, "error": "邮箱来源非法"}), 400
+        deleted = db.delete_email_pool(email, source=source)
         return jsonify({"ok": True, "deleted": deleted})
 
     @app.post("/api/outlook/delete-bulk")
     def api_outlook_delete_bulk():
-        """从邮箱池批量彻底删除邮箱：body {emails: [...]}。"""
+        """从邮箱池批量彻底删除邮箱：body {items/emails: [...], source?}。"""
         data = request.get_json(silent=True) or {}
-        source = _pool_source_arg()
+        raw_source = data.get("source") or data.get("type")
+        source = (
+            _pool_source_arg()
+            if not str(raw_source or "").strip()
+            else str(raw_source).strip().lower()
+        )
+        if source not in _POOL_SOURCE_VALUES:
+            return jsonify({"ok": False, "error": "邮箱来源非法"}), 400
         emails = data.get("items") or data.get("emails") or []
         if not isinstance(emails, list) or not emails:
             return jsonify({"ok": False, "error": "emails/items 必须是非空数组"}), 400
         if len(emails) > 5000:
             return jsonify({"ok": False, "error": "单次最多删除 5000 个邮箱"}), 400
 
-        deleted: list[str] = []
+        deleted: list[dict] = []
         skipped: list[dict] = []
         seen: set[str] = set()
         for raw_item in emails:
             if isinstance(raw_item, dict):
-                email = (str(raw_item.get("email") or "")).strip()
-                item_source = (raw_item.get("source") or source or "outlook").strip()
+                email = str(raw_item.get("email") or "").strip()
+                raw_item_source = raw_item.get("source") or raw_item.get("type")
+                item_source = (
+                    source
+                    if not str(raw_item_source or "").strip()
+                    else str(raw_item_source).strip().lower()
+                )
             else:
                 email = (str(raw_item or "")).strip()
                 item_source = source
-            if item_source == "all":
-                item_source = "outlook"
-            key = f"{item_source}:{email.lower()}"
             if not email:
                 skipped.append({"email": raw_item, "reason": "邮箱为空"})
                 continue
+            if item_source not in _POOL_SOURCE_VALUES:
+                skipped.append({"email": email, "source": item_source, "reason": "邮箱来源非法"})
+                continue
+            key = f"{item_source}:{email.casefold()}"
             if key in seen:
                 continue
             seen.add(key)
-            deleted_ok = (
-                db.delete_generic_api_email(email)
-                if item_source == "generic_api"
-                else db.delete_domain_email(email)
-                if item_source == "cloudflare_domain"
-                else db.delete_outlook(email)
-            )
+            try:
+                deleted_ok = db.delete_email_pool(email, source=item_source)
+            except Exception as exc:
+                skipped.append({
+                    "email": email,
+                    "source": item_source,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                })
+                continue
             if deleted_ok:
                 deleted.append({"email": email, "source": item_source})
             else:

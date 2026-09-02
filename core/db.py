@@ -227,6 +227,48 @@ def _ensure_sqlite() -> None:
                           int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
                           str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False))),
                     )
+        # 兼容早期 SQLite 版本的保存逻辑：当时写入 email_pool 时漏掉了
+        # source 列，导致通用 API 邮箱在“全部邮箱池”中没有类型，按来源筛选
+        # 也查不到。根据素材字段只修复可明确识别的历史行，避免误分类域名邮箱。
+        conn.execute(
+            "UPDATE email_pool SET source=? "
+            "WHERE (source IS NULL OR trim(source)='') AND ("
+            "json_extract(payload, '$.code_url') IS NOT NULL OR "
+            "json_extract(payload, '$.url') IS NOT NULL OR "
+            "json_extract(payload, '$.source') IN ('generic_api', 'generic-api') OR "
+            "json_extract(payload, '$.email_source') IN ('generic_api', 'generic-api')"
+            ")",
+            (_EMAIL_SOURCES["generic_api"],),
+        )
+        conn.execute(
+            "UPDATE email_pool SET source=? "
+            "WHERE (source IS NULL OR trim(source)='') AND ("
+            "json_extract(payload, '$.client_id') IS NOT NULL OR "
+            "json_extract(payload, '$.clientId') IS NOT NULL OR "
+            "json_extract(payload, '$.refresh_token') IS NOT NULL OR "
+            "json_extract(payload, '$.refreshToken') IS NOT NULL OR "
+            "json_extract(payload, '$.source') IN ('outlook', 'outlook_pool') OR "
+            "json_extract(payload, '$.email_source') = 'outlook'"
+            ")",
+            (_EMAIL_SOURCES["outlook"],),
+        )
+        # 域名邮箱的历史 payload 没有 client_id/code_url 等特征，剩余的空来源
+        # 记录只能归入域名邮箱池。否则它们会在“全部邮箱池”中显示为未知来源，
+        # 前端又会按 Outlook 处理，导致列表里能看到但删除/改状态找不到。
+        conn.execute(
+            "UPDATE email_pool SET source=? "
+            "WHERE (source IS NULL OR trim(source)='') AND COALESCE(("
+            "json_extract(payload, '$.code_url') IS NOT NULL OR "
+            "json_extract(payload, '$.url') IS NOT NULL OR "
+            "json_extract(payload, '$.source') IN ('generic_api', 'generic-api', 'outlook', 'outlook_pool') OR "
+            "json_extract(payload, '$.email_source') IN ('generic_api', 'generic-api', 'outlook') OR "
+            "json_extract(payload, '$.client_id') IS NOT NULL OR "
+            "json_extract(payload, '$.clientId') IS NOT NULL OR "
+            "json_extract(payload, '$.refresh_token') IS NOT NULL OR "
+            "json_extract(payload, '$.refreshToken') IS NOT NULL"
+            "), 0)=0",
+            (_EMAIL_SOURCES["domain"],),
+        )
         # CPA Codex 凭证首次导入数据库；后续列表查询不再扫描 codex_accounts/ 文件。
         if not migration_done and not conn.execute("SELECT 1 FROM codex_accounts LIMIT 1").fetchone() and _CODEX_DIR.exists():
             state = _read_json(_LEGACY_CODEX_EXPORT_STATE, {})
@@ -302,10 +344,11 @@ def _load_collection(collection: str) -> list[dict]:
 def _save_collection(collection: str, rows: list[dict]) -> None:
     _ensure_sqlite()
     table = _TABLES[collection]
+    source = _EMAIL_SOURCES[collection] if table == "email_pool" else None
     with closing(_sqlite_conn()) as conn:
         with conn:
             if table == "email_pool":
-                conn.execute("DELETE FROM email_pool WHERE source=?", (_EMAIL_SOURCES[collection],))
+                conn.execute("DELETE FROM email_pool WHERE source=?", (source,))
             else:
                 conn.execute(f"DELETE FROM {table}")
             for pos, raw in enumerate(rows, 1):
@@ -315,12 +358,21 @@ def _save_collection(collection: str, rows: list[dict]) -> None:
                 if table == "email_pool" and conn.execute("SELECT 1 FROM email_pool WHERE id=?", (rid,)).fetchone():
                     rid = int(conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM email_pool").fetchone()[0])
                     row["id"] = rid
-                conn.execute(
-                    f"INSERT INTO {table}(id,email,status,archived,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?)",
-                    (rid, str(row.get("email") or ""), str(row.get("status") or ""),
-                     int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
-                     str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False)),
-                )
+                if table == "email_pool":
+                    conn.execute(
+                        "INSERT INTO email_pool(id,email,source,status,archived,created_at,updated_at,payload) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (rid, str(row.get("email") or ""), source, str(row.get("status") or ""),
+                         int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
+                         str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False)),
+                    )
+                else:
+                    conn.execute(
+                        f"INSERT INTO {table}(id,email,status,archived,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?)",
+                        (rid, str(row.get("email") or ""), str(row.get("status") or ""),
+                         int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
+                         str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False)),
+                    )
 
 
 def _query_collection(collection: str, *, status: str | None = None, archived: str | bool | None = None,
@@ -696,6 +748,7 @@ def list_email_pool_page(
     source=all 时按入库时间合并倒序；两种情况都只从 SQLite 取当前页，
     不再先加载全部邮箱再由 WebUI 切片。
     """
+    _ensure_sqlite()
     source = str(source or "outlook").strip().lower()
     if source not in {"all", "outlook", "generic_api", "cloudflare_domain"}:
         source = "outlook"
@@ -738,7 +791,13 @@ def list_email_pool_page(
             [*params, limit, offset],
         ).fetchall()
 
-    source_names = {value: key for key, value in _EMAIL_SOURCES.items()}
+    # ``domain`` 是内部 collection 名，API 对外统一使用 cloudflare_domain；
+    # 直接反转 _EMAIL_SOURCES 会把域名邮箱错误地返回成 source=domain。
+    source_names = {
+        _EMAIL_SOURCES["outlook"]: "outlook",
+        _EMAIL_SOURCES["generic_api"]: "generic_api",
+        _EMAIL_SOURCES["domain"]: "cloudflare_domain",
+    }
     items: list[dict] = []
     for row in rows:
         item = json.loads(row["payload"])
@@ -2123,16 +2182,46 @@ def release_unconsumed_outlook(email: str, note: str | None = None) -> bool:
         return True
 
 
+def delete_email_pool(email: str, source: str = "all") -> bool:
+    """按邮箱及来源从统一邮箱池删除记录。
+
+    ``source=all`` 必须真正查询三个来源，而不能退化成 Outlook；旧版 WebUI
+    在“全部邮箱池”中删除通用 API/域名邮箱时就是因此一直返回未找到。直接
+    删除 SQLite 行也避免了逐条批量删除时反复加载并重写整个邮箱池。
+    """
+    target = str(email or "").strip()
+    source = str(source or "all").strip().lower()
+    if not target:
+        return False
+    if source not in {"all", "outlook", "generic_api", "cloudflare_domain"}:
+        raise ValueError(f"非法邮箱来源: {source}")
+
+    with _LOCK:
+        _ensure_sqlite()
+        with closing(_sqlite_conn()) as conn:
+            if source == "all":
+                cur = conn.execute(
+                    "DELETE FROM email_pool WHERE email = ? COLLATE NOCASE",
+                    (target,),
+                )
+            else:
+                db_source = (
+                    _EMAIL_SOURCES["domain"]
+                    if source == "cloudflare_domain"
+                    else _EMAIL_SOURCES[source]
+                )
+                cur = conn.execute(
+                    "DELETE FROM email_pool "
+                    "WHERE email = ? COLLATE NOCASE AND source = ?",
+                    (target, db_source),
+                )
+            conn.commit()
+            return cur.rowcount > 0
+
+
 def delete_outlook(email: str) -> bool:
     """从邮箱池彻底删除一个邮箱（按 email 匹配）。返回是否删到。"""
-    with _LOCK:
-        rows = _load_outlook()
-        target = (email or "").lower()
-        new_rows = [r for r in rows if (r.get("email") or "").lower() != target]
-        if len(new_rows) == len(rows):
-            return False
-        _save_outlook(new_rows)
-        return True
+    return delete_email_pool(email, source="outlook")
 
 
 def list_outlook_pool(status: str | None = None, limit: int = 500) -> list[dict]:
@@ -2242,14 +2331,7 @@ def release_unconsumed_generic_api_email(email: str, note: str | None = None) ->
 
 def delete_generic_api_email(email: str) -> bool:
     """从通用 API 邮箱池彻底删除一个邮箱。"""
-    with _LOCK:
-        rows = _load_generic_api_emails()
-        target = (email or "").lower()
-        new_rows = [r for r in rows if (r.get("email") or "").lower() != target]
-        if len(new_rows) == len(rows):
-            return False
-        _save_generic_api_emails(new_rows)
-        return True
+    return delete_email_pool(email, source="generic_api")
 
 
 def list_generic_api_email_pool(status: str | None = None, limit: int = 500) -> list[dict]:
@@ -2975,11 +3057,4 @@ def domain_email_pool_summary() -> dict:
 
 def delete_domain_email(email: str) -> bool:
     """从域名邮箱池删除一个邮箱。"""
-    with _LOCK:
-        rows = _load_domain_pool()
-        target = (email or "").lower()
-        new_rows = [r for r in rows if (r.get("email") or "").lower() != target]
-        if len(new_rows) == len(rows):
-            return False
-        _save_domain_pool(new_rows)
-        return True
+    return delete_email_pool(email, source="cloudflare_domain")

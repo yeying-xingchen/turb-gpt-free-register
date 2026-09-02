@@ -4870,7 +4870,7 @@ function getOutlookQuery() {
   const el = document.getElementById('qOutlookV2');
   return (el ? el.value : '').trim();
 }
-function poolKey(r) { return `${r.source || getPoolSource() || 'outlook'}|${r.email || ''}`; }
+function poolKey(r) { return `${r.source || getPoolSource() || 'all'}|${r.email || ''}`; }
 function poolLabel(src) {
   return ({outlook:'Outlook', generic_api:'通用API', cloudflare_domain:'域名邮箱'})[src] || src || '-';
 }
@@ -4914,7 +4914,7 @@ function _outlookTokenCell(r) {
   return `<span class="acc-v2-token-none">无Token</span>`;
 }
 function _outlookMoreMenu(r) {
-  const src = esc(r.source || 'outlook');
+  const src = esc(r.source || getPoolSource() || 'all');
   const email = esc(r.email);
   const items = [
     cbtn('复制Token', r.access_token, 'good'),
@@ -4931,7 +4931,7 @@ function renderOutlook() {
   const bodyV2 = $('#outlookBodyV2');
   if (!bodyV2) return;
   bodyV2.innerHTML = rows.map(r => {
-      const src = esc(r.source || 'outlook');
+      const src = esc(r.source || getPoolSource() || 'all');
       const email = esc(r.email);
       return `
     <tr>
@@ -5031,7 +5031,11 @@ async function onOutlookBodyClick(e) {
   try {
     if (poolAct === 'delete') {
       if (!confirm(`确定从邮箱池删除 ${email}？此操作不可撤销。`)) return;
-      await api('/api/outlook/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, source}) });
+      const r = await api('/api/outlook/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, source}) });
+      if (!r.deleted) {
+        showToast('删除失败：邮箱不存在或来源不匹配');
+        return;
+      }
       OUTLOOK_SELECTED.delete(`${source}|${email}`);
       showToast('已删除');
     } else {
