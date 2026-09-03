@@ -467,6 +467,12 @@ def _account_filter_sql(
             # 与 _account_matches_plan_filter 保持一致：free(可试用)不算已开通 Plus。
             where.extend([f"{plan_expr} LIKE ?", f"{plan_expr} NOT LIKE ?"])
             params.extend(["%plus%", "%free%"])
+        elif plan in {"plus_trial", "plus_trial_eligible", "trial", "trial_eligible"}:
+            # 只有当前套餐为 free 且套餐查询明确返回可试用资格时才命中。
+            trial_expr = "lower(COALESCE(CAST(json_extract(payload, '$.plus_trial_eligible') AS TEXT), ''))"
+            where.append(f"{plan_expr} = ?")
+            where.append(f"{trial_expr} IN (?, ?, ?, ?)")
+            params.extend(["free", "1", "true", "yes", "on"])
         elif plan == "free":
             where.append(f"{plan_expr} = ?")
             params.append("free")
@@ -680,7 +686,7 @@ def _decorate_account(row: dict) -> dict:
 
 
 def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> bool:
-    """账号套餐过滤。plus 表示已开通 Plus（兼容 plus/chatgpt_plus/plus_trial 等标记）。"""
+    """账号套餐过滤。plus 表示已开通 Plus，plus_trial 表示 free 可试用 Plus。"""
     f = str(plan_filter or "").strip().lower()
     if not f or f in {"all", "any"}:
         return True
@@ -689,6 +695,11 @@ def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> b
         # “free(可Plus试用)”/plus_trial_eligible 只是可试用，不算已开通 Plus。
         # 只有套餐字段本身是 Plus/ChatGPT Plus/plus_* 且不含 free 时才命中。
         return "plus" in plan and "free" not in plan
+    if f in {"plus_trial", "plus_trial_eligible", "trial", "trial_eligible"}:
+        trial = row.get("plus_trial_eligible")
+        if isinstance(trial, str):
+            trial = trial.strip().lower() in {"1", "true", "yes", "on"}
+        return plan == "free" and bool(trial)
     if f == "free":
         return plan == "free"
     return plan == f

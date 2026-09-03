@@ -2196,6 +2196,7 @@
           </label>
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通 Plus 的账号">已开通Plus</button>
+          <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且可试用 Plus 的账号">可试用Plus</button>
           <label class="acc-v2-inline" title="按账号状态筛选账号">
             <select id="codexStatusFilterV2">
               <option value="">全部状态</option>
@@ -2243,6 +2244,7 @@
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">批量</span>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSetupSelectedTotpV2" disabled title="给选中的账号批量开启 2FA，并在完成后写回 TOTP 密钥">批量开2FA</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedTokensV2" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
@@ -2541,6 +2543,7 @@ const TOTP_CODE_CACHE = new Map();
 let OUTLOOK_TOTAL = 0;
 let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
+let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
@@ -3208,12 +3211,17 @@ function getCodexBulkWorkers() {
   const el = document.getElementById('codexBulkWorkersV2');
   return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
 }
+function getAccountsPlanFilter() {
+  if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
+  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'plus_trial';
+  return '';
+}
 async function loadAccounts() {
   if (accountsLoading) return;
   accountsLoading = true;
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
-    const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
+    const plan = getAccountsPlanFilter();
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
     const q = getAccountsQuery();
@@ -3234,7 +3242,7 @@ async function pollAccountPlanStatuses() {
   planStatusLoading = true;
   try {
     const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
-    const plan = SHOW_PLUS_ACCOUNTS_ONLY ? 'plus' : '';
+    const plan = getAccountsPlanFilter();
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
     const q = getAccountsQuery();
@@ -3586,7 +3594,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const v2Ids = [
     'btnCheckSelectedPlansV2', 'btnExtractSelectedLinksV2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
-    'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
+    'btnSetupSelectedTotpV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
     'btnDownloadSelectedTxtV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
   ];
   v2Ids.forEach(id => {
@@ -3953,7 +3961,19 @@ async function applyAccountsArchivedFilter(on) {
 }
 async function applyAccountsPlusFilter(on) {
   SHOW_PLUS_ACCOUNTS_ONLY = !!on;
+  if (SHOW_PLUS_ACCOUNTS_ONLY) SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
   setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
+  setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+}
+async function applyAccountsPlusTrialFilter(on) {
+  SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = !!on;
+  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) SHOW_PLUS_ACCOUNTS_ONLY = false;
+  setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
+  setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
   await loadAccounts();
@@ -4004,6 +4024,10 @@ async function refreshAccountsList(btn) {
   const plusV2 = $('#showPlusAccountsOnlyV2');
   if (plusV2) plusV2.addEventListener('click', () => {
     applyAccountsPlusFilter(!SHOW_PLUS_ACCOUNTS_ONLY);
+  });
+  const plusTrialV2 = $('#showPlusTrialAccountsOnlyV2');
+  if (plusTrialV2) plusTrialV2.addEventListener('click', () => {
+    applyAccountsPlusTrialFilter(!SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
   });
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));
@@ -4071,6 +4095,42 @@ async function setupAccountTotp(id, btn) {
     showToast('开启 2FA 失败: ' + err.message);
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+async function setupSelectedTotp() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!confirm(`确定为选中的 ${ids.length} 个账号批量开启 2FA？\n\n任务会在后台排队执行，完成后自动把 TOTP 密钥写回账号信息。\n已经开启、没有 Token 或正在设置中的账号会自动跳过。`)) return;
+
+  const btn = document.getElementById('btnSetupSelectedTotpV2');
+  if (!btn) return;
+  const oldText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '入队中…';
+  try {
+    const r = await api('/api/accounts/totp-setup-bulk', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({account_ids: ids}),
+    });
+    (r.started || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
+    const skippedCount = Number(r.skipped_count ?? (r.skipped || []).length) || 0;
+    const busyCount = Number(r.busy_count ?? (r.busy || []).length) || 0;
+    const failedCount = Number(r.failed_count ?? (r.failed || []).length) || 0;
+    const details = [];
+    if (skippedCount) details.push(`跳过 ${skippedCount} 个`);
+    if (busyCount) details.push(`进行中 ${busyCount} 个`);
+    if (failedCount) details.push(`失败 ${failedCount} 个`);
+    showToast(`已入队 ${r.started_count || 0} 个${details.length ? '，' + details.join('，') : ''}`);
+    planStatusRevision = '';
+    await loadAccounts();
+    await pollAccountPlanStatuses();
+  } catch (err) {
+    showToast('批量开启 2FA 失败: ' + err.message);
+  } finally {
+    btn.textContent = oldText;
+    updateAccountSelectionUi();
   }
 }
 
@@ -4830,6 +4890,7 @@ async function copyCurrentPageLines() {
   bind('btnRetrySelectedCodexV2', retrySelectedCodex);
   bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
+  bind('btnSetupSelectedTotpV2', setupSelectedTotp);
   bind('btnNoteSelectedAccountsV2', noteSelectedAccounts);
   bind('btnCopySelectedLinesV2', copySelectedAccountLines);
   bind('btnCopySelectedTokensV2', copySelectedAccountTokens);
