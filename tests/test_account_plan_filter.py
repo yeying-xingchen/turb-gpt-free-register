@@ -34,8 +34,14 @@ class AccountPlanFilterTests(unittest.TestCase):
                     result = db.list_accounts_page(limit=20, plan_filter=filter_name)
                     self.assertEqual([item["id"] for item in result["items"]], [1])
 
+                free_result = db.list_accounts_page(limit=20, plan_filter="free")
+                self.assertEqual([item["id"] for item in free_result["items"]], [2, 1])
+
                 snapshot = db.list_account_plan_check_statuses(limit=20, plan_filter="plus_trial")
                 self.assertEqual([item["id"] for item in snapshot["items"]], [1])
+
+                free_snapshot = db.list_account_plan_check_statuses(limit=20, plan_filter="free")
+                self.assertEqual([item["id"] for item in free_snapshot["items"]], [2, 1])
 
 
 if __name__ == "__main__":
