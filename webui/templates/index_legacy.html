@@ -518,8 +518,8 @@
             <label class="inline-num" title="只查询/显示当前为 free 且可试用 Plus 的账号">
               <input id="showPlusTrialAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 可试用Plus
             </label>
-            <label class="inline-num" title="只查询/显示当前套餐为 free 的账号，包括可试用 Plus 的 free 账号">
-              <input id="showFreeAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> free账号
+            <label class="inline-num" title="只查询/显示已明确不能试用 Plus 的 free 账号；资格未知的账号不包含">
+              <input id="showFreeAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> free不可试用Plus
             </label>
             <label class="inline-num" title="按账号状态筛选账号">
               状态
@@ -1260,7 +1260,7 @@ function getAccountsTotpFilter() {
 function getAccountsPlanFilter() {
   if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
   if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'plus_trial';
-  if (SHOW_FREE_ACCOUNTS_ONLY) return 'free';
+  if (SHOW_FREE_ACCOUNTS_ONLY) return 'free_no_trial';
   return '';
 }
 async function loadAccounts() {

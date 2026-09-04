@@ -9,7 +9,7 @@ from core import db
 
 
 class AccountPlanFilterTests(unittest.TestCase):
-    def test_plus_trial_filter_uses_sql_and_only_returns_eligible_free_accounts(self):
+    def test_plus_trial_and_no_trial_filters_use_sql(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             accounts_path = root / "accounts.json"
@@ -18,6 +18,7 @@ class AccountPlanFilterTests(unittest.TestCase):
                 {"id": 2, "email": "not-eligible@example.com", "current_plan_type": "free", "plus_trial_eligible": False},
                 {"id": 3, "email": "paid@example.com", "current_plan_type": "plus", "plus_trial_eligible": True},
                 {"id": 4, "email": "missing-plan@example.com", "plus_trial_eligible": True},
+                {"id": 5, "email": "unknown-eligibility@example.com", "current_plan_type": "free"},
             ], ensure_ascii=False), encoding="utf-8")
 
             missing = root / "missing.json"
@@ -35,13 +36,19 @@ class AccountPlanFilterTests(unittest.TestCase):
                     self.assertEqual([item["id"] for item in result["items"]], [1])
 
                 free_result = db.list_accounts_page(limit=20, plan_filter="free")
-                self.assertEqual([item["id"] for item in free_result["items"]], [2, 1])
+                self.assertEqual([item["id"] for item in free_result["items"]], [5, 2, 1])
+
+                no_trial_result = db.list_accounts_page(limit=20, plan_filter="free_no_trial")
+                self.assertEqual([item["id"] for item in no_trial_result["items"]], [2])
 
                 snapshot = db.list_account_plan_check_statuses(limit=20, plan_filter="plus_trial")
                 self.assertEqual([item["id"] for item in snapshot["items"]], [1])
 
                 free_snapshot = db.list_account_plan_check_statuses(limit=20, plan_filter="free")
-                self.assertEqual([item["id"] for item in free_snapshot["items"]], [2, 1])
+                self.assertEqual([item["id"] for item in free_snapshot["items"]], [5, 2, 1])
+
+                no_trial_snapshot = db.list_account_plan_check_statuses(limit=20, plan_filter="free_no_trial")
+                self.assertEqual([item["id"] for item in no_trial_snapshot["items"]], [2])
 
 
 if __name__ == "__main__":
