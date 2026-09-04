@@ -1644,6 +1644,13 @@
       outline: none; border-color: #377DFF;
       box-shadow: 0 0 0 3px rgba(55,125,255,.12);
     }
+    .outlook-import-body input[type="text"],
+    .outlook-import-body input[type="number"],
+    .outlook-import-body select {
+      width: 100%; height: 40px; margin: 0; padding: 0 12px;
+      border: 1px solid #dcdfe6; border-radius: 8px; background: #fff;
+      color: #606266; font: inherit; font-size: 13px; box-sizing: border-box;
+    }
     .outlook-import-result:empty { display: none; }
     .outlook-import-foot {
       display: flex; justify-content: flex-end; gap: 10px;
@@ -2398,6 +2405,7 @@
             <button type="button" class="outlook-v2-select-item is-active" data-value="all" role="option">全部邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="outlook" role="option">Outlook 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">通用 API 邮箱池</button>
+            <button type="button" class="outlook-v2-select-item" data-value="imap" role="option">通用 IMAP 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="cloudflare_domain" role="option">域名邮箱池</button>
           </div>
           <input type="hidden" id="poolSourceV2" value="all">
@@ -2490,7 +2498,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="outlookImportTitle">导入邮箱素材</h3>
-        <p>Outlook：邮箱----密码----clientId----refreshToken；通用 API：邮箱----取码地址（---- 或 ==== 均可）。勾选下方选项后按「已注册成功账号」导入，方便在账号页补跑 Codex。</p>
+        <p>Outlook：邮箱----密码----clientId----refreshToken；通用 API：邮箱----取码地址；通用 IMAP 邮箱每行仅需“邮箱----IMAP密码”或“邮箱:IMAP密码”，服务器参数在下方统一配置。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseOutlookImport" aria-label="关闭">×</button>
     </div>
@@ -2503,11 +2511,26 @@
           <div class="outlook-v2-select-menu" role="listbox">
             <button type="button" class="outlook-v2-select-item is-active" data-value="outlook" role="option">Outlook 邮箱池</button>
             <button type="button" class="outlook-v2-select-item" data-value="generic_api" role="option">通用 API 取码邮箱</button>
+            <button type="button" class="outlook-v2-select-item" data-value="imap" role="option">通用 IMAP 取码邮箱</button>
           </div>
           <input type="hidden" id="importSourceV2" value="outlook">
         </div>
-        <span class="outlook-import-hint">注册来源可在配置里填多个，例如：outlook,generic_api</span>
+        <span class="outlook-import-hint">注册来源可在配置里填多个，例如：outlook,generic_api,imap</span>
       </label>
+      <div id="imapImportSettingsV2" class="hidden" style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+        <label class="outlook-import-field">
+          <span>IMAP 服务器</span>
+          <input id="imapServerV2" type="text" placeholder="imap.example.com" autocomplete="off">
+        </label>
+        <label class="outlook-import-field">
+          <span>端口</span>
+          <input id="imapPortV2" type="number" min="1" max="65535" value="993">
+        </label>
+        <label class="outlook-import-field">
+          <span>SSL</span>
+          <select id="imapSslV2"><option value="true" selected>启用</option><option value="false">不启用</option></select>
+        </label>
+      </div>
       <label class="outlook-import-check">
         <input id="importAsRegisteredV2" type="checkbox">
         <span>导入后默认视为「注册成功账号」（邮箱池标记已用，并出现在账号页，可直接批量补跑 Codex）</span>
@@ -4940,6 +4963,7 @@ const POOL_SOURCE_LABELS = {
   all: '全部邮箱池',
   outlook: 'Outlook 邮箱池',
   generic_api: '通用 API 邮箱池',
+  imap: '通用 IMAP 邮箱池',
   cloudflare_domain: '域名邮箱池',
 };
 function setPoolSourceV2(val) {
@@ -4962,7 +4986,7 @@ function getOutlookQuery() {
 }
 function poolKey(r) { return `${r.source || getPoolSource() || 'all'}|${r.email || ''}`; }
 function poolLabel(src) {
-  return ({outlook:'Outlook', generic_api:'通用API', cloudflare_domain:'域名邮箱'})[src] || src || '-';
+  return ({outlook:'Outlook', generic_api:'通用API', imap:'通用IMAP', cloudflare_domain:'域名邮箱'})[src] || src || '-';
 }
 async function loadOutlook() {
   try {
@@ -5078,7 +5102,7 @@ function onPoolSourceChange(el) {
   PAGERS.outlook.page = 1;
   OUTLOOK_SELECTED.clear();
   const val = el ? el.value : getPoolSource();
-  if (val === 'outlook' || val === 'generic_api') setImportSourceV2(val);
+  if (val === 'outlook' || val === 'generic_api' || val === 'imap') setImportSourceV2(val);
   loadOutlook();
 }
 function syncOutlookSelectAll(checked) {
@@ -5193,6 +5217,7 @@ async function onOutlookBodyClick(e) {
 const IMPORT_SOURCE_LABELS = {
   outlook: 'Outlook 邮箱池',
   generic_api: '通用 API 取码邮箱',
+  imap: '通用 IMAP 取码邮箱',
 };
 function setImportSourceV2(val) {
   const hidden = document.getElementById('importSourceV2');
@@ -5207,6 +5232,17 @@ function setImportSourceV2(val) {
       item.classList.toggle('is-active', item.dataset.value === next);
     });
   }
+  const imapSettings = document.getElementById('imapImportSettingsV2');
+  if (imapSettings) {
+    imapSettings.classList.toggle('hidden', next !== 'imap');
+    imapSettings.style.display = next === 'imap' ? 'grid' : 'none';
+  }
+  const text = document.getElementById('importTextV2');
+  if (text) text.placeholder = next === 'imap'
+    ? 'user@example.com----imapPassword\nuser2@example.com:imapPassword'
+    : next === 'generic_api'
+      ? 'email----取码地址'
+      : 'email----password----clientId----refreshToken';
 }
 function openOutlookImportModal() {
   const modal = $('#outlookImportModal');
@@ -5214,7 +5250,7 @@ function openOutlookImportModal() {
   const result = $('#importResultV2');
   if (result) result.innerHTML = '';
   const pool = getPoolSource();
-  if (pool === 'outlook' || pool === 'generic_api') setImportSourceV2(pool);
+  if (pool === 'outlook' || pool === 'generic_api' || pool === 'imap') setImportSourceV2(pool);
   else setImportSourceV2('outlook');
   modal.classList.remove('hidden');
   updateModalScrollLock();
@@ -5281,7 +5317,14 @@ async function doImportOutlook() {
   try {
     const source = sourceEl ? sourceEl.value : 'outlook';
     const as_registered = registeredEl ? !!registeredEl.checked : false;
-    const r = await api('/api/outlook/import', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text, source, as_registered}) });
+    const payload = {text, source, as_registered};
+    if (source === 'imap') {
+      payload.imap_server = ($('#imapServerV2')?.value || '').trim();
+      payload.imap_port = Number($('#imapPortV2')?.value || 993);
+      payload.imap_ssl = ($('#imapSslV2')?.value || 'true') === 'true';
+      if (!payload.imap_server) { showToast('请填写 IMAP 服务器'); return; }
+    }
+    const r = await api('/api/outlook/import', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
     const mode = r.as_registered ? '已注册账号' : '邮箱池素材';
     const msg = `按 ${mode} 导入：解析 ${r.parsed} 行，新增 ${r.inserted}，跳过 ${r.skipped}${r.as_registered ? '；可到“账号”页选择后批量补跑 Codex' : ''}`;
     if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>`;
@@ -5757,6 +5800,7 @@ function emailConfigSectionForKey(key) {
   if (key.startsWith('CLOUDMAIL_')) return ['CloudMail', 'CloudMail 域名随机邮箱、Token 和收信 API 配置'];
   if (key.startsWith('REMAIL_')) return ['Remail', 'Remail 开放 API、项目下单和取件配置'];
   if (key.startsWith('OUTLOOK_')) return ['Outlook 邮箱池', 'Outlook 邮箱池和取件模式配置'];
+  if (key.startsWith('IMAP_')) return ['通用 IMAP', '通用 IMAP 邮箱池的收件目录配置'];
   if (key.startsWith('CLOUDFLARE_')) return ['Cloudflare 临时邮箱', 'Cloudflare Worker 临时邮箱 API、鉴权与路径配置'];
   if (['EMAIL_DOMAIN','QQ_EMAIL','QQ_IMAP_PASSWORD'].includes(key)) return ['Cloudflare 域名邮箱', 'Cloudflare 转发到 QQ 邮箱后的 IMAP 收信配置'];
   return ['其他邮箱配置', ''];

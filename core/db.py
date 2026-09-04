@@ -43,11 +43,12 @@ _TABLES = {
     "accounts": "accounts",
     "outlook": "email_pool",
     "generic_api": "email_pool",
+    "imap": "email_pool",
     "jobs": "registration_jobs",
     "domain": "email_pool",
     "codex": "codex_accounts",
 }
-_EMAIL_SOURCES = {"outlook": "outlook", "generic_api": "generic_api", "domain": "cloudflare_domain"}
+_EMAIL_SOURCES = {"outlook": "outlook", "generic_api": "generic_api", "imap": "imap", "domain": "cloudflare_domain"}
 _LEGACY_TABLES = {"outlook": "outlook_pool", "generic_api": "generic_api_pool", "domain": "domain_email_pool"}
 
 _LEGACY_SQLITE = _LEGACY_DATA_DIR / "registrations.db"
@@ -563,6 +564,13 @@ def _generic_api_email_line(row: dict) -> str:
     ])
 
 
+def _imap_email_line(row: dict) -> str:
+    return "----".join([
+        row.get("email") or "",
+        row.get("imap_password") or row.get("password") or "",
+    ])
+
+
 def _extract_registration_password(row: dict) -> str:
     extra_raw = row.get("extra_json")
     if isinstance(extra_raw, str) and extra_raw.strip():
@@ -644,6 +652,16 @@ def _save_generic_api_emails(rows: list[dict]) -> None:
     for row in rows:
         row["copy_line"] = _generic_api_email_line(row)
     _save_collection("generic_api", rows)
+
+
+def _load_imap_emails() -> list[dict]:
+    return _load_collection("imap")
+
+
+def _save_imap_emails(rows: list[dict]) -> None:
+    for row in rows:
+        row["copy_line"] = _imap_email_line(row)
+    _save_collection("imap", rows)
 
 
 def _load_accounts() -> list[dict]:
@@ -759,6 +777,19 @@ def _decorate_generic_api_email(row: dict, account_by_email: dict[str, dict] | N
     return out
 
 
+def _decorate_imap_email(row: dict, account_by_email: dict[str, dict] | None = None) -> dict:
+    out = dict(row)
+    out["copy_line"] = _imap_email_line(out)
+    account = account_by_email.get((out.get("email") or "").lower()) if account_by_email else None
+    if account:
+        out["registered_account_id"] = account.get("id")
+        out["access_token"] = account.get("access_token")
+        out["access_token_preview"] = ((account.get("access_token") or "")[:40] + "...") if account.get("access_token") else ""
+        out["account_copy_line"] = _account_line(account)
+        out["totp_secret"] = account.get("totp_secret")
+    return out
+
+
 def list_email_pool_page(
     source: str = "all",
     status: str | None = None,
@@ -774,7 +805,7 @@ def list_email_pool_page(
     """
     _ensure_sqlite()
     source = str(source or "outlook").strip().lower()
-    if source not in {"all", "outlook", "generic_api", "cloudflare_domain"}:
+    if source not in {"all", "outlook", "generic_api", "imap", "cloudflare_domain"}:
         source = "outlook"
     collection = "domain" if source == "cloudflare_domain" else source
     db_source = None if source == "all" else _EMAIL_SOURCES[collection]
@@ -820,6 +851,7 @@ def list_email_pool_page(
     source_names = {
         _EMAIL_SOURCES["outlook"]: "outlook",
         _EMAIL_SOURCES["generic_api"]: "generic_api",
+        _EMAIL_SOURCES["imap"]: "imap",
         _EMAIL_SOURCES["domain"]: "cloudflare_domain",
     }
     items: list[dict] = []
@@ -837,6 +869,8 @@ def list_email_pool_page(
             item = _decorate_outlook(item, {str(item.get("email") or "").lower(): account} if account else {})
         elif item_source == "generic_api":
             item = _decorate_generic_api_email(item, {str(item.get("email") or "").lower(): account} if account else {})
+        elif item_source == "imap":
+            item = _decorate_imap_email(item, {str(item.get("email") or "").lower(): account} if account else {})
         else:
             item = dict(item)
         item["source"] = item_source
@@ -2034,17 +2068,19 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
     source:
       - outlook: records 元素 {email,password,client_id,refresh_token[,access_token,totp_secret]}
       - generic_api: records 元素 {email,code_url[,access_token,totp_secret]}
+      - imap: records 元素 {email,imap_password,imap_server,imap_port,imap_ssl}
 
     返回 (新增账号数, 跳过数)。已存在账号会跳过；邮箱池中已存在的素材会复用并标记 used。
     """
     source = (source or "").strip().lower()
-    if source not in ("outlook", "generic_api"):
-        raise ValueError("source 必须显式传入 outlook / generic_api")
+    if source not in ("outlook", "generic_api", "imap"):
+        raise ValueError("source 必须显式传入 outlook / generic_api / imap")
 
     with _LOCK:
         accounts = _load_accounts()
         outlook_rows = _load_outlook()
         generic_rows = _load_generic_api_emails()
+        imap_rows = _load_imap_emails()
         inserted = skipped = 0
 
         for raw in records:
@@ -2060,7 +2096,38 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
             original_line = email
             pool_row = None
 
-            if source == "generic_api":
+            if source == "imap":
+                password = str(raw.get("imap_password") or raw.get("password") or "").strip()
+                server = str(raw.get("imap_server") or raw.get("server") or "").strip()
+                try:
+                    port = int(raw.get("imap_port") or raw.get("port") or 993)
+                except (TypeError, ValueError):
+                    port = 0
+                if not password or not server or not (1 <= port <= 65535):
+                    skipped += 1
+                    continue
+                ssl_raw = raw.get("imap_ssl", raw.get("use_ssl", True))
+                use_ssl = ssl_raw if isinstance(ssl_raw, bool) else str(ssl_raw).strip().lower() not in {"0", "false", "no", "off"}
+                pool_row = _find_by_email(imap_rows, email)
+                values = {
+                    "imap_password": password, "imap_server": server, "imap_port": port,
+                    "imap_username": str(raw.get("imap_username") or raw.get("username") or "").strip(),
+                    "imap_ssl": bool(use_ssl),
+                }
+                if pool_row is None:
+                    pool_row = {"id": _next_id(imap_rows), "email": email, **values,
+                                "status": "used", "used_at": now,
+                                "note": "导入为已注册账号，用于 Codex 授权", "imported_at": now}
+                    imap_rows.append(pool_row)
+                else:
+                    pool_row.update(values)
+                pool_row["status"] = "used"
+                pool_row["used_at"] = pool_row.get("used_at") or now
+                pool_row["completed_at"] = pool_row.get("completed_at") or now
+                pool_row["note"] = pool_row.get("note") or "导入为已注册账号，用于 Codex 授权"
+                pool_row["copy_line"] = _imap_email_line(pool_row)
+                original_line = _imap_email_line(pool_row)
+            elif source == "generic_api":
                 code_url = (raw.get("code_url") or raw.get("url") or "").strip()
                 if not code_url:
                     skipped += 1
@@ -2154,6 +2221,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
 
         _save_outlook(outlook_rows)
         _save_generic_api_emails(generic_rows)
+        _save_imap_emails(imap_rows)
         _save_accounts(accounts)
         return inserted, skipped
 
@@ -2217,7 +2285,7 @@ def delete_email_pool(email: str, source: str = "all") -> bool:
     source = str(source or "all").strip().lower()
     if not target:
         return False
-    if source not in {"all", "outlook", "generic_api", "cloudflare_domain"}:
+    if source not in {"all", "outlook", "generic_api", "imap", "cloudflare_domain"}:
         raise ValueError(f"非法邮箱来源: {source}")
 
     with _LOCK:
@@ -2373,6 +2441,103 @@ def get_generic_api_email_by_email(email: str) -> dict | None:
     with _LOCK:
         row = _find_by_email(_load_generic_api_emails(), email)
         return _decorate_generic_api_email(row) if row else None
+
+
+# ============================================================
+# Generic IMAP email pool
+# ============================================================
+
+def import_imap_emails(records: list[dict]) -> tuple[int, int]:
+    """导入 IMAP 邮箱。用户名留空时客户端使用邮箱地址登录。"""
+    with _LOCK:
+        rows = _load_imap_emails()
+        inserted = skipped = 0
+        for raw in records:
+            email = str(raw.get("email") or "").strip()
+            password = str(raw.get("imap_password") or raw.get("password") or "").strip()
+            server = str(raw.get("imap_server") or raw.get("server") or "").strip()
+            try:
+                port = int(raw.get("imap_port") or raw.get("port") or 993)
+            except (TypeError, ValueError):
+                port = 0
+            if not email or not password or not server or not (1 <= port <= 65535) or _find_by_email(rows, email):
+                skipped += 1
+                continue
+            ssl_raw = raw.get("imap_ssl", raw.get("use_ssl", True))
+            use_ssl = ssl_raw if isinstance(ssl_raw, bool) else str(ssl_raw).strip().lower() not in {"0", "false", "no", "off"}
+            row = {
+                "id": _next_id(rows), "email": email,
+                "imap_password": password, "imap_server": server, "imap_port": port,
+                "imap_username": str(raw.get("imap_username") or raw.get("username") or "").strip(),
+                "imap_ssl": bool(use_ssl), "status": "available", "used_at": None,
+                "note": None, "imported_at": _now(),
+            }
+            row["copy_line"] = _imap_email_line(row)
+            rows.append(row)
+            inserted += 1
+        _save_imap_emails(rows)
+        return inserted, skipped
+
+
+def claim_next_imap_email() -> dict | None:
+    with _LOCK:
+        rows = sorted(_load_imap_emails(), key=lambda x: int(x.get("id") or 0))
+        row = next((r for r in rows if r.get("status") == "available"), None)
+        if row is None:
+            return None
+        row["status"], row["used_at"], row["note"] = "used", _now(), None
+        _save_imap_emails(rows)
+        return _decorate_imap_email(row)
+
+
+def release_imap_email(email: str, status: str = "available", note: str | None = None) -> None:
+    with _LOCK:
+        rows = _load_imap_emails()
+        row = _find_by_email(rows, email)
+        if row is None:
+            return
+        row["status"] = status
+        if status == "available":
+            row["used_at"] = None
+        elif status in ("used", "failed", "disabled"):
+            row["used_at"] = row.get("used_at") or _now()
+        if note is not None:
+            row["note"] = note
+        _save_imap_emails(rows)
+
+
+def release_unconsumed_imap_email(email: str, note: str | None = None) -> bool:
+    with _LOCK:
+        if _find_by_email(_load_accounts(), email) is not None:
+            return False
+        rows = _load_imap_emails()
+        row = _find_by_email(rows, email)
+        if row is None or row.get("status") != "used":
+            return False
+        row["status"], row["used_at"] = "available", None
+        if note is not None:
+            row["note"] = note
+        _save_imap_emails(rows)
+        return True
+
+
+def delete_imap_email(email: str) -> bool:
+    return delete_email_pool(email, source="imap")
+
+
+def list_imap_email_pool(status: str | None = None, limit: int = 500) -> list[dict]:
+    return list_email_pool_page(source="imap", status=status, limit=limit, offset=0)["items"]
+
+
+def imap_email_pool_summary() -> dict:
+    with _LOCK:
+        return _pool_summary_sql("imap")
+
+
+def get_imap_email_by_email(email: str) -> dict | None:
+    with _LOCK:
+        row = _find_by_email(_load_imap_emails(), email)
+        return _decorate_imap_email(row) if row else None
 
 
 # ============================================================

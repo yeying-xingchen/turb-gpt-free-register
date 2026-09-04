@@ -28,7 +28,7 @@ from webui import config_editor
 
 logger = logging.getLogger(__name__)
 
-_POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "cloudflare_domain"))
+_POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "imap", "cloudflare_domain"))
 
 
 def _pool_source_arg(default: str = "outlook") -> str:
@@ -357,6 +357,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                 continue
             one = (
                 db.generic_api_email_pool_summary() if src == "generic_api"
+                else db.imap_email_pool_summary() if src == "imap"
                 else db.domain_email_pool_summary() if src == "cloudflare_domain"
                 else db.outlook_pool_summary()
             )
@@ -1547,20 +1548,40 @@ def create_app(auth_code: str | None = None) -> Flask:
         粘贴文本导入邮箱素材。
         Outlook：email----password----clientId----refreshToken
         通用 API：email----code_url
+        通用 IMAP：email----password 或 email:password；服务器/端口/SSL 单独传入
         分隔符兼容 ---- 与 ====。
         """
         data = request.get_json(silent=True) or {}
         source = (data.get("source") or data.get("type") or "").strip()
-        if source not in ("outlook", "generic_api"):
-            return jsonify({"ok": False, "error": "导入时请选择具体类型：Outlook 或 通用 API"}), 400
+        if source not in ("outlook", "generic_api", "imap"):
+            return jsonify({"ok": False, "error": "导入时请选择具体类型：Outlook、通用 API 或通用 IMAP"}), 400
         text = data.get("text") or ""
         as_registered = bool(data.get("as_registered", False))
+        imap_server = str(data.get("imap_server") or "").strip()
+        try:
+            imap_port = int(data.get("imap_port") or 993)
+        except (TypeError, ValueError):
+            imap_port = 0
+        imap_ssl_raw = data.get("imap_ssl", True)
+        imap_ssl = imap_ssl_raw if isinstance(imap_ssl_raw, bool) else str(imap_ssl_raw).strip().lower() not in {"0", "false", "no", "off"}
+        if source == "imap" and (not imap_server or not (1 <= imap_port <= 65535)):
+            return jsonify({"ok": False, "error": "通用 IMAP 导入必须填写有效的服务器和端口"}), 400
         records = []
         for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            parts = line.split("----") if "----" in line else line.split("====")
+            if source == "imap":
+                if "----" in line:
+                    parts = line.split("----", 1)
+                elif "====" in line:
+                    parts = line.split("====", 1)
+                elif ":" in line:
+                    parts = line.split(":", 1)
+                else:
+                    continue
+            else:
+                parts = line.split("----") if "----" in line else line.split("====")
             parts = [p.strip() for p in parts]
             if source == "generic_api":
                 if len(parts) < 2:
@@ -1570,6 +1591,15 @@ def create_app(auth_code: str | None = None) -> Flask:
                     "code_url": parts[1],
                     "access_token": parts[2] if len(parts) > 2 else "",
                     "totp_secret": parts[3] if len(parts) > 3 else "",
+                })
+                continue
+            if source == "imap":
+                if len(parts) < 2 or not parts[0] or not parts[1]:
+                    continue
+                records.append({
+                    "email": parts[0], "imap_password": parts[1],
+                    "imap_server": imap_server, "imap_port": imap_port,
+                    "imap_ssl": imap_ssl, "imap_username": "",
                 })
                 continue
             if len(parts) < 4:
@@ -1583,12 +1613,16 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "totp_secret": parts[5] if len(parts) > 5 else "",
             })
         if not records:
-            need = "2 段：邮箱----取码地址" if source == "generic_api" else "4 段：email----password----clientId----refreshToken"
+            need = ("2 段：邮箱----取码地址" if source == "generic_api" else
+                    "邮箱----IMAP密码 或 邮箱:IMAP密码" if source == "imap" else
+                    "4 段：email----password----clientId----refreshToken")
             return jsonify({"ok": False, "error": f"未解析到有效邮箱行（需 {need}，---- 或 ==== 分隔）"}), 400
         if as_registered:
             inserted, skipped = db.import_registered_email_accounts(records, source=source)
         elif source == "generic_api":
             inserted, skipped = db.import_generic_api_emails(records)
+        elif source == "imap":
+            inserted, skipped = db.import_imap_emails(records)
         else:
             inserted, skipped = db.import_outlook_accounts(records)
         return jsonify({
@@ -1612,6 +1646,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             source = "outlook"
         if source == "generic_api":
             db.release_generic_api_email(email, status=status, note=data.get("note"))
+        elif source == "imap":
+            db.release_imap_email(email, status=status, note=data.get("note"))
         elif source == "cloudflare_domain":
             db.release_domain_email(email, status=status, note=data.get("note"))
         else:
@@ -1655,6 +1691,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             try:
                 if item_source == "generic_api":
                     db.release_generic_api_email(email, status=status, note=note)
+                elif item_source == "imap":
+                    db.release_imap_email(email, status=status, note=note)
                 elif item_source == "cloudflare_domain":
                     db.release_domain_email(email, status=status, note=note)
                 else:
@@ -2522,12 +2560,19 @@ def create_app(auth_code: str | None = None) -> Flask:
             warning = ""
             if pool.get("available", 0) < count:
                 warning = f"通用 API 邮箱池仅 {pool.get('available', 0)} 个可用，少于任务数 {count}，不足的会失败"
+        elif sources == ["imap"]:
+            pool = db.imap_email_pool_summary()
+            warning = ""
+            if pool.get("available", 0) < count:
+                warning = f"通用 IMAP 邮箱池仅 {pool.get('available', 0)} 个可用，少于任务数 {count}，不足的会失败"
         elif len(sources) > 1:
             available = 0
             if "outlook" in sources:
                 available += db.outlook_pool_summary().get("available", 0)
             if "generic_api" in sources:
                 available += db.generic_api_email_pool_summary().get("available", 0)
+            if "imap" in sources:
+                available += db.imap_email_pool_summary().get("available", 0)
             warning = ""
             if available < count:
                 warning = f"多个邮箱池合计仅 {available} 个可用，少于任务数 {count}，不足的会失败"
