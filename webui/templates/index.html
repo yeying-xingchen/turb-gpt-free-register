@@ -3538,6 +3538,7 @@ function _tokenCellV2(r) {
 function _accountsV2MoreMenu(r) {
   const parts = [
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
+    `<button type="button" data-account-copy-secret="login_credentials" data-account-id="${esc(r.id)}" title="复制邮箱、注册密码和 2FA 密钥">复制登录凭据</button>`,
     `<button type="button" data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button>`,
     `<button type="button" onclick="checkSelectedLive([Number('${esc(r.id)}')], this); return false;" title="重新登录该账号，成功则刷新最新 AT/accessToken">查活刷新AT</button>`,
     `<button type="button" data-account-live-log="${esc(r.email)}" title="查看该账号最近一次查活日志">查活日志</button>`,
@@ -3772,6 +3773,7 @@ async function onAccountsBodyClick(e) {
       showToast(
         field === 'access_token' ? 'Token 已复制' :
         field === 'codex_agent_token' ? 'Agent Token 已复制' :
+        field === 'login_credentials' ? '邮箱、注册密码和 2FA 密钥已复制' :
         field === 'totp_secret' ? '2FA 密钥已复制' :
         field === 'totp_code' ? `验证码已复制：${value}` :
         '账号整行已复制'
