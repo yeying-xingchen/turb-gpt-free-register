@@ -20,20 +20,21 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-def _latest_chrome_major(default: str = "149") -> str:
-    """兼容旧模块导入；默认按 2026-07-19 抓包里的 Chrome 149 画像。"""
+def _latest_chrome_major(default: str = "146") -> str:
+    """兼容旧模块导入；必须与 curl_cffi 实际 TLS impersonate 版本一致。"""
     return default
 
 
-CHROME_MAJOR = "149"
-CHROME_FULL_VERSION = "149.0.0.0"
+CHROME_MAJOR = "146"
+CHROME_FULL_VERSION = "146.0.0.0"
 
 SAFARI_VERSION = ""
 SAFARI_WEBKIT_VERSION = "537.36"
 MAC_OS_UA_VERSION = "10_15_7"
 
 # ---------- curl_cffi 模拟浏览器 ----------
-# curl_cffi 0.15 当前最高内置到 chrome146；HTTP/JS 画像按抓包补齐到 Chrome/149。
+# curl_cffi 0.15 当前最高内置到 chrome146。UA、Client Hints、JS navigator
+# 必须同步为 146；不能出现 TLS=146、HTTP/JS=149 的跨版本拼接指纹。
 IMPERSONATE = "chrome146"
 
 # ---------- 桌面 Chrome 画像 ----------
@@ -49,8 +50,8 @@ USER_AGENT = (
     f"Chrome/{CHROME_FULL_VERSION} Safari/{SAFARI_WEBKIT_VERSION}"
 )
 
-SEC_CH_UA = '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"'
-SEC_CH_UA_FULL_VERSION_LIST = '"Google Chrome";v="149.0.0.0", "Chromium";v="149.0.0.0", "Not)A;Brand";v="24.0.0.0"'
+SEC_CH_UA = '"Google Chrome";v="146", "Chromium";v="146", "Not)A;Brand";v="24"'
+SEC_CH_UA_FULL_VERSION_LIST = '"Google Chrome";v="146.0.0.0", "Chromium";v="146.0.0.0", "Not)A;Brand";v="24.0.0.0"'
 SEC_CH_UA_PLATFORM = '"macOS"'
 SEC_CH_UA_PLATFORM_VERSION = '"15.7.0"'
 SEC_CH_UA_MOBILE = "?0"

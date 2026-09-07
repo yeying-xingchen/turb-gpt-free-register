@@ -1520,6 +1520,8 @@ def list_account_plan_check_statuses(
         "totp_setup_status", "totp_setup_ok", "totp_setup_error",
         "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
         "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
+        "original_email", "email_source", "email_change_status", "email_change_ok",
+        "email_change_error", "email_change_new_email", "email_change_started_at", "email_change_completed_at",
     )
     with _LOCK:
         limit = max(1, int(limit))
@@ -1583,6 +1585,11 @@ def list_account_plan_check_statuses(
                     "totp_setup_started_at": row.get("totp_setup_started_at"),
                     "totp_setup_completed_at": row.get("totp_setup_completed_at"),
                     "totp_enabled": bool(str(row.get("totp_secret") or "").strip()),
+                    "email": row.get("email"),
+                    "original_email": row.get("original_email"),
+                    "email_source": row.get("email_source"),
+                    "email_change_status": row.get("email_change_status"),
+                    "email_change_error": row.get("email_change_error"),
                 }
                 for row in rows
             ],
@@ -1679,6 +1686,101 @@ def update_account_note(acc_id: int, note: str) -> bool:
         row["updated_at"] = now
         _save_accounts(rows)
         return True
+
+
+def claim_account_email_change(acc_id: int, source: str, trigger: str = "manual") -> bool:
+    """原子占用账号邮箱换绑任务。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("email_change_status") in {"queued", "running"}:
+            return False
+        now = _now()
+        row.update({
+            "email_change_status": "queued", "email_change_ok": False,
+            "email_change_source": str(source or ""), "email_change_trigger": str(trigger or "manual"),
+            "email_change_queued_at": now, "email_change_started_at": None,
+            "email_change_completed_at": None, "email_change_error": None, "updated_at": now,
+        })
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_email_change_running(acc_id: int, new_email: str) -> bool:
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("email_change_status") not in {"queued", "running"}:
+            return False
+        row.update({"email_change_status": "running", "email_change_new_email": new_email,
+                    "email_change_started_at": _now(), "email_change_error": None, "updated_at": _now()})
+        _save_accounts(rows)
+        return True
+
+
+def finish_account_email_change(
+    acc_id: int, *, ok: bool, new_email: str | None = None, source: str | None = None,
+    material_line: str | None = None, error: str | None = None,
+) -> bool:
+    """写回换绑结果；成功时保留初始邮箱并将账号主邮箱切换为新邮箱。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        now = _now()
+        if ok and new_email:
+            old_email = str(row.get("email") or "").strip()
+            row["original_email"] = str(row.get("original_email") or old_email)
+            history = row.get("email_history") if isinstance(row.get("email_history"), list) else []
+            if old_email and old_email.lower() not in {str(x).lower() for x in history}:
+                history.append(old_email)
+            row["email_history"] = history
+            row["email"] = str(new_email).strip()
+            row["email_source"] = str(source or row.get("email_source") or "")
+            row["original_email_line"] = str(material_line or new_email)
+            # 清理旧邮箱来源遗留的 Outlook 凭证；若新来源仍为 Outlook 则写入新素材。
+            row["password"] = ""
+            row["client_id"] = ""
+            row["refresh_token"] = ""
+            if str(source or "") == "outlook":
+                mailbox = _find_by_email(_load_outlook(), str(new_email))
+                if mailbox:
+                    row["password"] = mailbox.get("password") or ""
+                    row["client_id"] = mailbox.get("client_id") or ""
+                    row["refresh_token"] = mailbox.get("refresh_token") or ""
+            # 抓包表明 verify 成功后当前 OAuth token 会立即失效。
+            row["access_token"] = ""
+            row["token_expired"] = True
+            row["live_check_status"] = ""
+            row["email_change_new_email"] = str(new_email).strip()
+        row["email_change_status"] = "success" if ok else "failed"
+        row["email_change_ok"] = bool(ok)
+        row["email_change_error"] = None if ok else str(error or "换绑失败")[:1000]
+        row["email_change_completed_at"] = now
+        row["updated_at"] = now
+        row["copy_line"] = _account_line(row)
+        _save_accounts(rows)
+        return True
+
+
+def recover_interrupted_email_changes() -> int:
+    """启动时将上次进程中断的邮箱换绑任务标记为失败。"""
+    with _LOCK:
+        rows = _load_accounts()
+        count = 0
+        for row in rows:
+            if row.get("email_change_status") not in {"queued", "running"}:
+                continue
+            row.update({
+                "email_change_status": "failed", "email_change_ok": False,
+                "email_change_error": "WebUI 重启导致邮箱换绑中断，请重新操作",
+                "email_change_completed_at": _now(), "updated_at": _now(),
+            })
+            count += 1
+        if count:
+            _save_accounts(rows)
+        return count
 
 
 def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:

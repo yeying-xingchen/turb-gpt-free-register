@@ -64,11 +64,15 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             f"proxy_mode={route.get('proxy_mode')} proxy_used={route.get('proxy_used') or '-'} "
             f"fallback_reason={route.get('proxy_fallback_reason') or '-'}"
         )
+        # 代理重试及直连兜底共享同一份完整 browser_profile。网络出口可以切换，
+        # 但 UA、语言、时区、屏幕、CPU/内存及 Sentinel 画像不能在同一任务中突变。
+        fingerprint_state: dict = {}
         result = check_account_liveness(
             email,
             proxy=selected_proxy,
             clear_log=False,
             email_source=email_source,
+            fingerprint_state=fingerprint_state,
         )
         # 认证链早期 403 通常是该出口被 CF 拦截，不代表账号死亡。
         # auto/proxy 模式下如果用了代理，额外直连兜底一次，便于和套餐查询的 auto 语义保持接近。
@@ -87,6 +91,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 proxy="",
                 clear_log=False,
                 email_source=email_source,
+                fingerprint_state=fingerprint_state,
             )
         db.update_account_liveness(account_id, result)
         if result.get("ok"):

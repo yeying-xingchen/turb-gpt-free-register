@@ -93,6 +93,16 @@ def acquire_email() -> str:
     raise RuntimeError(f"所有邮箱来源均领取失败: {sources}; last={last_exc}")
 
 
+def acquire_email_from_source(source: str) -> str:
+    """从调用方指定的单一来源领取邮箱，不受 EMAIL_SOURCE 兜底顺序影响。"""
+    source = str(source or "").strip().lower()
+    if source not in _VALID_SOURCES:
+        raise ValueError(f"不支持的邮箱来源: {source}")
+    email = _pick_from_source(source)
+    logger.info("[EmailProvider] 指定来源领取邮箱: source=%s, email=%s", source, email)
+    return email
+
+
 def acquire_email_after_input(email: str | None = None) -> str:
     """在浏览器已找到邮箱输入框后领取邮箱。
 
@@ -196,6 +206,7 @@ def wait_for_otp(
     poll_interval: int | None = None,
     settle_seconds: int | None = None,
     email_source: str | None = None,
+    force_service: bool = False,
 ) -> str:
     """等待并返回该邮箱最新的 ChatGPT OTP（6 位数字字符串）。
 
@@ -208,7 +219,7 @@ def wait_for_otp(
     except Exception:
         use_service = True
 
-    if not use_service:
+    if not use_service and not force_service:
         from core.manual_otp import wait_for_manual_otp
         from config import email as _email_cfg
         timeout = int(max_wait if max_wait is not None else (getattr(_email_cfg, "OTP_MAX_WAIT", 180) or 180))
@@ -261,6 +272,22 @@ def wait_for_otp(
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
     from core.outlook_client import fetch_latest_otp
     return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+
+
+def email_material_line(email: str, source: str | None = None) -> str:
+    """返回账号换绑后应保存的邮箱素材行。"""
+    source = _normalize_explicit_email_source(source) or resolve_email_source(email)
+    from core import db
+    row = None
+    if source == "outlook":
+        row = db.get_outlook_by_email(email)
+    elif source == "generic_api":
+        row = db.get_generic_api_email_by_email(email)
+    elif source == "imap":
+        row = db.get_imap_email_by_email(email)
+    if row:
+        return str(row.get("copy_line") or email)
+    return str(email or "")
 
 
 def release_email(email: str, status: str = "available", note: str | None = None) -> str:

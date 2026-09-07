@@ -113,7 +113,7 @@ def _compact_account_for_list(row: dict) -> dict:
 
     # 这些是列表固定列直接展示字段。
     for key in (
-        "user_name", "email_source", "note", "archived", "created_at",
+        "user_name", "email_source", "original_email", "note", "archived", "created_at",
         "plan_type", "current_plan_type", "plus_trial_eligible",
         "plan_check_status", "codex_status", "codex_agent_status",
         "totp_setup_status",
@@ -142,6 +142,8 @@ def _compact_account_for_list(row: dict) -> dict:
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
         "totp_setup_error", "totp_setup_message", "totp_setup_started_at", "totp_setup_completed_at",
+        "email_change_status", "email_change_error", "email_change_new_email",
+        "email_change_started_at", "email_change_completed_at",
     )
     for key in optional_keys:
         value = row.get(key)
@@ -323,6 +325,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_totp_setups = db.recover_interrupted_totp_setups()
     if recovered_totp_setups:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 2FA 状态", recovered_totp_setups)
+    recovered_email_changes = db.recover_interrupted_email_changes()
+    if recovered_email_changes:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
 
     # ----------------------------------------------------------
     # 页面
@@ -605,6 +610,63 @@ def create_app(auth_code: str | None = None) -> Flask:
         if not queued.get("accepted"):
             return jsonify({"ok": False, **queued_payload}), 503
         return jsonify({"ok": True, "started": True, **queued_payload}), 202
+
+    @app.post("/api/accounts/<int:acc_id>/change-email")
+    def api_account_change_email(acc_id: int):
+        """给单个账号排队换绑邮箱。Body {source}."""
+        data = request.get_json(silent=True) or {}
+        source = str(data.get("source") or "").strip().lower()
+        allowed = {"outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail"}
+        if source not in allowed:
+            return jsonify({"ok": False, "error": "请选择有效的邮箱来源"}), 400
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if not str(acc.get("access_token") or "").strip():
+            return jsonify({"ok": False, "error": "账号缺少 access_token，请先查活刷新 AT"}), 400
+        from core import email_change_service
+        result = email_change_service.enqueue(acc_id, source, trigger="manual")
+        public = {k: v for k, v in result.items() if k != "future"}
+        return jsonify({"ok": bool(result.get("accepted")), **public}), (202 if result.get("accepted") else 409)
+
+    @app.post("/api/accounts/change-email-bulk")
+    def api_accounts_change_email_bulk():
+        """批量换绑邮箱。Body {account_ids:[...], source}."""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        source = str(data.get("source") or "").strip().lower()
+        allowed = {"outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail"}
+        if source not in allowed:
+            return jsonify({"ok": False, "error": "请选择有效的邮箱来源"}), 400
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多提交 500 个账号"}), 400
+        from core import email_change_service
+        started, skipped = [], []
+        seen_ids: set[int] = set()
+        for raw_id in ids:
+            try:
+                acc_id = int(raw_id)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw_id, "reason": "ID 非法"})
+                continue
+            if acc_id in seen_ids:
+                continue
+            seen_ids.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            if not str(acc.get("access_token") or "").strip():
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "缺少 access_token"})
+                continue
+            result = email_change_service.enqueue(acc_id, source, trigger="manual_bulk")
+            if result.get("accepted"):
+                started.append({"id": acc_id, "email": acc.get("email"), "status": "queued"})
+            else:
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": result.get("error")})
+        return jsonify({"ok": True, "started": started, "started_count": len(started), "skipped": skipped}), 202
 
     @app.post("/api/accounts/totp-setup-bulk")
     def api_accounts_totp_setup_bulk():
@@ -2388,6 +2450,22 @@ def create_app(auth_code: str | None = None) -> Flask:
             data["running"] = bool(str(acc.get("totp_setup_status") or "") in {"queued", "running"}) or twofa_service.is_running(int(acc.get("id") or 0))
         except Exception:
             pass
+        return jsonify(data)
+
+    @app.get("/api/accounts/<int:acc_id>/change-email-log")
+    def api_account_change_email_log(acc_id: int):
+        """读取账号最近一次邮箱换绑日志。"""
+        from core import email_change_service
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        data = _read_log_tail(
+            email_change_service.log_path(acc_id), max_bytes=80_000,
+            running_fn=lambda: email_change_service.is_running(acc_id),
+        )
+        data["account_id"] = acc_id
+        data["email"] = acc.get("email")
+        data["running"] = bool(data.get("running") or str(acc.get("email_change_status") or "") in {"queued", "running"})
         return jsonify(data)
 
     # ----------------------------------------------------------

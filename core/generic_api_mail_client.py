@@ -22,6 +22,7 @@ from urllib.parse import quote, unquote, urlparse, urlunparse, parse_qsl, urlenc
 import requests
 
 from config import email as _email_cfg
+from config import proxy as _proxy_cfg
 from core.otp_utils import extract_otp
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,10 @@ _CONTEXT_CACHE: dict[str, "GenericApiEmailAccount"] = {}
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ACCOUNTS_FILE = _PROJECT_ROOT / "用于注册的API邮箱.txt"
 _YANGYANG_MESSAGES_RE = re.compile(r"/messages/([^/]+)/([^/?#]+)", re.IGNORECASE)
+_PUBLIC_INBOX_LINK_RE = re.compile(r"^/i/([^/?#]+)/*$", re.IGNORECASE)
+_PUBLIC_INBOX_API_RE = re.compile(
+    r"^/api/public/inboxes/([^/?#]+)/latest-code/*$", re.IGNORECASE,
+)
 _YANGYANG_OPENAI_SUBJECT_HINTS = (
     "temporary chatgpt",
     "chatgpt verification code",
@@ -46,6 +51,35 @@ _YANGYANG_OPENAI_SUBJECT_HINTS = (
 
 class GenericApiMailError(RuntimeError):
     """通用 API 取码邮箱错误。"""
+
+
+def _redact_proxy_url(proxy_url: str) -> str:
+    """日志中保留代理地址和协议，但隐藏认证信息。"""
+    raw = str(proxy_url or "").strip()
+    if not raw:
+        return "direct"
+    try:
+        parsed = urlparse(raw)
+        if not parsed.hostname:
+            return "configured-proxy"
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        auth = "***@" if parsed.username or parsed.password else ""
+        return f"{parsed.scheme}://{auth}{host}{port}"
+    except Exception:
+        return "configured-proxy"
+
+
+def _new_http_session(proxy_url: str = "") -> requests.Session:
+    """创建不继承系统代理的取码会话；传入代理时 HTTP/HTTPS 均走该代理。"""
+    session = requests.Session()
+    session.trust_env = False
+    proxy_url = str(proxy_url or "").strip()
+    if proxy_url:
+        session.proxies.update({"http": proxy_url, "https": proxy_url})
+    return session
 
 
 def _cache_busted_url(url: str, attempt: int) -> str:
@@ -63,6 +97,125 @@ def _cache_busted_url(url: str, attempt: int) -> str:
 class GenericApiEmailAccount:
     email: str
     code_url: str
+
+
+def _public_inbox_latest_code_url(code_url: str) -> str | None:
+    """把公开收件链接 /i/{token} 转成 /api/public/inboxes/{token}/latest-code。"""
+    try:
+        parsed = urlparse(str(code_url or "").strip())
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    match = _PUBLIC_INBOX_LINK_RE.match(parsed.path or "")
+    if not match:
+        # 也接受用户直接导入 latest-code API 地址。
+        match = _PUBLIC_INBOX_API_RE.match(parsed.path or "")
+    if not match:
+        return None
+    token = unquote(match.group(1)).strip()
+    if not token or "/" in token:
+        return None
+    origin = urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+    return f"{origin}/api/public/inboxes/{quote(token, safe='')}/latest-code"
+
+
+def _public_inbox_page_api_url(code_url: str) -> str | None:
+    """返回公开收件页面实际使用的收件箱列表 API。"""
+    latest_url = _public_inbox_latest_code_url(code_url)
+    if not latest_url:
+        return None
+    return latest_url.rsplit("/latest-code", 1)[0]
+
+
+def _fetch_public_inbox_page_otp(
+    session: requests.Session,
+    api_url: str,
+    email: str,
+    headers: dict,
+    after_ts: float | None = None,
+) -> tuple[str, dict] | None:
+    """按 /i/{token} 页面使用的 inbox API，从最新邮件预览/正文提取验证码。"""
+    resp = session.get(
+        api_url,
+        headers={**headers, "Accept": "application/json"},
+        timeout=20,
+        verify=False,
+    )
+    if resp.status_code != 200:
+        logger.debug("[GenericAPI] public inbox 页面 API HTTP %s: %s", resp.status_code, (resp.text or "")[:160])
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        try:
+            data = json.loads(resp.text or "")
+        except Exception:
+            return None
+    if not isinstance(data, dict):
+        return None
+    mailbox = data.get("mailbox") or {}
+    actual_email = str(mailbox.get("address") if isinstance(mailbox, dict) else mailbox or "").strip()
+    if actual_email and actual_email.lower() != email.lower():
+        raise GenericApiMailError(
+            f"公开收件链接邮箱不匹配: expected={email}, actual={actual_email}"
+        )
+    items = [x for x in (data.get("messages") or []) if isinstance(x, dict)]
+    items.sort(
+        key=lambda x: _parse_generic_api_ts(x.get("receivedAt") or x.get("received_at")) or 0,
+        reverse=True,
+    )
+    origin = api_url.split("/api/public/inboxes/", 1)[0]
+    token_path = api_url.split("/api/public/inboxes/", 1)[1].split("?", 1)[0].strip("/")
+    for item in items:
+        received_at = item.get("receivedAt") or item.get("received_at")
+        msg_ts = _parse_generic_api_ts(received_at)
+        if after_ts and msg_ts and msg_ts + 2 < after_ts:
+            continue
+        raw_codes = item.get("verificationCodes") or item.get("verification_codes") or []
+        code = next(
+            (m.group(1) for value in raw_codes if (m := _CODE_REGEX.search(str(value)))),
+            None,
+        )
+        subject = str(item.get("subject") or "")
+        preview = str(item.get("preview") or "")
+        if not code:
+            code = _extract_yangyang_openai_code(subject, preview)
+        msg_id = str(item.get("id") or "").strip()
+        # 页面列表预览仍未抽到时，读取页面点击邮件时使用的详情 API。
+        if not code and msg_id:
+            detail_url = (
+                f"{origin}/api/public/inboxes/{quote(unquote(token_path), safe='')}"
+                f"/messages/{quote(msg_id, safe='')}"
+            )
+            try:
+                detail_resp = session.get(
+                    detail_url,
+                    headers={**headers, "Accept": "application/json"},
+                    timeout=20,
+                    verify=False,
+                )
+                if detail_resp.status_code == 200:
+                    detail = detail_resp.json()
+                    detail_text = "\n".join([
+                        str(detail.get("subject") or subject),
+                        str(detail.get("preview") or preview),
+                        str(detail.get("textBody") or ""),
+                        str(detail.get("htmlBody") or ""),
+                    ])
+                    code = _extract_yangyang_openai_code(subject, detail_text)
+            except Exception as exc:
+                logger.debug("[GenericAPI] public inbox 邮件详情读取失败: %s: %s", type(exc).__name__, exc)
+        if code:
+            return code, {
+                "source": "public_inbox_page",
+                "mail_id": msg_id,
+                "received_at": received_at,
+                "msg_ts": msg_ts,
+                "subject": subject,
+                "from": item.get("fromAddress") or item.get("sender"),
+            }
+    return None
 
 
 def _flatten_json(obj) -> str:
@@ -545,6 +698,35 @@ def release_account(email: str, status: str = "available", note: str | None = No
     _CONTEXT_CACHE.pop(email, None)
 
 
+def _fetch_poll_payload(
+    *,
+    proxy_url: str,
+    poll_url: str,
+    email: str,
+    headers: dict,
+    after_ts: float | None,
+    is_yangyang: bool,
+    public_inbox_api_url: str | None,
+):
+    """执行单次取码请求，网络路由由调用方指定。"""
+    session = _new_http_session(proxy_url)
+    yy_result = (
+        _fetch_yangyang_otp(session, poll_url, headers, after_ts=after_ts)
+        if is_yangyang else None
+    )
+    public_result = (
+        _fetch_public_inbox_page_otp(
+            session, poll_url, email, headers, after_ts=after_ts,
+        )
+        if public_inbox_api_url else None
+    )
+    page_result = yy_result or public_result
+    if page_result or is_yangyang or public_inbox_api_url:
+        return page_result, yy_result, None, ""
+    resp = session.get(poll_url, headers=headers, timeout=20, verify=False)
+    return None, None, resp, resp.text or ""
+
+
 def fetch_latest_otp(
     email: str,
     after_ts: float | None = None,
@@ -581,29 +763,77 @@ def fetch_latest_otp(
         f"最长 {max_wait or _email_cfg.OTP_MAX_WAIT}s, settle={settle}s"
     )
     is_yangyang = _parse_yangyang_code_url(account.code_url) is not None
+    public_inbox_api_url = _public_inbox_page_api_url(account.code_url)
+    if public_inbox_api_url:
+        logger.info(
+            "[GenericAPI] 已识别公开收件页面，使用页面 inbox API: host=%s email=%s",
+            urlparse(public_inbox_api_url).netloc,
+            email,
+        )
+
+    selected_proxy = str(_proxy_cfg.pick_proxy() or "").strip()
+    routes: list[tuple[str, str]] = []
+    if selected_proxy:
+        routes.append(("proxy", selected_proxy))
+    routes.append(("direct", ""))
+    logger.info(
+        "[GenericAPI] HTTP 路由：首选=%s，网络异常时%s",
+        _redact_proxy_url(selected_proxy),
+        "回退直连" if selected_proxy else "使用直连",
+    )
 
     attempt = 0
     while time.time() < deadline:
         attempt += 1
         try:
-            session = requests.Session()
             # 不修改 yangyang 的路径型 URL；其列表接口本身按邮件 ID 返回数据。
-            poll_url = account.code_url if is_yangyang else _cache_busted_url(account.code_url, attempt)
-            yy_result = _fetch_yangyang_otp(session, poll_url, headers, after_ts=after_ts) if is_yangyang else None
-            if yy_result:
-                code, yy_meta = yy_result
+            base_poll_url = public_inbox_api_url or account.code_url
+            poll_url = base_poll_url if is_yangyang else _cache_busted_url(base_poll_url, attempt)
+            route_error: Exception | None = None
+            page_result = yy_result = resp = None
+            text = ""
+            for route_index, (_route_name, route_proxy) in enumerate(routes):
+                try:
+                    page_result, yy_result, resp, text = _fetch_poll_payload(
+                        proxy_url=route_proxy,
+                        poll_url=poll_url,
+                        email=email,
+                        headers=headers,
+                        after_ts=after_ts,
+                        is_yangyang=is_yangyang,
+                        public_inbox_api_url=public_inbox_api_url,
+                    )
+                    route_error = None
+                    break
+                except requests.RequestException as exc:
+                    route_error = exc
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    has_fallback = route_index + 1 < len(routes)
+                    logger.warning(
+                        "[GenericAPI] 页面/API 请求失败：route=%s %s: %s%s",
+                        _redact_proxy_url(route_proxy),
+                        type(exc).__name__,
+                        exc,
+                        "，切换直连重试" if has_fallback else "",
+                    )
+            if route_error is not None:
+                raise route_error
+
+            if page_result:
+                code, yy_meta = page_result
+                result_source = str(yy_meta.get("source") or ("yangyang" if yy_result else "public_inbox_page"))
                 now_seen = time.time()
                 if not best_otp:
                     best_otp = code
                     best_seen_at = now_seen
                     settle_until = now_seen + settle
                     logger.info(
-                        f"[GenericAPI] 首次锁定 OTP={code}, source=yangyang mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}, "
+                        f"[GenericAPI] 首次锁定 OTP={code}, source={result_source} mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}, "
                         f"等 {settle}s 看取码接口是否出现更新验证码..."
                     )
                 elif code != best_otp:
                     logger.info(
-                        f"[GenericAPI] 发现更新 OTP={code}, source=yangyang mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}，"
+                        f"[GenericAPI] 发现更新 OTP={code}, source={result_source} mail_id={yy_meta.get('mail_id')} ts={yy_meta.get('received_at')}，"
                         f"替换之前的 {best_otp}, 重置 settle 计时"
                     )
                     best_otp = code
@@ -614,20 +844,55 @@ def fetch_latest_otp(
                 resp = None
                 text = ""
             else:
-                if is_yangyang:
-                    last_error = "yangyang 列表中尚未出现 after_ts 之后的新验证码邮件"
+                if is_yangyang or public_inbox_api_url:
+                    last_error = (
+                        "yangyang 列表中尚未出现 after_ts 之后的新验证码邮件"
+                        if is_yangyang else
+                        "公开收件页面中尚未出现 after_ts 之后的新验证码邮件"
+                    )
                     resp = None
                     text = ""
-                else:
-                    resp = session.get(poll_url, headers=headers, timeout=20, verify=False)
-                    text = resp.text or ""
             if resp is None:
                 pass
             elif resp.status_code == 200:
-                structured = _extract_structured_api_code(text, after_ts=after_ts)
+                public_payload = None
+                if public_inbox_api_url:
+                    try:
+                        public_payload = json.loads(text)
+                    except Exception:
+                        public_payload = None
+                mailbox = str((public_payload or {}).get("mailbox") or "").strip()
+                mailbox_mismatch = bool(mailbox and mailbox.lower() != email.lower())
+                if mailbox_mismatch:
+                    structured = None
+                    last_error = f"latest-code 返回邮箱不匹配: expected={email}, actual={mailbox}"
+                else:
+                    # 此类公开 latest-code 服务的 receivedAt 可能使用独立服务器时间，
+                    # 与运行机器相差数小时甚至跨日。它只返回“最新一封”，因此这里
+                    # 把时间字段作为诊断信息，不作为硬过滤条件；候选更新仍由
+                    # code/messageId 变化及 settle 机制负责。
+                    structured = _extract_structured_api_code(
+                        text,
+                        after_ts=None if public_inbox_api_url else after_ts,
+                    )
                 structured_meta = structured[1] if structured else {}
                 code = structured[0] if structured else _extract_code(text)
+                if mailbox_mismatch:
+                    code = None
                 if code:
+                    if (
+                        public_inbox_api_url
+                        and after_ts
+                        and structured_meta.get("msg_ts")
+                        and float(structured_meta["msg_ts"]) + 2 < after_ts
+                    ):
+                        logger.warning(
+                            "[GenericAPI] latest-code 的 receivedAt 早于取码基准，"
+                            "按服务端最新邮件继续作为候选：receivedAt=%s after=%s messageId=%s",
+                            structured_meta.get("received_at"),
+                            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(after_ts)),
+                            (public_payload or {}).get("messageId"),
+                        )
                     now_seen = time.time()
                     if not best_otp:
                         best_otp = code
@@ -662,7 +927,11 @@ def fetch_latest_otp(
                     else:
                         logger.debug(f"[GenericAPI] 取码接口仍返回候选 OTP={best_otp}")
                 else:
-                    last_error = f"HTTP 200 但未提取到 6 位验证码，响应预览: {text[:160]}"
+                    if not mailbox_mismatch:
+                        if public_inbox_api_url and isinstance(public_payload, dict) and public_payload.get("code") is None:
+                            last_error = "latest-code 返回 code=null，邮箱暂未收到验证码"
+                        else:
+                            last_error = f"HTTP 200 但未提取到 6 位验证码，响应预览: {text[:160]}"
             else:
                 last_error = f"HTTP {resp.status_code}: {text[:160]}"
         except Exception as exc:
