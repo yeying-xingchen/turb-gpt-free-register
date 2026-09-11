@@ -390,11 +390,11 @@ class BrowserSession:
                 headers["sec-ch-ua-platform"] = str(profile.get("sec_ch_ua_platform") or SEC_CH_UA_PLATFORM)
             if SEND_HIGH_ENTROPY_CLIENT_HINTS:
                 headers.update({
-                    "sec-ch-ua-full-version-list": SEC_CH_UA_FULL_VERSION_LIST,
-                    "sec-ch-ua-platform-version": SEC_CH_UA_PLATFORM_VERSION,
-                    "sec-ch-ua-arch": SEC_CH_UA_ARCH,
-                    "sec-ch-ua-bitness": SEC_CH_UA_BITNESS,
-                    "sec-ch-ua-model": SEC_CH_UA_MODEL,
+                    "sec-ch-ua-full-version-list": str(profile.get("sec_ch_ua_full_version_list") or SEC_CH_UA_FULL_VERSION_LIST),
+                    "sec-ch-ua-platform-version": str(profile.get("sec_ch_ua_platform_version") or SEC_CH_UA_PLATFORM_VERSION),
+                    "sec-ch-ua-arch": str(profile.get("sec_ch_ua_arch") or SEC_CH_UA_ARCH),
+                    "sec-ch-ua-bitness": str(profile.get("sec_ch_ua_bitness") or SEC_CH_UA_BITNESS),
+                    "sec-ch-ua-model": str(profile.get("sec_ch_ua_model") or SEC_CH_UA_MODEL),
                 })
         return headers
 
@@ -520,6 +520,7 @@ class BrowserSession:
         headers = self._get_common_headers()
         headers.update({
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "cache-control": "max-age=0",
             "sec-fetch-site": self._sec_fetch_site_for(target_origin, referer),
             "sec-fetch-mode": "navigate",
             "sec-fetch-dest": "document",
@@ -529,13 +530,16 @@ class BrowserSession:
         })
         if user_initiated:
             headers["sec-fetch-user"] = "?1"
-        return self._attach_datadog_headers(headers)
+        # document 导航由浏览器网络栈发出，不携带 fetch/XHR 使用的
+        # x-datadog-* 自定义头；跨站 OAuth 导航尤其需要保持原生头集合。
+        return headers
 
     def get_chatgpt_navigate_headers(self, referer: str = "https://chatgpt.com/", user_initiated: bool = True) -> dict:
         """获取 chatgpt.com 页面导航请求头，用于预热登录页 / 回到应用页。"""
         headers = self._get_common_headers()
         headers.update({
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "cache-control": "max-age=0",
             "sec-fetch-site": self._sec_fetch_site_for("https://chatgpt.com", referer),
             "sec-fetch-mode": "navigate",
             "sec-fetch-dest": "document",
@@ -545,7 +549,7 @@ class BrowserSession:
         })
         if user_initiated:
             headers["sec-fetch-user"] = "?1"
-        return self._attach_datadog_headers(headers)
+        return headers
 
     def get_sentinel_headers(self) -> dict:
         """

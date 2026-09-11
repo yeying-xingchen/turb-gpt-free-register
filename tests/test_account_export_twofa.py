@@ -18,6 +18,32 @@ class _CircuitSession:
 
 
 class AccountExportTwofaTests(unittest.TestCase):
+    def test_authorize_403_reuses_cf_cookie_and_retries(self):
+        session = _CircuitSession()
+        calls = []
+
+        def follow(_session, _auth_url):
+            calls.append(1)
+            if len(calls) == 1:
+                session.blocked_until = 9999999999.0
+                session.blocked_reason = "HTTP 403 from authorize"
+                raise RuntimeError("HTTP 403 from authorize")
+            return "https://auth.openai.com/email-verification"
+
+        with patch.object(account_export, "_follow_reauth", side_effect=follow), patch(
+            "config.twofa.TWOFA_REAUTH_MAX_ATTEMPTS", 3
+        ), patch("config.twofa.TWOFA_REAUTH_RETRY_DELAY", 0), patch.object(
+            account_export.time, "sleep"
+        ) as sleep:
+            result = account_export._follow_reauth_with_retry(
+                session, "https://auth.openai.com/api/accounts/authorize?state=test"
+            )
+
+        self.assertEqual(result, "https://auth.openai.com/email-verification")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(session.reset_count, 1)
+        sleep.assert_not_called()
+
     def test_reauth_403_is_retried_after_circuit_reset(self):
         session = _CircuitSession()
         calls = []

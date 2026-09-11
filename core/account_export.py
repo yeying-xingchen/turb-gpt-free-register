@@ -107,6 +107,47 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
     raise last_exc
 
 
+def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
+    """重试跨站 authorize 导航；首个 403 下发的 CF Cookie 可供下一轮复用。"""
+    from config import twofa as _twofa_cfg
+
+    max_attempts = max(1, min(8, int(
+        getattr(_twofa_cfg, "TWOFA_REAUTH_MAX_ATTEMPTS", 3) or 3
+    )))
+    base_delay = max(0.0, min(60.0, float(
+        getattr(_twofa_cfg, "TWOFA_REAUTH_RETRY_DELAY", 3.0) or 0.0
+    )))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = _follow_reauth(session, auth_url)
+            if attempt > 1:
+                logger.info("[2FA] authorize 导航重试成功：attempt=%s/%s", attempt, max_attempts)
+            return result
+        except Exception as exc:
+            retryable = _is_retryable_reauth_error(exc)
+            if attempt >= max_attempts or not retryable:
+                logger.warning(
+                    "[2FA] authorize 导航失败且不再重试：attempt=%s/%s retryable=%s error=%s: %s",
+                    attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
+                )
+                raise
+
+            # 403 响应通常会刷新 __cf_bm。清理本地熔断但保留 Cookie Jar，
+            # 下一轮继续使用同一 OAuth state 和新 Cookie 导航。
+            _clear_twofa_session_circuit(session, source="authorize 导航")
+            delay = min(120.0, base_delay * (2 ** (attempt - 1)))
+            logger.warning(
+                "[2FA] authorize 导航临时失败：attempt=%s/%s error=%s: %s；"
+                "%.1fs 后复用 CF Cookie 重试",
+                attempt, max_attempts, type(exc).__name__, str(exc)[:200], delay,
+            )
+            if delay > 0:
+                time.sleep(delay)
+
+    raise RuntimeError("authorize 导航重试耗尽")
+
+
 def _post_register_dwell_seconds() -> float:
     try:
         from config import register as _register_cfg
@@ -472,7 +513,7 @@ def setup_2fa(
     auth_url = _trigger_reauth_with_retry(session, email)
     logger.info("[2FA] 重认证 authorize URL 已获取")
     human_delay("api")
-    _follow_reauth(session, auth_url)
+    _follow_reauth_with_retry(session, auth_url)
     logger.info("[2FA] 已跟随重认证 authorize URL")
     human_delay("navigate")
 
