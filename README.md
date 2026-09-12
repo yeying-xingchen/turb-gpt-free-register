@@ -99,6 +99,7 @@ EMAIL_SOURCE = "outlook,generic_api"
 ```bash
 pip install -r requirements.txt
 node --version
+npm install                    # 安装仓库内置 Sentinel VM 所需 jsdom
 ```
 
 ### 密钥配置（.env）
@@ -125,8 +126,22 @@ cp .env.example .env
 - `SMS_API_KEY`
 - `L_ADMIN_AUTH_CODE`
 - `H_ADMIN_AUTH_CODE`
+- `PAYMENT_QUALIFICATION_API_BASE` / `PAYMENT_QUALIFICATION_API_PATH`（独立 qualification-test 服务的 API 基址和路径）
+- `PAYMENT_METHOD_CHECK_PROXY` / `PAYMENT_METHOD_CHECK_PROXIES`（支付方式资格检测代理，可能含认证信息）
+- `PAYMENT_QUALIFICATION_API_KEY`（独立 qualification-test API 密钥，可选）
 
 WebUI 配置页保存这些字段时会写入 `.env`（不是 config 源码）。
+
+### Checkout 支付方式资格查询
+
+项目已接入 `/home/yeyingxingchen/Xinghai/qualification-test/` 的只读 Checkout 检测逻辑。账号页可以单个或批量点击「查支付方式」，也可以打开 `PAYMENT_METHOD_AUTO_CHECK_AFTER_REGISTER=True`，让注册成功账号异步入队查询。查询会按 `PAYMENT_METHOD_CHECK_REGIONS` 逐个创建目标国家/币种的 Checkout，并只读取 Checkout/Stripe 发布的支付方式；不会确认、提交或发起任何支付。
+
+内置地区预设包括：`gcash`（PH/PHP）、`card`（PH/PHP）、`paypal_uk`（GB/GBP）、`paypal_nl` / `ideal_nl`（NL/EUR）、`momo_vn`（VN/VND）、`gopay_id`（ID/IDR）、`upi_in`（IN/INR）、`blik_pl`（PL/PLN）和 `pix_br`（BR/BRL）。`available_channels` 是某一个 Checkout 的发布方式；要覆盖多地区必须保留多个预设。代理出口国家应与目标预设匹配，可在配置页按行填写 `preset=proxy`，例如 `paypal_uk=http://user:pass@host:port`，凭据只写入 `.env`，不会返回浏览器或保存到检测结果。
+
+运行支付方式检测还需要 Python `curl_cffi`、Node.js 和 `jsdom`。推荐填写 `PAYMENT_QUALIFICATION_API_BASE=http://127.0.0.1:18097`，程序会使用独立 qualification-test 服务的 `POST /api/gcash/check` API（可用 `PAYMENT_QUALIFICATION_API_PATH` 修改 `/api/` 路径）；API 基址配置后不会在本进程导入或执行 checker。也可以不填 API 基址，默认从 `/home/yeyingxingchen/Xinghai/qualification-test` 加载 checker，该目录不可用时自动回退到仓库内置的 `core/payment_checker.py`/Sentinel 适配器。Node 依赖可在仓库根目录或 `qualification-test` 目录安装（`npm install`），或通过 `NODE_PATH` 指向其 `node_modules`。部署时请确认 Node 版本与所用 jsdom 版本兼容。
+
+结果只持久化地区、币种、目标方式、可用方式和错误状态等摘要，不保存 access token、完整 Checkout session ID、Sentinel challenge、原始 Stripe payload 或代理密码；查询失败时保留上一次成功的支付方式摘要。
+
 
 ---
 
@@ -167,6 +182,17 @@ email----password----clientId----refreshToken
 ```
 
 也可以在 WebUI 的「邮箱池」页面导入。
+
+#### 已有账号导入
+
+账号页「导入已有账号」支持粘贴或上传 JSON/TXT。文本支持：
+
+```text
+email----access_token[----totp_secret]
+email----ChatGPT_password----2OTP_secret----取码地址----access_token
+```
+
+其中第二种五段格式依次为 ChatGPT 账号密码、2OTP/TOTP 密钥、取码地址和最后的 ChatGPT `access_token`（AT）。取码地址会保存到通用 API 邮箱池，后续查活时可继续自动收取 OTP；2OTP 密钥保存为账号的 TOTP/2FA 凭证。Outlook 素材整行也兼容 `email----password----clientId----refreshToken----access_token`。
 
 #### 通用 API 邮箱
 
@@ -475,10 +501,34 @@ WebUI 页面说明：
 | 页面 | 功能 |
 |---|---|
 | 注册 | 设置注册数量、线程数，启动批量注册，查看任务和日志 |
-| 账号 | 查看账号、复制 token、补跑 Codex、批量删除账号 |
+| 账号 | 查看账号、导入已有账号、复制 token、补跑 Codex、批量删除账号 |
 | Codex 授权 | 查看/下载/删除 `codex_accounts/` 凭证 |
 | 邮箱池 | 导入邮箱、筛选来源、标记可用/失败、删除邮箱 |
 | 配置 | 修改运行配置并热加载，含 Roxy、Codex、邮箱、代理、人工节奏等 |
+
+### Plus 试用提链（checkout link）
+
+账号页「提链」按钮可为 `free(可Plus试用)` 账号生成支付链接/二维码，结果保存在账号行内（可复制链接、查看二维码、显示到期时间）。
+
+支持三种后端（「配置 → 提链」切换 `EXTRACT_LINK_BACKEND`）：
+
+1. **cdk**（默认）：原 CDK 提链服务，配置 `EXTRACT_LINK_API_BASE` + `EXTRACT_LINK_CDK`，类型支持 `pix / upi / kakao_pay / ideal`。
+2. **pay153**：对接 [pay153-checkout-link](https://github.com/1537271403/pay153-checkout-link) 服务，配置：
+
+   ```dotenv
+   EXTRACT_LINK_BACKEND=pay153
+   PAY153_API_BASE=http://127.0.0.1:18082
+   PAY153_INTERNAL_KEY=你的内部密钥        # 可选；设置后绕过公开队列 IP RPM，并允许走服务端动态代理
+   PAY153_PLAN=plus
+   PAY153_COUNTRY=US                      # 留空由服务端自动选择
+   PAY153_CURRENCY=USD                    # 留空由服务端自动选择
+   PAY153_ENTRY_PROXIES=                   # 每行一条；留空且配置了内部密钥时走 pay153 动态代理
+   PAY153_EXIT_PROXIES=
+   PAY153_RETRY_COUNT=3
+   PAY153_USE_PROMO=True
+   ```
+
+   pay153 后端提链类型支持 `hosted / ph_short / paypal / ideal / twint / upi / pix / momo / gcash / kakao`（兼容旧名称 `kakao_pay`）。任务通过 `POST /api/checkout` 创建、`GET /api/checkout-progress` 轮询，无需 CDK。
 
 ### 线程数说明
 
@@ -570,6 +620,17 @@ REGISTER_PASSWORD = "你的固定密码"
 - 批次归档 `accounts/YYYYMMDD-.../注册成功账号.json` 的 `extra.registration_password`
 
 注意：账号表里的 `password` 字段仍用于 Outlook 邮箱素材密码，不会被 OpenAI 注册密码覆盖。
+
+### 查活时自动识别密码与 2FA
+
+账号列表点击“查活”后，程序会根据账号保存的凭证自动选择登录方式，不需要手动勾选：
+
+1. 有 `registration_password`：先提交 ChatGPT 密码；如果响应要求 MFA/TOTP，再自动生成当前 6 位 TOTP 并完成验证。
+2. 没有登录密码：使用邮箱 OTP 登录。
+3. 密码登录后若服务端仍要求邮箱验证，也会自动切换到邮箱 OTP。
+4. 已有 access token 且未启用 TOTP 的账号，会先复用登录态预热，再走 reauth + 邮箱 OTP 刷新 token。
+
+导入通用 API 五段账号行时，第二段会保存为 `registration_password`；Outlook 四段素材中的邮箱密码不会误提交到 OpenAI。
 
 ---
 

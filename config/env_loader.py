@@ -18,7 +18,12 @@ _LOADED = False
 
 # 这些多行列表字段允许用空值显式覆盖为 []。
 # 例如 WebUI 清空代理池后会写入 PROXY_POOL="" / PROXY_POOL="[]"，不能再回退到源码默认本地代理。
-EXPLICIT_EMPTY_LIST_ENV_KEYS = {"PROXY_POOL"}
+EXPLICIT_EMPTY_LIST_ENV_KEYS = {
+    "PROXY_POOL",
+    "PAYMENT_METHOD_CHECK_PROXIES",
+    "DJB_PROXIES",
+    "DJB_EXIT_PROXIES",
+}
 
 # 统一管理：env key -> 说明（.env.example 用）
 SECRET_ENV_KEYS: dict[str, str] = {
@@ -28,6 +33,12 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "SKYVERN_API_KEY": "Skyvern API Key",
     "ROXY_API_TOKEN": "RoxyBrowser 本地 API Token",
     "PLAN_CHECK_PROXY": "套餐查询专用代理（可能包含认证信息）",
+    "PAYMENT_METHOD_CHECK_PROXY": "支付方式检测代理（可能包含认证信息）",
+    "PAYMENT_METHOD_CHECK_PROXIES": "支付方式检测按地区代理映射（可能包含认证信息）",
+    "PAYMENT_QUALIFICATION_PATH": "支付方式检测模块路径",
+    "PAYMENT_QUALIFICATION_API_BASE": "支付方式检测服务 API 基地址",
+    "PAYMENT_QUALIFICATION_API_PATH": "支付方式检测服务 API 路径",
+    "PAYMENT_QUALIFICATION_API_KEY": "支付方式检测服务 API 密钥",
     "QQ_IMAP_PASSWORD": "QQ 邮箱 IMAP 授权码（不是 QQ 密码）",
     "GPTMAIL_API_KEY": "GPTMail API Key",
     "CLOUDFLARE_API_KEY": "Cloudflare Worker 临时邮箱 API Key / ADMIN_PASSWORD",
@@ -37,6 +48,10 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "CLOUDMAIL_PASSWORD": "CloudMail 登录密码",
     "CPA_MANAGEMENT_KEY": "CPA 管理接口密钥",
     "EXTRACT_LINK_CDK": "提链服务 CDK",
+    "DJB_CARD_CODE": "DJB 提链服务卡密（CDK）",
+    "DJB_PROXIES": "DJB 建单代理池（可能包含认证信息）",
+    "DJB_EXIT_PROXIES": "DJB 出口/账单代理池（可能包含认证信息）",
+    "PAY153_INTERNAL_KEY": "pay153-checkout-link 内部请求密钥（X-Pay153-Internal-Key）",
     "SUB2API_API_KEY": "sub2api 管理接口 API Key",
     "SUB2API_API_TOKEN": "sub2api 管理接口鉴权 Token（旧配置名，兼容）",
     "SMS_API_KEY": "接码平台 API Key（如 GrizzlySMS）",

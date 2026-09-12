@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs, quote
 
+import pyotp
+
 # 用模块属性方式访问 config，支持 WebUI 热加载（config.reload_all()）。
 # 协议级常量（CLIENT_ID/URL/SCOPE/OUTPUT_DIRNAME）虽然不会改，统一从 _cfg 读，
 # 这样 reload 后立即生效，不用再分两套导入。
@@ -45,6 +47,7 @@ from core.openai_auth import (
     build_sentinel_header,
     network_preflight,
 )
+from core import db
 from core import sms_provider
 from curl_cffi import requests as curl_requests
 
@@ -104,6 +107,66 @@ def _codex_result(
         "callback_url": callback_url,
         "message": message,
     }
+
+
+def _account_registration_password(email: str) -> str:
+    """Return the stored ChatGPT registration password, never the mail-pool password."""
+    try:
+        account = db.get_account_by_email(email)
+        if not account:
+            return ""
+        extra_raw = account.get("extra_json")
+        extra = {}
+        if isinstance(extra_raw, str) and extra_raw.strip():
+            try:
+                parsed = json.loads(extra_raw)
+                if isinstance(parsed, dict):
+                    extra = parsed
+            except Exception:
+                pass
+        elif isinstance(extra_raw, dict):
+            extra = extra_raw
+        # Only explicit registration_password is trusted by default. `password`
+        # is usually an Outlook/email-pool credential and must not be submitted to
+        # OpenAI. Generic API's chatgpt_api material format is the exception:
+        # there the password field is explicitly the ChatGPT login password.
+        explicit = str(extra.get("registration_password") or account.get("registration_password") or "").strip()
+        if explicit:
+            return explicit
+        line_format = str(account.get("account_line_format") or "").strip().lower().replace("-", "_")
+        email_source = str(account.get("email_source") or "").strip().lower()
+        is_chatgpt_material = line_format == "chatgpt_api" or (
+            email_source == "generic_api" and bool(str(account.get("code_url") or "").strip())
+        )
+        if is_chatgpt_material:
+            return str(account.get("password") or "").strip()
+        return ""
+    except Exception:
+        logger.debug("[Codex] cannot load registration password for %s", email, exc_info=True)
+        return ""
+
+
+def _account_totp_secret(email: str) -> str:
+    """Return the stored ChatGPT TOTP secret, if present."""
+    try:
+        account = db.get_account_by_email(email)
+        return str((account or {}).get("totp_secret") or "").strip()
+    except Exception:
+        return ""
+
+
+def _account_totp_code(email: str) -> str:
+    secret = _account_totp_secret(email)
+    return pyotp.TOTP(secret).now() if secret else ""
+
+
+# Backwards-compatible helper names used by older callers/tests.
+def _account_password(email: str) -> str:
+    return _account_registration_password(email)
+
+
+def _account_totp(email: str) -> str:
+    return _account_totp_secret(email)
 
 
 # ============================================================
@@ -1363,7 +1426,7 @@ def run_codex_oauth(
     if otp_provider is None:
         from core.email_provider import wait_for_otp as otp_provider
 
-    session = BrowserSession(proxy=proxy)
+    session = BrowserSession(proxy=proxy, fingerprint_seed=f"account:{email.lower()}")
     try:
         logger.info(f"[Codex] 开始授权（全新 session）：{email}")
 

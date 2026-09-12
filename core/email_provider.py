@@ -85,8 +85,32 @@ def acquire_email() -> str:
     raise RuntimeError(f"所有邮箱来源均领取失败: {sources}; last={last_exc}")
 
 
+def _normalize_explicit_email_source(value: str | None) -> str | None:
+    if value is None:
+        return None
+    raw = str(value or "").strip()
+    for item in raw.replace(";", ",").replace("|", ",").split(","):
+        source = item.strip().strip("\"'").lower()
+        if source in _VALID_SOURCES:
+            return source
+    return None
+
+
+def _registered_email_source(email: str) -> str | None:
+    """Prefer the source persisted with a registered account."""
+    try:
+        from core import db
+        account = db.get_account_by_email(email)
+        return _normalize_explicit_email_source((account or {}).get("email_source"))
+    except Exception:
+        return None
+
+
 def resolve_email_source(email: str) -> str:
     """根据邮箱在各池中的归属判断实际来源。"""
+    registered_source = _registered_email_source(email)
+    if registered_source:
+        return registered_source
     from core.gptmail_client import get_account_context as get_gptmail_context
     if get_gptmail_context(email):
         return "gptmail"
@@ -124,6 +148,7 @@ def wait_for_otp(
     max_wait: int | None = None,
     poll_interval: int | None = None,
     settle_seconds: int | None = None,
+    email_source: str | None = None,
 ) -> str:
     """等待并返回该邮箱最新的 ChatGPT OTP（6 位数字字符串）。
 
@@ -156,7 +181,11 @@ def wait_for_otp(
     if settle_seconds is not None:
         extra_kwargs["settle_seconds"] = settle_seconds
 
-    source = resolve_email_source(email)
+    source = (
+        _normalize_explicit_email_source(email_source)
+        or _registered_email_source(email)
+        or resolve_email_source(email)
+    )
     if source == "gptmail":
         from core.gptmail_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)

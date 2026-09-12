@@ -3,6 +3,7 @@
 curl_cffi Session 封装
 统一管理 Cookie、请求头和 TLS 指纹
 """
+import hashlib
 import logging
 import random
 import threading
@@ -17,6 +18,7 @@ from config import (
     SEC_CH_UA_BITNESS, SEC_CH_UA_MODEL, SEND_HIGH_ENTROPY_CLIENT_HINTS,
     ACCEPT_LANGUAGE, IMPERSONATE, OAI_CLIENT_BUILD_NUMBER, OAI_CLIENT_VERSION,
     REQUEST_TIMEOUT, pick_proxy, pick_browser_profile, validate_browser_profile,
+    BROWSER_PROFILE_POOL, build_browser_environment,
 )
 
 
@@ -26,13 +28,35 @@ _GEO_CACHE_LOCK = threading.Lock()
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
 
 
+def _seed_uuid(seed: str, salt: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{salt}:{seed}".strip()))
+
+
+def _seed_int(seed: str, salt: str, bits: int = 63) -> int:
+    digest = hashlib.sha256(f"{salt}:{seed}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << bits) - 1)
+
+
+def _seeded_browser_profile(seed: str, geo: dict | None = None) -> dict:
+    if not seed or not BROWSER_PROFILE_POOL:
+        return pick_browser_profile(geo)
+    base = BROWSER_PROFILE_POOL[_seed_int(seed, "browser_profile_index", bits=32) % len(BROWSER_PROFILE_POOL)]
+    return build_browser_environment(geo, base_profile=base)
+
+
 class BrowserSession:
     """
     模拟 Chrome 浏览器的 HTTP 会话管理器。
     使用 curl_cffi 的 impersonate 功能绕过 Cloudflare TLS 指纹检测。
     """
 
-    def __init__(self, proxy: str = None, *, detect_exit_geo: bool = True):
+    def __init__(
+        self,
+        proxy: str = None,
+        *,
+        detect_exit_geo: bool = True,
+        fingerprint_seed: str | None = None,
+    ):
         """
         初始化会话。
 
@@ -51,26 +75,25 @@ class BrowserSession:
         else:
             self.proxy = proxy
 
-        # 生成设备ID（oai-did），整个注册流程复用
-        self.device_id = str(uuid.uuid4())
-
-        # 生成 auth_session_logging_id
-        self.auth_session_logging_id = str(uuid.uuid4())
-
-        # ChatGPT 前端会话 ID：CES / Statsig / API 链路内保持稳定。
-        self.oai_session_id = str(uuid.uuid4())
-
-        # Datadog/RUM 关联 ID：每个 BrowserSession 独立生成，禁止跨账号复用。
-        # 只作为前端同形态诊断头，贯穿本会话内所有 auth/chatgpt/sentinel API 调用。
-        self.datadog_trace_id = str(random.getrandbits(63))
-        self.datadog_parent_id = str(random.getrandbits(63))
+        self.fingerprint_seed = str(fingerprint_seed or "").strip()
+        seed = self.fingerprint_seed
+        # A seed makes repeated checks for one account stable while retaining
+        # random identifiers for all existing callers that omit it.
+        self.device_id = _seed_uuid(seed, "device_id") if seed else str(uuid.uuid4())
+        self.auth_session_logging_id = _seed_uuid(seed, "auth_session_logging_id") if seed else str(uuid.uuid4())
+        self.oai_session_id = _seed_uuid(seed, "oai_session_id") if seed else str(uuid.uuid4())
+        self.datadog_trace_id = str(_seed_int(seed, "datadog_trace_id")) if seed else str(random.getrandbits(63))
+        self.datadog_parent_id = str(_seed_int(seed, "datadog_parent_id")) if seed else str(random.getrandbits(63))
         self.datadog_origin = "rum"
-
-        # Sentinel SDK 内部 sid：真实 SDK 会单独生成一个 UUID，和 oai-did 不是同一个值。
-        # Python 初始 p 与 Node Runner 最终 token 都复用这个 sid，保持同一 SDK 实例语义。
-        self.sentinel_sid = str(uuid.uuid4())
-        self.react_listening_key = "_reactListening" + uuid.uuid4().hex[:12]
-        self.react_container_key = "__reactContainer$" + uuid.uuid4().hex[:11]
+        self.sentinel_sid = _seed_uuid(seed, "sentinel_sid") if seed else str(uuid.uuid4())
+        self.react_listening_key = (
+            "_reactListening" + _seed_uuid(seed, "react_listening_key").replace("-", "")[:12]
+            if seed else "_reactListening" + uuid.uuid4().hex[:12]
+        )
+        self.react_container_key = (
+            "__reactContainer$" + _seed_uuid(seed, "react_container_key").replace("-", "")[:11]
+            if seed else "__reactContainer$" + uuid.uuid4().hex[:11]
+        )
         self.react_resources_key = "__reactResources$" + self.react_container_key.split("$", 1)[1]
 
         # 创建 curl_cffi 会话
@@ -94,7 +117,7 @@ class BrowserSession:
         # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
         self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
         self._enforce_proxy_quality()
-        self.browser_profile = pick_browser_profile(self.exit_geo)
+        self.browser_profile = _seeded_browser_profile(self.fingerprint_seed, self.exit_geo)
         self.browser_profile["react_listening_key"] = self.react_listening_key
         self.browser_profile["react_container_key"] = self.react_container_key
         self.browser_profile["react_resources_key"] = self.react_resources_key
@@ -534,6 +557,11 @@ class BrowserSession:
         headers.setdefault("x-openai-target-path", path)
         headers.setdefault("x-openai-target-route", self._chatgpt_target_route(path))
         return headers
+
+    def reset_circuit_breaker(self) -> None:
+        """Clear a best-effort bootstrap circuit state before formal auth."""
+        self.blocked_until = 0.0
+        self.blocked_reason = ""
 
     def _raise_if_circuit_open(self) -> None:
         if self.blocked_until and time.time() < self.blocked_until:

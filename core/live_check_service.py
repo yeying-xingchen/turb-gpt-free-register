@@ -47,6 +47,15 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             return {"ok": False, "status": "failed", "error": "账号已删除或查活状态已被重置"}
         route = resolve_plan_check_route(explicit_proxy=proxy)
         selected_proxy = route.get("proxy")
+        # Use the source saved with the account. This is essential for imported
+        # generic_api records whose code_url is the only reliable OTP source.
+        try:
+            account = db.get_account(account_id) or {}
+        except Exception:
+            account = {}
+        email_source = str(account.get("email_source") or "").strip() or None
+        if email_source:
+            _append_log(email, f"[查活] 使用注册时保存的邮箱来源：{email_source}")
         _append_log(
             email,
             "[查活] 开始后台执行 "
@@ -54,7 +63,9 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             f"proxy_mode={route.get('proxy_mode')} proxy_used={route.get('proxy_used') or '-'} "
             f"fallback_reason={route.get('proxy_fallback_reason') or '-'}"
         )
-        result = check_account_liveness(email, proxy=selected_proxy, clear_log=False)
+        result = check_account_liveness(
+            email, proxy=selected_proxy, clear_log=False, email_source=email_source,
+        )
         # 早期 providers/csrf 403 通常是该出口被 CF 拦截，不代表账号死亡。
         # auto/proxy 模式下如果用了代理，额外直连兜底一次，便于和套餐查询的 auto 语义保持接近。
         err_text = str(result.get("error") or "")
@@ -66,7 +77,9 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             and str(route.get("network_route") or "") == "proxy"
         ):
             _append_log(email, "[查活] 代理出口收到 403，尝试直连兜底一次")
-            result = check_account_liveness(email, proxy="", clear_log=False)
+            result = check_account_liveness(
+                email, proxy="", clear_log=False, email_source=email_source,
+            )
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")

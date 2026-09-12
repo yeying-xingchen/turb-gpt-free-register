@@ -252,15 +252,15 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     return auth_url
 
 
-def _follow_reauth(session: BrowserSession, auth_url: str) -> None:
-    """
-    步骤3: 跟随 authorize URL 触发邮箱 OTP 发送。
-    auth.openai.com 会重定向到 /email-verification 页面，期间发送 OTP 邮件。
-    """
+def _follow_reauth(session: BrowserSession, auth_url: str) -> str:
+    """跟随 reauth URL，触发邮箱 OTP 并返回最终落点 URL。"""
     headers = session.get_auth_navigate_headers(referer="https://chatgpt.com/")
     logger.info("[2FA] 跟随 authorize URL，触发 OTP 发送...")
     resp = session.get(auth_url, headers=headers, allow_redirects=True)
-    logger.info(f"[2FA] 落点 URL: {resp.url}")
+    resp.raise_for_status()
+    final_url = str(getattr(resp, "url", "") or "")
+    logger.info("[2FA] 落点 URL: %s", final_url)
+    return final_url
 
 
 def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
@@ -475,27 +475,56 @@ def save_account_data(
             auto_plan_check = False
     if not auto_plan_check:
         logger.info(f"[Plan] 注册后自动套餐查询已跳过: id={row_id}, email={email}")
-        return row_id
-    # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
-    # 入队，由专用线程池异步查询并回写，避免占用注册工作线程。
-    try:
-        from core.plan_check_service import enqueue_account_plan_check
+    else:
+        # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
+        # 入队，由专用线程池异步查询，避免占用注册工作线程。
+        try:
+            from core.plan_check_service import enqueue_account_plan_check
 
-        queued = enqueue_account_plan_check(
+            queued = enqueue_account_plan_check(
+                account_id=row_id,
+                email=email,
+                access_token=access_token,
+                trigger="registration_auto",
+            )
+            if queued.get("accepted"):
+                logger.info(f"[Plan] 注册后自动查询已入队: id={row_id}, email={email}")
+            elif queued.get("busy"):
+                logger.info(f"[Plan] 账号已有套餐查询，注册流程不重复入队: id={row_id}, email={email}")
+            else:
+                logger.warning(f"[Plan] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
+        except Exception as exc:
+            logger.warning(
+                f"[Plan] 注册后自动查询入队异常（不影响注册结果）: "
+                f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
+            )
+
+    try:
+        from config import payment as _payment_cfg
+        auto_payment_check = bool(getattr(_payment_cfg, "PAYMENT_METHOD_AUTO_CHECK_AFTER_REGISTER", False))
+    except Exception:
+        auto_payment_check = False
+    if not auto_payment_check:
+        logger.info(f"[Payment] 注册后自动支付方式查询已跳过: id={row_id}, email={email}")
+        return row_id
+
+    try:
+        from core.payment_method_service import enqueue_account_payment_method_check
+        queued = enqueue_account_payment_method_check(
             account_id=row_id,
             email=email,
             access_token=access_token,
             trigger="registration_auto",
         )
         if queued.get("accepted"):
-            logger.info(f"[Plan] 注册后自动查询已入队: id={row_id}, email={email}")
+            logger.info(f"[Payment] 注册后自动支付方式查询已入队: id={row_id}, email={email}")
         elif queued.get("busy"):
-            logger.info(f"[Plan] 账号已有套餐查询，注册流程不重复入队: id={row_id}, email={email}")
+            logger.info(f"[Payment] 账号已有支付方式查询，注册流程不重复入队: {email}")
         else:
-            logger.warning(f"[Plan] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
+            logger.warning(f"[Payment] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
     except Exception as exc:
         logger.warning(
-            f"[Plan] 注册后自动查询入队异常（不影响注册结果）: "
+            f"[Payment] 注册后自动支付方式查询入队异常（不影响注册结果）: "
             f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
         )
     return row_id

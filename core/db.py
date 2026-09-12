@@ -11,6 +11,7 @@
 """
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -25,6 +26,14 @@ _LEGACY_DATA_DIR = _PROJECT_ROOT / "data"
 _LOG_DIR = _PROJECT_ROOT / "注册日志"
 _PLAN_CHECK_STALE_SECONDS = 120
 _PLAN_CHECK_QUEUE_STALE_SECONDS = 1800
+# Payment checkout qualification can create several regional checkouts and is
+# intentionally allowed a longer running window than the lightweight plan API.
+_PAYMENT_METHOD_CHECK_STALE_SECONDS = 1800
+_PAYMENT_METHOD_CHECK_QUEUE_STALE_SECONDS = 3600
+# 提链远端任务通常可运行 10~15 分钟；不能复用套餐查询的 120 秒 stale 窗口，
+# 否则旧 worker 仍在远端执行时，重复点击会创建第二个任务并可能重复扣次。
+_EXTRACT_LINK_STALE_SECONDS = 3600
+_EXTRACT_LINK_QUEUE_STALE_SECONDS = 1800
 
 _OUTLOOK_JSON = _PROJECT_ROOT / "用于注册的邮箱.json"
 _OUTLOOK_TXT = _PROJECT_ROOT / "用于注册的邮箱.txt"
@@ -81,6 +90,43 @@ def _next_id(items: list[dict]) -> int:
     return (max(ids) if ids else 0) + 1
 
 
+def _safe_payment_error(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~-]+", "Bearer [redacted]", text)
+    text = re.sub(r"(?i)(https?://)([^/@\s]+):([^/@\s]+)@", r"\1[redacted]@", text)
+    text = re.sub(r"\bey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "[token-redacted]", text)
+    text = re.sub(r"\b(?:oaics|cs_(?:live|test))_[A-Za-z0-9]+\b", "[checkout-id-redacted]", text)
+    return text[:500]
+
+
+def _safe_payment_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist capability evidence before it reaches persistent JSON."""
+    allowed = {
+        "qualified", "channel", "target_channel", "country", "currency", "checkout_amount",
+        "available_channels", "channel_details", "channel_availability", "regions", "checked_regions",
+        "region_errors", "evidence",
+    }
+    sensitive_keys = {
+        "accesstoken", "access_token", "accountemail", "account_email",
+        "checkoutsessionid", "checkout_session_id", "stripeinit", "stripe_init",
+        "raw", "headers", "proxy", "authorization", "sentinel", "cookies",
+        "challenge", "token", "email",
+    }
+
+    def clean(value: Any, depth: int = 0):
+        if depth > 4:
+            return None
+        if isinstance(value, dict):
+            return {str(k): clean(v, depth + 1) for k, v in value.items() if str(k).lower() not in sensitive_keys}
+        if isinstance(value, list):
+            return [clean(v, depth + 1) for v in value[:200]]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return _safe_payment_error(value) if isinstance(value, str) else value
+        return _safe_payment_error(value)
+
+    return {key: clean(result.get(key)) for key in allowed if result.get(key) is not None}
+
+
 def _outlook_line(row: dict) -> str:
     return "----".join([
         row.get("email") or "",
@@ -98,6 +144,19 @@ def _generic_api_email_line(row: dict) -> str:
 
 
 def _account_line(row: dict) -> str:
+    # 通用 API 导入整行：邮箱----ChatGPT密码----2OTP/TOTP----取码地址----AT。
+    # 不使用 original_email_line 直接追加 TOTP，避免把第三段重复输出。
+    if row.get("account_line_format") == "chatgpt_api" or (
+        row.get("code_url") and row.get("email_source") == "generic_api"
+        and (row.get("password") is not None or row.get("registration_password") is not None)
+    ):
+        base = "----".join([
+            str(row.get("email") or ""),
+            str(row.get("registration_password") or row.get("password") or ""),
+            str(row.get("totp_secret") or ""),
+            str(row.get("code_url") or ""),
+        ])
+        return f"{base}----{row.get('access_token') or ''}"
     base = row.get("original_email_line") or row.get("email") or ""
     token = row.get("access_token") or ""
     totp = row.get("totp_secret") or ""
@@ -519,6 +578,20 @@ def _decorate_account(row: dict) -> dict:
     out = dict(row)
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
+    payment_status = out.get("payment_method_check_status")
+    if payment_status in {"queued", "running"}:
+        try:
+            stamp_key = "payment_method_check_queued_at" if payment_status == "queued" else "payment_method_check_started_at"
+            stale_after = _PAYMENT_METHOD_CHECK_QUEUE_STALE_SECONDS if payment_status == "queued" else _PAYMENT_METHOD_CHECK_STALE_SECONDS
+            started_at = datetime.fromisoformat(str(out.get(stamp_key) or ""))
+            if (datetime.now() - started_at).total_seconds() >= stale_after:
+                out["payment_method_check_status"] = "failed"
+                out["payment_method_check_error"] = "上次支付方式查询状态已超时，可重新查询"
+                out["payment_method_check_stale"] = True
+        except (TypeError, ValueError):
+            out["payment_method_check_status"] = "failed"
+            out["payment_method_check_error"] = "上次支付方式查询状态异常，可重新查询"
+            out["payment_method_check_stale"] = True
     plan_status = out.get("plan_check_status")
     if plan_status in {"queued", "running"}:
         try:
@@ -550,6 +623,28 @@ def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> b
     if f == "free":
         return plan == "free"
     return plan == f
+
+
+def _account_matches_status_filter(row: dict, status_filter: str | None = None) -> bool:
+    """账号状态过滤：存活、查活失败、明确废号和可免费试用。"""
+    f = str(status_filter or "").strip().lower()
+    if not f or f in {"all", "any"}:
+        return True
+    live_status = str(row.get("live_check_status") or "").strip().lower()
+    codex_status = str(row.get("codex_status") or "").strip().lower()
+    if f == "plus":
+        return _account_matches_plan_filter(row, "plus")
+    if f in {"live", "alive"}:
+        return live_status == "live" and row.get("live_check_ok") is True
+    if f in {"failed", "live_failed", "liveness_failed"}:
+        return live_status == "failed"
+    if f in {"trial", "free_trial", "plus_trial"}:
+        # 该字段由套餐查询返回，表示当前 free 账号存在 Plus 免费试用资格。
+        return _account_matches_plan_filter(row, "free") and row.get("plus_trial_eligible") is True
+    if f in {"deactivated", "dead", "invalid"}:
+        # 兼容早期只写入 codex_status、尚未写入 live_check_status 的废号记录。
+        return live_status == "deactivated" or codex_status == "deactivated"
+    return True
 
 
 def _decorate_outlook(row: dict, account_by_email: dict[str, dict] | None = None) -> dict:
@@ -676,6 +771,162 @@ def insert_account(
         _save_accounts(accounts)
         _save_outlook(outlook_rows)
         return row_id
+
+
+def _attach_imported_generic_api_email(
+    rows: list[dict],
+    *,
+    email: str,
+    code_url: str,
+    access_token: str,
+    account_id: int,
+    now: str,
+) -> bool:
+    """把导入账号携带的取码地址关联到通用 API 邮箱池。"""
+    code_url = str(code_url or "").strip()
+    if not code_url:
+        return False
+    pool_row = _find_by_email(rows, email)
+    if pool_row is None:
+        pool_row = {
+            "id": _next_id(rows),
+            "email": email,
+            "code_url": code_url,
+            "status": "used",
+            "used_at": now,
+            "note": "随已注册账号导入，用于查活 OTP",
+            "imported_at": now,
+        }
+        rows.append(pool_row)
+    else:
+        pool_row["code_url"] = code_url
+        pool_row["status"] = "used"
+        pool_row["used_at"] = pool_row.get("used_at") or now
+        pool_row["note"] = pool_row.get("note") or "随已注册账号导入，用于查活 OTP"
+    pool_row["registered_account_id"] = account_id
+    pool_row["access_token"] = access_token
+    pool_row["completed_at"] = pool_row.get("completed_at") or now
+    pool_row["copy_line"] = _generic_api_email_line(pool_row)
+    return True
+
+
+def import_registered_accounts(records: list[dict], duplicate_mode: str = "skip") -> dict:
+    """导入已有 access token 账号。
+
+    ``records`` 应已由 :mod:`core.account_import` 归一化。邮箱大小写不敏感，
+    默认跳过已有账号；``duplicate_mode=update`` 时更新 token，并只在输入
+    明确提供时更新 TOTP/其它可选字段。记录含 ``code_url`` 时，同时关联到
+    通用 API 邮箱池，保证后续查活可以自动收取 OTP。返回值只包含账号标识和
+    统计，不返回密钥。
+    """
+    mode = str(duplicate_mode or "skip").strip().lower()
+    if mode not in ("skip", "update"):
+        raise ValueError("duplicate_mode 仅支持 skip/update")
+
+    optional_fields = (
+        "totp_secret", "user_id", "user_name", "plan_type", "expires_at",
+        "device_id", "proxy_used", "email_source", "account_id",
+        "current_plan_type", "subscription_plan", "plus_trial_eligible",
+        "codex_status", "codex_error", "note", "archived",
+        # ChatGPT 密码、2OTP/TOTP、取码地址等凭证字段；不回显到导入结果。
+        "password", "registration_password", "client_id", "refresh_token", "code_url", "account_line_format",
+    )
+    inserted: list[dict] = []
+    updated: list[dict] = []
+    skipped: list[dict] = []
+
+    with _LOCK:
+        accounts = _load_accounts()
+        generic_rows = _load_generic_api_emails()
+        generic_rows_changed = False
+        for raw in records:
+            if not isinstance(raw, dict):
+                skipped.append({"reason": "记录必须是对象"})
+                continue
+            email = str(raw.get("email") or "").strip()
+            token = str(raw.get("access_token") or "").strip()
+            if not email or not token:
+                skipped.append({"email": email, "reason": "缺少邮箱或 access_token"})
+                continue
+            existing = _find_by_email(accounts, email)
+            now = _now()
+            if existing is not None:
+                if mode == "skip":
+                    skipped.append({"email": existing.get("email") or email, "reason": "账号已存在"})
+                    continue
+                existing["access_token"] = token
+                for field in optional_fields:
+                    if field in raw and raw.get(field) is not None and raw.get(field) != "":
+                        existing[field] = raw[field]
+                if raw.get("material_line"):
+                    existing["original_email_line"] = str(raw["material_line"]).strip()
+                if raw.get("extra"):
+                    existing["extra_json"] = json.dumps(raw["extra"], ensure_ascii=False)
+                if raw.get("code_url"):
+                    generic_rows_changed = _attach_imported_generic_api_email(
+                        generic_rows,
+                        email=email,
+                        code_url=raw.get("code_url"),
+                        access_token=token,
+                        account_id=int(existing.get("id") or 0),
+                        now=now,
+                    ) or generic_rows_changed
+                existing["updated_at"] = now
+                existing["copy_line"] = _account_line(existing)
+                updated.append({"id": existing.get("id"), "email": existing.get("email") or email})
+                continue
+
+            row = {
+                "id": _next_id(accounts),
+                "email": email,
+                "created_at": str(raw.get("created_at") or now),
+                "access_token": token,
+                "password": raw.get("password") or None,
+                "registration_password": raw.get("registration_password") or None,
+                "totp_secret": raw.get("totp_secret") or None,
+                "user_id": raw.get("user_id"),
+                "user_name": raw.get("user_name") or "Imported Account",
+                "plan_type": raw.get("plan_type"),
+                "expires_at": raw.get("expires_at"),
+                "device_id": raw.get("device_id"),
+                "proxy_used": raw.get("proxy_used"),
+                "email_source": raw.get("email_source") or ("generic_api" if raw.get("code_url") else "imported"),
+                "codex_status": raw.get("codex_status") or "",
+                "codex_error": raw.get("codex_error"),
+                "updated_at": now,
+            }
+            for field in optional_fields:
+                if field in raw and raw.get(field) is not None and raw.get(field) != "":
+                    row[field] = raw[field]
+            if raw.get("material_line"):
+                row["original_email_line"] = str(raw["material_line"]).strip()
+            if raw.get("extra"):
+                row["extra_json"] = json.dumps(raw["extra"], ensure_ascii=False)
+            row["copy_line"] = _account_line(row)
+            accounts.append(row)
+            inserted.append({"id": row["id"], "email": email})
+            if raw.get("code_url"):
+                generic_rows_changed = _attach_imported_generic_api_email(
+                    generic_rows,
+                    email=email,
+                    code_url=raw.get("code_url"),
+                    access_token=token,
+                    account_id=int(row["id"]),
+                    now=now,
+                ) or generic_rows_changed
+
+        if inserted or updated:
+            _save_accounts(accounts)
+        if generic_rows_changed:
+            _save_generic_api_emails(generic_rows)
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "skipped": skipped,
+        "inserted_count": len(inserted),
+        "updated_count": len(updated),
+        "skipped_count": len(skipped),
+    }
 
 
 def update_account_codex_status(email: str, codex_status: str, codex_error: str | None = None) -> bool:
@@ -964,8 +1215,106 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
         return True
 
 
-def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str = "pix") -> bool:
-    """原子占用账号提链任务；已有未超时任务时返回 False。"""
+def claim_account_payment_method_check(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用账号支付方式查询；已有未超时任务时返回 False。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("payment_method_check_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "payment_method_check_queued_at" if current_status == "queued" else "payment_method_check_started_at"
+                stale_after = _PAYMENT_METHOD_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PAYMENT_METHOD_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["payment_method_check_status"] = "queued"
+        row["payment_method_check_ok"] = False
+        row["payment_method_check_trigger"] = str(trigger or "manual")
+        row["payment_method_check_queued_at"] = now
+        row["payment_method_check_started_at"] = None
+        row["payment_method_check_completed_at"] = None
+        row["payment_method_check_error"] = None
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def mark_account_payment_method_check_running(acc_id: int) -> bool:
+    """把已排队的支付方式查询标记为执行中。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("payment_method_check_status") not in {"queued", "running"}:
+            return False
+        row["payment_method_check_status"] = "running"
+        row["payment_method_check_started_at"] = _now()
+        row["payment_method_check_error"] = None
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_payment_method_checks() -> int:
+    """服务启动时恢复中断的支付方式查询状态。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("payment_method_check_status") not in {"queued", "running"}:
+                continue
+            row["payment_method_check_status"] = "failed"
+            row["payment_method_check_ok"] = False
+            row["payment_method_check_error"] = "WebUI 重启导致支付方式查询中断，请重新查询"
+            row["payment_method_check_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
+def update_account_payment_method_check(acc_id: int | None = None, email: str | None = None, result: dict | None = None) -> bool:
+    """更新账号支付方式能力查询结果，不保存原始 checkout/token。"""
+    result = result or {}
+    with _LOCK:
+        accounts = _load_accounts()
+        target_email = (email or "").lower()
+        row = next((r for r in accounts if (acc_id is not None and int(r.get("id") or 0) == int(acc_id)) or (target_email and (r.get("email") or "").lower() == target_email)), None)
+        if row is None:
+            return False
+        ok = bool(result.get("ok"))
+        row["payment_method_check_status"] = "success" if ok else "failed"
+        row["payment_method_check_ok"] = ok
+        row["payment_method_checked_at"] = result.get("checked_at") or _now()
+        row["payment_method_check_completed_at"] = _now()
+        row["payment_method_check_error"] = _safe_payment_error(result.get("error")) or None
+        row["payment_method_check_proxy_used"] = "configured" if result.get("proxy_used") else ""
+        if ok:
+            # Keep only the method/capability summary returned by the adapter;
+            # no token, cookies, or complete Stripe payload is accepted here.
+            safe = _safe_payment_result(result)
+            # The allowlist above deliberately excludes raw checkout payloads.
+
+            row["payment_method_available_channels"] = safe.get("available_channels") or []
+            row["payment_method_channel_availability"] = safe.get("channel_availability") or {}
+            row["payment_method_regions"] = safe.get("regions") or []
+            row["payment_method_region_errors"] = safe.get("region_errors") or []
+            row["payment_method_result_json"] = json.dumps(safe, ensure_ascii=False)
+            row["payment_method_last_success_at"] = result.get("checked_at") or _now()
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
+def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str = "pix") -> str | bool:
+    """原子占用账号提链任务；返回本次任务 nonce，避免旧 worker 覆盖新任务。"""
     with _LOCK:
         accounts = _load_accounts()
         row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
@@ -982,8 +1331,10 @@ def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str =
             except (TypeError, ValueError):
                 pass
         now = _now()
+        nonce = uuid.uuid4().hex
         row["extract_link_status"] = "queued"
         row["extract_link_ok"] = False
+        row["extract_link_nonce"] = nonce
         row["extract_link_trigger"] = str(trigger or "manual")
         row["extract_link_type"] = str(link_type or "pix").lower()
         row["extract_link_queued_at"] = now
@@ -993,15 +1344,17 @@ def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str =
         row["extract_link_message"] = "已入队"
         row["updated_at"] = now
         _save_accounts(accounts)
-        return True
+        return nonce
 
 
-def mark_account_extract_running(acc_id: int) -> bool:
-    """把提链任务标记为运行中。"""
+def mark_account_extract_running(acc_id: int, nonce: str | None = None) -> bool:
+    """把指定 nonce 的提链任务标记为运行中。"""
     with _LOCK:
         accounts = _load_accounts()
         row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
         if row is None or row.get("extract_link_status") not in {"queued", "running"}:
+            return False
+        if nonce is not None and str(row.get("extract_link_nonce") or "") != str(nonce):
             return False
         row["extract_link_status"] = "running"
         row["extract_link_started_at"] = _now()
@@ -1012,13 +1365,16 @@ def mark_account_extract_running(acc_id: int) -> bool:
         return True
 
 
-def update_account_extract(acc_id: int, result: dict | None = None) -> bool:
-    """更新账号提链任务结果/进度。"""
+def update_account_extract(acc_id: int, result: dict | None = None, nonce: str | None = None) -> bool:
+    """更新指定 nonce 的提链任务结果/进度，拒绝旧 worker 覆盖新任务。"""
     result = result or {}
+    expected_nonce = nonce if nonce is not None else result.get("_nonce")
     with _LOCK:
         accounts = _load_accounts()
         row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
         if row is None:
+            return False
+        if expected_nonce is not None and str(row.get("extract_link_nonce") or "") != str(expected_nonce):
             return False
         status = str(result.get("status") or ("success" if result.get("ok") else "failed"))
         ok = bool(result.get("ok")) and status == "success"
@@ -1102,7 +1458,7 @@ def _parse_iso_dt(value: str | None, end_of_day: bool = False) -> datetime | Non
         return None
 
 
-def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None, status_filter: str | None = None) -> list[dict]:
     rows = _load_accounts()
     if archived in (True, "1", "true", "yes", "only"):
         rows = [r for r in rows if bool(r.get("archived"))]
@@ -1112,6 +1468,7 @@ def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filte
         rows = [r for r in rows if not bool(r.get("archived"))]
     decorated = [_decorate_account(r) for r in rows]
     decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
+    decorated = [r for r in decorated if _account_matches_status_filter(r, status_filter)]
     decorated = [r for r in decorated if _account_matches_query(r, q)]
     # 按创建时间筛选（date_from/date_to 为 ISO 字符串或 YYYY-MM-DD）
     if date_from or date_to:
@@ -1132,7 +1489,7 @@ def _filtered_decorated_accounts(archived: str | bool | None = False, plan_filte
     return sorted(decorated, key=lambda x: int(x.get("id") or 0), reverse=True)
 
 
-def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None) -> dict:
+def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None, status_filter: str | None = None) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
         "id", "email", "archived",
@@ -1140,7 +1497,13 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "plan_check_status", "plan_check_ok", "plan_check_error",
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
+        "payment_method_check_status", "payment_method_check_ok", "payment_method_check_error",
+        "payment_method_check_trigger", "payment_method_check_queued_at", "payment_method_check_started_at",
+        "payment_method_check_completed_at", "payment_method_checked_at", "payment_method_check_proxy_used",
+        "payment_method_available_channels", "payment_method_channel_availability", "payment_method_regions",
+        "payment_method_region_errors", "payment_method_last_success_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
+        "live_check_status", "live_check_ok", "live_check_error", "live_checked_at",
         "live_check_device_id", "live_check_proxy_used", "live_check_fingerprint_text",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
@@ -1156,7 +1519,7 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
     )
     with _LOCK:
-        all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q)
+        all_rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, status_filter=status_filter, q=q, date_from=date_from, date_to=date_to)
         total = len(all_rows)
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
@@ -1192,6 +1555,16 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
                     "current_plan_type": row.get("current_plan_type"),
                     "plan_type": row.get("plan_type"),
                     "plus_trial_eligible": row.get("plus_trial_eligible"),
+                    "live_check_status": row.get("live_check_status"),
+                    "live_check_ok": row.get("live_check_ok"),
+                    "live_check_error": row.get("live_check_error"),
+                    "payment_method_check_status": row.get("payment_method_check_status"),
+                    "payment_method_check_ok": row.get("payment_method_check_ok"),
+                    "payment_method_check_error": row.get("payment_method_check_error"),
+                    "payment_method_checked_at": row.get("payment_method_checked_at"),
+                    "payment_method_available_channels": row.get("payment_method_available_channels"),
+                    "payment_method_regions": row.get("payment_method_regions"),
+                     "payment_method_region_errors": row.get("payment_method_region_errors"),
                     "extract_link_status": row.get("extract_link_status"),
                     "codex_status": row.get("codex_status"),
                     "codex_agent_status": row.get("codex_agent_status"),
@@ -1206,15 +1579,15 @@ def list_account_plan_check_statuses(limit: int = 5000, offset: int = 0, archive
         return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}:{revision_sig}"}
 
 
-def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None, status_filter: str | None = None) -> list[dict]:
     with _LOCK:
-        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q, date_from=date_from, date_to=date_to)
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, status_filter=status_filter, q=q, date_from=date_from, date_to=date_to)
         return rows[max(0, int(offset or 0)): max(0, int(offset or 0)) + max(1, int(limit))]
 
 
-def list_accounts_page(limit: int = 50, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None) -> dict:
+def list_accounts_page(limit: int = 50, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None, status_filter: str | None = None) -> dict:
     with _LOCK:
-        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, q=q, date_from=date_from, date_to=date_to)
+        rows = _filtered_decorated_accounts(archived=archived, plan_filter=plan_filter, status_filter=status_filter, q=q, date_from=date_from, date_to=date_to)
         total = len(rows)
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))

@@ -16,7 +16,7 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
-EXPLICIT_EMPTY_LIST_KEYS = {"PROXY_POOL"}
+EXPLICIT_EMPTY_LIST_KEYS = {"PROXY_POOL", "DJB_PROXIES", "DJB_EXIT_PROXIES"}
 
 
 # ============================================================
@@ -493,19 +493,155 @@ EDITABLE_FIELDS = [
         "key": "PLAN_CHECK_JITTER", "file": "proxy.py", "type": "float", "group": "代理池",
         "label": "套餐/Agent请求随机抖动(秒)", "help": "在查套餐和生成 Agent Token 的最小间隔上增加随机延迟，避免请求过于规律",
     },
-    # ---- 提链 ----
+    # ---- 支付方式资格检测 ----
     {
-        "key": "EXTRACT_LINK_API_BASE", "file": "extract_link.py", "type": "str", "group": "提链",
-        "label": "提链服务地址", "help": "填写提链服务 API 地址",
+        "key": "PAYMENT_QUALIFICATION_PATH", "file": "payment.py", "type": "str", "group": "支付方式",
+        "label": "qualification-test 路径", "help": "本地模式使用；填写 /home/.../qualification-test 可加载该项目的检测代码",
     },
     {
-        "key": "EXTRACT_LINK_CDK", "file": "extract_link.py", "type": "str", "group": "提链",
-        "label": "提链 CDK", "help": "创建提链任务和监听任务事件使用；成功提链扣 1 次",
+        "key": "PAYMENT_QUALIFICATION_API_BASE", "file": "payment.py", "type": "str", "group": "支付方式",
+        "label": "qualification-test API 基址", "help": "填写独立 qualification-test 服务地址后，使用其 POST API；例如 http://127.0.0.1:18097。留空则本地执行 checker",
+    },
+    {
+        "key": "PAYMENT_QUALIFICATION_API_PATH", "file": "payment.py", "type": "str", "group": "支付方式",
+        "label": "qualification-test API 路径", "help": "默认 /api/gcash/check；必须是 /api/ 下的 POST 路径",
+    },
+    {
+        "key": "PAYMENT_QUALIFICATION_API_KEY", "file": "payment.py", "type": "str", "group": "支付方式",
+        "label": "qualification-test API 密钥", "help": "可选；以 Authorization: Bearer 方式发送到独立检测服务",
         "storage": "env", "secret": True,
     },
     {
+        "key": "PAYMENT_METHOD_AUTO_CHECK_AFTER_REGISTER", "file": "payment.py", "type": "bool", "group": "支付方式",
+        "label": "注册后自动查支付方式", "help": "注册成功后异步查询配置地区的 Checkout 可用支付方式；只读取方式，不确认/发起支付",
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_REGIONS", "file": "payment.py", "type": "str", "group": "支付方式",
+        "label": "检测地区预设", "help": "逗号分隔：gcash,card,paypal_uk,paypal_nl,ideal_nl,momo_vn,gopay_id,upi_in,blik_pl,pix_br",
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_PROXY", "file": "payment.py", "type": "str", "group": "支付方式",
+        "label": "支付检测代理", "help": "通用目标国家出口代理；留空则尝试代理池。可能含认证信息，仅保存到 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_PROXIES", "file": "payment.py", "type": "list_str_multiline", "group": "支付方式",
+        "label": "支付检测分地区代理", "help": "每行 preset=proxy，例如 paypal_uk=http://user:pass@host:port；支持 default=proxy",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_WORKERS", "file": "payment.py", "type": "int", "group": "支付方式",
+        "label": "支付检测并发数", "help": "支付方式查询后台线程数，建议 1-3",
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_QUEUE_LIMIT", "file": "payment.py", "type": "int", "group": "支付方式",
+        "label": "支付检测队列上限", "help": "限制待执行账号数量",
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_TIMEOUT", "file": "payment.py", "type": "float", "group": "支付方式",
+        "label": "支付检测超时(秒)", "help": "一个账号全部地区检测的最大时间，建议 180-900",
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_RETRIES", "file": "payment.py", "type": "int", "group": "支付方式",
+        "label": "支付检测重试次数", "help": "单个地区网络失败时的重试次数，建议 1-3",
+    },
+    {
+        "key": "PAYMENT_METHOD_CHECK_MIN_INTERVAL", "file": "payment.py", "type": "float", "group": "支付方式",
+        "label": "支付检测间隔(秒)", "help": "账号任务启动前的节流间隔，降低集中请求风险",
+    },
+    # ---- 提链 ----
+    {
+        "key": "EXTRACT_LINK_BACKEND", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "提链后端", "help": "cdk=原 CDK 服务；pay153=pay153-checkout-link；djbnb=DJB 提链 API（/api/tasks 轮询）",
+    },
+    {
+        "key": "EXTRACT_LINK_API_BASE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "提链服务地址(cdk)", "help": "cdk 后端使用：填写提链服务 API 地址",
+    },
+    {
+        "key": "EXTRACT_LINK_CDK", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "提链 CDK", "help": "cdk 后端使用：创建提链任务和监听任务事件；成功提链扣 1 次",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "DJB_API_BASE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "DJB API 地址", "help": "djbnb 后端使用，例如 https://www.djbnb.xyz；对应 /api/tasks、/api/card/check",
+    },
+    {
+        "key": "DJB_CARD_CODE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "DJB 卡密", "help": "djbnb 后端使用；提链成功后按服务规则扣次数，仅保存到 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "DJB_PROXIES", "file": "extract_link.py", "type": "list_str_multiline", "group": "提链",
+        "label": "DJB 建单代理池", "help": "djbnb custom 模式每行一条代理；留空时复用通用代理池 PROXY_POOL",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "DJB_EXIT_PROXIES", "file": "extract_link.py", "type": "list_str_multiline", "group": "提链",
+        "label": "DJB 出口代理池", "help": "djbnb 可选出口/账单侧代理池，每行一条；留空时由服务端复用主池",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "DJB_PROXY_MODE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "DJB 代理模式", "help": "custom=使用自定义代理；builtin=使用服务端内置代理（需服务端开启）",
+    },
+    {
+        "key": "DJB_PARAMS_TEXT", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "DJB 附加参数", "help": "JSON 对象字符串，例如 {\"country\":\"ID\",\"currency\":\"IDR\"}",
+    },
+    {
+        "key": "DJB_CONCURRENCY", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "DJB 任务并发", "help": "发送给 DJB 的请求并发，最终受卡密等级和服务端上限约束",
+    },
+    {
+        "key": "DJB_POLL_INTERVAL_MS", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "DJB 轮询间隔(毫秒)", "help": "查询 /api/tasks/{id} 的间隔，建议 1000-3000",
+    },
+    {
+        "key": "DJB_TIMEOUT_MS", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "DJB 任务窗口(毫秒)", "help": "客户端等待窗口，服务端固定最大 10 分钟",
+    },
+    {
+        "key": "PAY153_API_BASE", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "pay153 服务地址", "help": "pay153 后端使用：pay153-checkout-link 服务地址，例如 http://127.0.0.1:18082",
+    },
+    {
+        "key": "PAY153_INTERNAL_KEY", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "pay153 内部密钥", "help": "pay153 后端使用：X-Pay153-Internal-Key 请求头；设置后可绕过公开队列 IP RPM，并允许未配置代理池时走 pay153 动态代理",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "PAY153_PLAN", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "pay153 计划", "help": "pay153 后端使用：plus / pro / team / codex_low",
+    },
+    {
+        "key": "PAY153_COUNTRY", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "pay153 国家", "help": "pay153 后端使用：结算国家代码，留空由服务端自动选择，如 US / BR / NL",
+    },
+    {
+        "key": "PAY153_CURRENCY", "file": "extract_link.py", "type": "str", "group": "提链",
+        "label": "pay153 币种", "help": "pay153 后端使用：结算币种，留空由服务端自动选择，如 USD / BRL / EUR",
+    },
+    {
+        "key": "PAY153_ENTRY_PROXIES", "file": "extract_link.py", "type": "list_str_multiline", "group": "提链",
+        "label": "pay153 入口代理池", "help": "pay153 后端使用：每行一条代理；留空且配置了内部密钥时走 pay153 动态代理",
+    },
+    {
+        "key": "PAY153_EXIT_PROXIES", "file": "extract_link.py", "type": "list_str_multiline", "group": "提链",
+        "label": "pay153 出口代理池", "help": "pay153 后端使用：每行一条代理；hosted/pix/momo 等路径可留空沿用入口代理",
+    },
+    {
+        "key": "PAY153_RETRY_COUNT", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "pay153 重试次数", "help": "pay153 后端使用：外层重试次数，每次重建 Checkout/设备标识/支付参数，建议 1-10",
+    },
+    {
+        "key": "PAY153_USE_PROMO", "file": "extract_link.py", "type": "bool", "group": "提链",
+        "label": "pay153 使用优惠", "help": "pay153 后端使用：Plus 计划请求优惠（试用零元）",
+    },
+    {
         "key": "EXTRACT_LINK_TYPE", "file": "extract_link.py", "type": "str", "group": "提链",
-        "label": "提链类型", "help": "支持 pix / upi / kakao_pay / ideal",
+        "label": "提链类型", "help": "cdk 支持 pix / upi / kakao_pay / ideal；pay153 支持 hosted / ph_short / paypal / ideal / twint / upi / pix / momo / gcash / kakao；djbnb 支持 paypal / gopay / gcash / momo / upi / card / pix / ideal",
     },
     {
         "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",

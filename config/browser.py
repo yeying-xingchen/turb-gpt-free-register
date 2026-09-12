@@ -82,6 +82,7 @@ CLOUD_PROXY_ORG_KEYWORDS = [
 COUNTRY_LOCALE_PROFILE_MAP = {
     "JP": "jp", "CN": "cn", "HK": "hk", "TW": "tw", "US": "us", "CA": "us",
     "SG": "sg", "GB": "gb", "AU": "gb", "DE": "de", "FR": "fr", "NL": "nl",
+    "VN": "vn",
 }
 
 BROWSER_LOCALE_PROFILES = {
@@ -95,6 +96,7 @@ BROWSER_LOCALE_PROFILES = {
     "de": {"navigator_language": "de-DE", "navigator_languages": ["de-DE"], "accept_language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7", "timezone_iana": "Europe/Berlin", "timezone_offset_minutes": 2 * 60, "timezone_name": "Central European Summer Time"},
     "fr": {"navigator_language": "fr-FR", "navigator_languages": ["fr-FR"], "accept_language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7", "timezone_iana": "Europe/Paris", "timezone_offset_minutes": 2 * 60, "timezone_name": "Central European Summer Time"},
     "nl": {"navigator_language": "nl-NL", "navigator_languages": ["nl-NL"], "accept_language": "nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7", "timezone_iana": "Europe/Amsterdam", "timezone_offset_minutes": 2 * 60, "timezone_name": "Central European Summer Time"},
+    "vn": {"navigator_language": "vi-VN", "navigator_languages": ["vi-VN", "vi"], "accept_language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7", "timezone_iana": "Asia/Ho_Chi_Minh", "timezone_offset_minutes": 7 * 60, "timezone_name": "Indochina Time"},
 }
 
 TIMEZONE_NAME_BY_IANA = {
@@ -111,6 +113,7 @@ TIMEZONE_NAME_BY_IANA = {
     "Europe/Berlin": "Central European Summer Time",
     "Europe/Paris": "Central European Summer Time",
     "Europe/Amsterdam": "Central European Summer Time",
+    "Asia/Ho_Chi_Minh": "Indochina Time",
 }
 
 
@@ -133,7 +136,12 @@ def _locale_profile_key_from_geo(geo: dict | None) -> str:
 
 def _build_locale_from_geo(geo: dict | None) -> dict:
     key = _locale_profile_key_from_geo(geo)
-    locale = dict(BROWSER_LOCALE_PROFILES.get(key, BROWSER_LOCALE_PROFILES[BROWSER_LOCALE_PROFILE]))
+    # 兜底链：geo 命中的画像 -> BROWSER_LOCALE_PROFILE -> 内置 jp。
+    # 注意不能写成 dict.get(key, BROWSER_LOCALE_PROFILES[BROWSER_LOCALE_PROFILE])，
+    # 默认值会被提前求值，BROWSER_LOCALE_PROFILE 配置成未知键时直接 KeyError。
+    if key not in BROWSER_LOCALE_PROFILES:
+        key = BROWSER_LOCALE_PROFILE if BROWSER_LOCALE_PROFILE in BROWSER_LOCALE_PROFILES else "jp"
+    locale = dict(BROWSER_LOCALE_PROFILES[key])
     if geo and AUTO_BROWSER_LOCALE_FROM_IP:
         tz = str(geo.get("timezone") or "").strip()
         if tz:

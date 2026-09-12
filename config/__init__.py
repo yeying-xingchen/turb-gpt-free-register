@@ -106,6 +106,44 @@ from config.proxy import (
     PROXY,
 )
 
+# ---------- 支付方式资格检测 ----------
+from config.payment import (
+    PAYMENT_QUALIFICATION_PATH,
+    PAYMENT_QUALIFICATION_API_BASE,
+    PAYMENT_QUALIFICATION_API_PATH,
+    PAYMENT_QUALIFICATION_API_KEY,
+    PAYMENT_METHOD_AUTO_CHECK_AFTER_REGISTER,
+    PAYMENT_METHOD_CHECK_WORKERS,
+    PAYMENT_METHOD_CHECK_QUEUE_LIMIT,
+    PAYMENT_METHOD_CHECK_TIMEOUT,
+    PAYMENT_METHOD_CHECK_RETRIES,
+    PAYMENT_METHOD_CHECK_MIN_INTERVAL,
+    PAYMENT_METHOD_CHECK_REGIONS,
+    PAYMENT_METHOD_CHECK_PROXY,
+    PAYMENT_METHOD_CHECK_PROXIES,
+)
+
+# ---------- DJB 提链 ----------
+from config.extract_link import (
+    EXTRACT_LINK_BACKEND,
+    EXTRACT_LINK_API_BASE,
+    EXTRACT_LINK_CDK,
+    DJB_API_BASE,
+    DJB_CARD_CODE,
+    DJB_PROXIES,
+    DJB_EXIT_PROXIES,
+    DJB_CONCURRENCY,
+    DJB_POLL_INTERVAL_MS,
+    DJB_TIMEOUT_MS,
+    DJB_PROXY_MODE,
+    DJB_PARAMS_TEXT,
+    EXTRACT_LINK_TYPE,
+    EXTRACT_LINK_WORKERS,
+    EXTRACT_LINK_QUEUE_LIMIT,
+    EXTRACT_LINK_REQUEST_TIMEOUT,
+    EXTRACT_LINK_EVENT_TIMEOUT,
+)
+
 # ---------- 注册默认信息 ----------
 from config.register import (
     REGISTER_EMAIL,
@@ -178,6 +216,7 @@ _RELOADABLE_SUBMODULES = (
     "config.flow_trigger",
     "config.codex",
     "config.extract_link",
+    "config.payment",
     "config.sub2api",
     "config.humanize",
 )
@@ -209,9 +248,9 @@ def reload_all() -> list[str]:
 def _refresh_top_level_constants() -> None:
     """把刚 reload 的子模块的常量重新拷一份到 config 包顶层。"""
     import config as _self
-    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger
+    from config import browser, openai_protocol, proxy as _proxy, register, payment, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger
     # 简单粗暴：枚举一遍重要常量，覆盖到 _self
-    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger):
+    for src in (browser, openai_protocol, _proxy, register, payment, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger):
         for k in dir(src):
             if k.isupper() or k in ("pick_proxy", "pick_browser_profile", "build_browser_environment", "validate_browser_profile"):
                 setattr(_self, k, getattr(src, k))
@@ -243,6 +282,21 @@ __all__ = [
     "PLAN_CHECK_TIMEOUT", "PLAN_CHECK_MAX_ATTEMPTS", "PLAN_CHECK_RETRY_DELAY",
     "PLAN_CHECK_REGISTRATION_RECHECK_DELAY", "PLAN_CHECK_WORKERS", "PLAN_CHECK_QUEUE_LIMIT",
     "PLAN_CHECK_MIN_INTERVAL", "PLAN_CHECK_JITTER", "pick_proxy", "PROXY",
+    # DJB / extract link
+    "EXTRACT_LINK_BACKEND", "EXTRACT_LINK_API_BASE", "EXTRACT_LINK_CDK",
+    "DJB_API_BASE", "DJB_CARD_CODE", "DJB_PROXIES", "DJB_EXIT_PROXIES",
+    "DJB_CONCURRENCY", "DJB_POLL_INTERVAL_MS", "DJB_TIMEOUT_MS",
+    "DJB_PROXY_MODE", "DJB_PARAMS_TEXT", "EXTRACT_LINK_TYPE",
+    "EXTRACT_LINK_WORKERS", "EXTRACT_LINK_QUEUE_LIMIT",
+    "EXTRACT_LINK_REQUEST_TIMEOUT", "EXTRACT_LINK_EVENT_TIMEOUT",
+    # payment method qualification
+    "PAYMENT_QUALIFICATION_PATH", "PAYMENT_QUALIFICATION_API_BASE",
+    "PAYMENT_QUALIFICATION_API_PATH", "PAYMENT_QUALIFICATION_API_KEY",
+    "PAYMENT_METHOD_AUTO_CHECK_AFTER_REGISTER",
+    "PAYMENT_METHOD_CHECK_WORKERS", "PAYMENT_METHOD_CHECK_QUEUE_LIMIT",
+    "PAYMENT_METHOD_CHECK_TIMEOUT", "PAYMENT_METHOD_CHECK_RETRIES",
+    "PAYMENT_METHOD_CHECK_MIN_INTERVAL", "PAYMENT_METHOD_CHECK_REGIONS",
+    "PAYMENT_METHOD_CHECK_PROXY", "PAYMENT_METHOD_CHECK_PROXIES",
     # register
     "REGISTER_EMAIL", "REGISTER_PASSWORD", "REGISTER_NAME",
     # email
