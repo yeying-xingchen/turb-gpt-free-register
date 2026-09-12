@@ -142,6 +142,31 @@ def _is_transient_network_error(exc: Exception) -> bool:
     return any(k in msg for k in transient_keywords)
 
 
+def _is_retryable_authorize_error(exc: Exception) -> bool:
+    """authorize 导航的 403/429/5xx 可在同一会话内复用新 CF Cookie 重试。"""
+    response = getattr(exc, "response", None)
+    try:
+        status = int(getattr(response, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status in (403, 408, 425, 429) or status >= 500:
+        return True
+    text = str(exc or "").lower()
+    return _is_transient_network_error(exc) or any(
+        marker in text for marker in ("http 403", "http error 403", "熔断冷却")
+    )
+
+
+def _reset_retryable_circuit(session: BrowserSession) -> None:
+    """仅清除本地熔断，保留当前 Session 的 Cookie Jar 和完整身份上下文。"""
+    reset = getattr(session, "reset_circuit_breaker", None)
+    if callable(reset):
+        reset()
+    else:
+        session.blocked_until = 0.0
+        session.blocked_reason = ""
+
+
 def network_preflight(session: BrowserSession) -> None:
     """
     注册前网络预检：只建立边缘节点/cookie/基础连通性，不携带邮箱、不触发 OTP。
@@ -213,15 +238,18 @@ def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
             return final_url
         except Exception as exc:
             last_exc = exc
-            if not _is_transient_network_error(exc):
+            if not _is_retryable_authorize_error(exc):
                 # 非临时性错误（比如 4xx 业务错误）直接抛出，不重试
                 raise
             if attempt >= _FOLLOW_AUTH_MAX_ATTEMPTS:
                 break
+            # 首次 403 常会同时刷新 __cf_bm；保留同一个 BrowserSession/Cookie
+            # Jar，只清掉本地熔断后重试，不能重建会话丢掉该 Cookie。
+            _reset_retryable_circuit(session)
             backoff = _FOLLOW_AUTH_BACKOFF_BASE ** (attempt - 1)
             logger.warning(
-                f"[步骤4] 临时性网络错误 ({type(exc).__name__}: {str(exc)[:120]})，"
-                f"{backoff:.1f}s 后重试..."
+                f"[步骤4] authorize 临时失败 ({type(exc).__name__}: {str(exc)[:120]})，"
+                f"保留当前 session/deviceId/CF Cookie，{backoff:.1f}s 后重试..."
             )
             time.sleep(backoff)
 

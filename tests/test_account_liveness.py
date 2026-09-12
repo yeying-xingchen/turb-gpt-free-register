@@ -77,9 +77,11 @@ class AccountLivenessTests(unittest.TestCase):
 
         self.assertEqual(session.proxy, "")
         self.assertEqual(authorize_url, "https://auth.example/authorize")
-        self.assertEqual(session.kwargs["fingerprint_seed"], "account:user@example.com")
+        self.assertTrue(
+            session.kwargs["fingerprint_seed"].startswith("live-check:user@example.com:")
+        )
 
-    def test_preflight_retries_with_new_session_when_csrf_is_blocked(self):
+    def test_preflight_retries_with_same_session_when_csrf_is_blocked(self):
         csrf_errors = [RuntimeError("HTTP Error 403"), "csrf"]
         with patch.object(liveness, "BrowserSession", _DummyBrowserSession), \
              patch.object(liveness, "_warm_login_fingerprint_context"), \
@@ -91,13 +93,12 @@ class AccountLivenessTests(unittest.TestCase):
             )
 
         self.assertIs(_DummyBrowserSession.created[-1], session)
-        self.assertEqual(len(_DummyBrowserSession.created), 2)
-        self.assertTrue(_DummyBrowserSession.created[0].session.closed)
-        # None means each attempt may reselect a proxy from the configured pool.
+        # 403 下发的 CF Cookie 必须留在同一 Cookie Jar 中，不能每轮新建会话。
+        self.assertEqual(len(_DummyBrowserSession.created), 1)
+        self.assertFalse(_DummyBrowserSession.created[0].session.closed)
         self.assertIsNone(_DummyBrowserSession.created[0].received_proxy)
-        self.assertIsNone(_DummyBrowserSession.created[1].received_proxy)
 
-    def test_fingerprint_profile_is_pinned_when_route_changes(self):
+    def test_fingerprint_identity_is_pinned_when_session_is_recreated_in_one_attempt(self):
         state = {}
         first = MagicMock()
         first.browser_profile = {
@@ -129,6 +130,7 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertEqual(second_kwargs["browser_profile"]["navigator_language"], "ja-JP")
         self.assertEqual(second_kwargs["browser_profile"]["timezone_iana"], "Asia/Tokyo")
         self.assertEqual(first_kwargs["fingerprint_seed"], second_kwargs["fingerprint_seed"])
+        self.assertTrue(str(first_kwargs["fingerprint_seed"]).startswith("live-check:user@example.com:"))
 
     def test_reauth_otp_dead_account_error_is_not_retried(self):
         response = SimpleNamespace(
@@ -194,7 +196,7 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertEqual(check.call_args_list[0].kwargs["email_source"], "remail")
         self.assertEqual(check.call_args_list[1].kwargs["proxy"], "")
         self.assertEqual(check.call_args_list[1].kwargs["email_source"], "remail")
-        self.assertIs(
+        self.assertIsNot(
             check.call_args_list[0].kwargs["fingerprint_state"],
             check.call_args_list[1].kwargs["fingerprint_state"],
         )

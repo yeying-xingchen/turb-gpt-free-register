@@ -4,6 +4,7 @@ import logging
 import json
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -21,8 +22,8 @@ from core.openai_auth import (
     detect_account_unusable_text,
 )
 from core.account_export import (
-    _follow_reauth,
-    _trigger_reauth,
+    _follow_reauth_with_retry,
+    _trigger_reauth_with_retry,
     _validate_reauth_otp,
     fetch_session,
     follow_oauth_callback,
@@ -67,18 +68,31 @@ def _new_fingerprint_pinned_session(
     proxy: str | None,
     fingerprint_state: dict | None = None,
 ) -> BrowserSession:
-    """创建账号会话；同一查活任务内固定完整浏览器画像，不随出口切换漂移。"""
+    """创建任务独占账号会话；同一路由尝试内固定完整身份与浏览器画像。"""
     state = fingerprint_state if fingerprint_state is not None else {}
     saved_profile = state.get("browser_profile")
     identity = str(email).strip().lower()
+    # 每个查活任务生成一次独立 seed；同一任务内所有阶段/重试复用，下一任务及
+    # 其他账号均不会继承该组 device/session/sentinel 标识。
+    fingerprint_seed = str(state.get("fingerprint_seed") or "").strip()
+    if not fingerprint_seed:
+        fingerprint_seed = f"live-check:{identity}:{uuid.uuid4()}"
+        state["fingerprint_seed"] = fingerprint_seed
     session = BrowserSession(
         proxy=proxy,
-        # 首次需要按出口生成地区画像；之后直接复用，不再因重试/直连兜底
-        # 把 ja-JP/Asia-Tokyo 突然改成 zh-CN/Asia-Shanghai。
+        # 首次按当前出口生成地区画像；同一路由内部如需重建则原样复用。
         detect_exit_geo=not bool(saved_profile),
         browser_profile=dict(saved_profile) if isinstance(saved_profile, dict) else None,
-        fingerprint_seed=f"account:{identity}",
+        fingerprint_seed=fingerprint_seed,
+        device_id=state.get("device_id"),
+        auth_session_logging_id=state.get("auth_session_logging_id"),
+        oai_session_id=state.get("oai_session_id"),
+        sentinel_sid=state.get("sentinel_sid"),
     )
+    for key in (
+        "device_id", "auth_session_logging_id", "oai_session_id", "sentinel_sid",
+    ):
+        state.setdefault(key, str(getattr(session, key, "") or ""))
     if not saved_profile:
         generated_profile = getattr(session, "browser_profile", None)
         if isinstance(generated_profile, dict):
@@ -117,7 +131,7 @@ def _network_preflight_with_retry(
     max_attempts: int = 4,
     fingerprint_state: dict | None = None,
 ) -> tuple[BrowserSession, str]:
-    """CSRF → Signin 备用预检；失败时重新建立会话。
+    """CSRF → Signin 备用预检；失败时保留同一会话重试。
 
     `/api/auth/providers` 只是 NextAuth 的发现接口，signin 端点并不依赖它返回的
     内容。实际运行中该接口很容易先被 Cloudflare 拦截，如果把它作为硬门槛，后续
@@ -130,17 +144,15 @@ def _network_preflight_with_retry(
     session: BrowserSession | None = None
     last_exc: BaseException | None = None
     state = fingerprint_state if fingerprint_state is not None else {}
+    # 一次网络预检只创建一个 BrowserSession。403 响应下发的新 __cf_bm、
+    # OAuth/设备上下文都保留在同一 Cookie Jar 中供下一轮使用。
+    session = _new_fingerprint_pinned_session(email, proxy, state)
     for attempt in range(1, max_attempts + 1):
-        if session is not None:
-            try:
-                session.session.close()
-            except Exception:
-                pass
-        # 保留 None / "" 的语义差异：显式空字符串必须是真直连。
-        session = _new_fingerprint_pinned_session(email, proxy, state)
         logger.info(
-            "[查活] 会话创建完成：proxy=%s device_id=%s（网络预检第 %s/%s 次）",
-            session.proxy or "配置随机/直连", session.device_id, attempt, max_attempts,
+            "[查活] 复用统一会话：proxy=%s device_id=%s oai_session_id=%s（网络预检第 %s/%s 次）",
+            session.proxy or "配置随机/直连", session.device_id,
+            str(getattr(session, "oai_session_id", "") or "")[:12] + "...",
+            attempt, max_attempts,
         )
         logger.info("[查活] 指纹摘要：%s", session.fingerprint_summary_text())
         try:
@@ -156,8 +168,9 @@ def _network_preflight_with_retry(
                 except Exception:
                     pass
                 raise
+            _clear_optional_bootstrap_circuit(session)
             logger.warning(
-                "[查活] 网络预检失败（%s/%s），重新建立会话重试：%s",
+                "[查活] 网络预检失败（%s/%s），保留当前 session/deviceId/CF Cookie 重试：%s",
                 attempt, max_attempts, str(exc)[:200],
             )
             time.sleep(2)
@@ -394,10 +407,10 @@ def _login_via_reauth(
     email_source: str | None = None,
 ) -> dict:
     """按 2FA 已验证链路重新认证并刷新 ChatGPT session。"""
-    auth_url = _trigger_reauth(session, email)
+    auth_url = _trigger_reauth_with_retry(session, email)
     logger.info("[查活] reauth authorize URL 已获取")
     human_delay("api")
-    final_url = _follow_reauth(session, auth_url)
+    final_url = _follow_reauth_with_retry(session, auth_url)
     dead_code = detect_account_unusable_text(final_url)
     if dead_code:
         raise AccountUnusableError(f"账号已废弃（{dead_code}）", error_code=dead_code)
