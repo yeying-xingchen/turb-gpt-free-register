@@ -548,7 +548,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_MAX_ATTEMPTS", "file": "proxy.py", "type": "int", "group": "代理池",
-        "label": "套餐/Agent最大尝试次数", "help": "查套餐和生成 Agent Token 遇到网络错误、429、5xx 等临时错误时的重试次数，建议 2 次",
+        "label": "套餐/Agent最大尝试次数", "help": "查套餐和生成 Agent Token 遇到 403、429、5xx 或网络错误时的重试次数，建议 3 次",
     },
     {
         "key": "PLAN_CHECK_RETRY_DELAY", "file": "proxy.py", "type": "float", "group": "代理池",

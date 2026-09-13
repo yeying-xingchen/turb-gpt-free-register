@@ -32,8 +32,8 @@ PLAN_CHECK_PROXY = ""
 
 # 查套餐 / 生成 Codex Agent Token 使用独立的短超时和有限重试，避免后台任务长时间卡住。
 PLAN_CHECK_TIMEOUT = 15.0
-PLAN_CHECK_MAX_ATTEMPTS = 2
-PLAN_CHECK_RETRY_DELAY = 1.5
+PLAN_CHECK_MAX_ATTEMPTS = 3
+PLAN_CHECK_RETRY_DELAY = 2.0
 
 # 新注册账号的权益可能存在短暂同步延迟。首次查询失败，或返回 free 且暂未发现
 # Plus 试用资格时，等待该秒数后再复查一次；设为 0 可关闭复查。
@@ -43,8 +43,8 @@ PLAN_CHECK_REGISTRATION_RECHECK_DELAY = 2.0
 # 但复用这里的网络模式、请求启动间隔与随机抖动，避免批量后台请求过于集中。
 PLAN_CHECK_WORKERS = 3
 PLAN_CHECK_QUEUE_LIMIT = 500
-PLAN_CHECK_MIN_INTERVAL = 0.4
-PLAN_CHECK_JITTER = 0.3
+PLAN_CHECK_MIN_INTERVAL = 1.0
+PLAN_CHECK_JITTER = 0.8
 
 
 def pick_proxy() -> str:
