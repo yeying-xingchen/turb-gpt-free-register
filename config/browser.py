@@ -183,7 +183,11 @@ def _offset_minutes_for_timezone(tz_name: str, default: int) -> int:
 
 
 def _locale_profile_key_from_geo(geo: dict | None) -> str:
-    if not geo or not AUTO_BROWSER_LOCALE_FROM_IP:
+    # A supplied ``geo`` is already an explicit caller decision.  The
+    # AUTO_BROWSER_LOCALE_FROM_IP switch controls whether BrowserSession probes
+    # an exit IP; it must not make a directly supplied geo object silently fall
+    # back to the machine's configured locale.
+    if not geo:
         return BROWSER_LOCALE_PROFILE
     country = str(geo.get("country") or geo.get("country_code") or "").upper()
     return COUNTRY_LOCALE_PROFILE_MAP.get(country, BROWSER_LOCALE_PROFILE)
@@ -192,8 +196,9 @@ def _locale_profile_key_from_geo(geo: dict | None) -> str:
 def _build_locale_from_geo(geo: dict | None) -> dict:
     key = _locale_profile_key_from_geo(geo)
     resolved_profile = key
-    locale = dict(BROWSER_LOCALE_PROFILES.get(key, BROWSER_LOCALE_PROFILES[BROWSER_LOCALE_PROFILE]))
-    if geo and AUTO_BROWSER_LOCALE_FROM_IP:
+    fallback_profile = BROWSER_LOCALE_PROFILE if BROWSER_LOCALE_PROFILE in BROWSER_LOCALE_PROFILES else "jp"
+    locale = dict(BROWSER_LOCALE_PROFILES.get(key, BROWSER_LOCALE_PROFILES[fallback_profile]))
+    if geo:
         country = str(geo.get("country") or geo.get("country_code") or "").upper()
         # 专用画像覆盖常见国家；其余已知国家动态生成语言字段。若地理接口
         # 返回了未知国家，也使用中性的 en-US，而不是泄漏本机默认日语画像。

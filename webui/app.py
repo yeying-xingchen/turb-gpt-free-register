@@ -13,20 +13,45 @@ Flask 本地控制台。
 import logging
 import gzip
 import json
+import math
 import threading
 import time
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, Response, jsonify, make_response, render_template, request
 import pyotp
 
-from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service
+from core import codex_retry_service, db, plan_check_service, payment_method_service, extract_link_service, codex_agent_service, live_check_service
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
+from core import account_import
 from webui import config_editor
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_public_url(value: object) -> str:
+    """Return a sub2api URL without embedded credentials or query secrets."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    # Keep only scheme/host/port/path.  Userinfo and query/fragment commonly
+    # carry admin credentials or one-time tokens and must not enter list JSON.
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return urlunparse((parsed.scheme, netloc, parsed.path or "", "", "", ""))
+
 
 _POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "imap", "cloudflare_domain"))
 
@@ -94,28 +119,13 @@ def _compact_account_for_list(row: dict) -> dict:
         "codex_agent_has_token": bool(str(row.get("codex_agent_token") or "").strip()),
     }
 
-    extra_raw = row.get("extra_json")
-    extra = {}
-    if isinstance(extra_raw, str) and extra_raw.strip():
-        try:
-            extra = json.loads(extra_raw)
-        except Exception:
-            extra = {}
-    elif isinstance(extra_raw, dict):
-        extra = extra_raw
-    password = str(
-        extra.get("registration_password")
-        or row.get("registration_password")
-        or ""
-    ).strip()
-    if password:
-        out["password"] = password
-
+    # 密码、extra_json、registration_password 都属于敏感凭证；账号列表不返回
+    # 这些字段，复制/查阅敏感值时统一通过受控 secret 接口按需读取。
     # 这些是列表固定列直接展示字段。
     for key in (
         "user_name", "email_source", "original_email", "note", "archived", "created_at",
         "plan_type", "current_plan_type", "plus_trial_eligible",
-        "plan_check_status", "codex_status", "codex_agent_status",
+        "plan_check_status", "payment_method_check_status", "codex_status", "codex_agent_status",
         "totp_setup_status",
     ):
         if key in row:
@@ -128,6 +138,12 @@ def _compact_account_for_list(row: dict) -> dict:
     optional_keys = (
         # 套餐展示补充：付费到期/折扣/失败原因。
         "plan_check_error", "plan_expires_at", "plan_renews_at", "renews_at",
+        "payment_method_check_ok", "payment_method_check_error", "payment_method_check_trigger",
+        "payment_method_check_queued_at", "payment_method_check_started_at",
+        "payment_method_check_completed_at", "payment_method_checked_at",
+        "payment_method_check_proxy_used", "payment_method_available_channels",
+        "payment_method_channel_availability", "payment_method_regions",
+        "payment_method_region_errors", "payment_method_last_success_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
         "token_expired", "token_expires_at",
@@ -148,7 +164,7 @@ def _compact_account_for_list(row: dict) -> dict:
     for key in optional_keys:
         value = row.get(key)
         if value is not None and value != "":
-            out[key] = value
+            out[key] = _safe_public_url(value) if key == "codex_agent_sub2api_url" else value
     plan = str(row.get("current_plan_type") or row.get("plan_type") or "").lower()
     if any(x in plan for x in ("plus", "pro", "team", "go")):
         expire = row.get("expires_at")
@@ -185,7 +201,15 @@ def _account_secret_value(row: dict, field: str) -> str:
                 extra = {}
         elif isinstance(extra_raw, dict):
             extra = extra_raw
-        return str(extra.get("registration_password") or row.get("registration_password") or "未设置")
+        explicit = extra.get("registration_password") or row.get("registration_password")
+        if explicit:
+            return str(explicit)
+        line_format = str(row.get("account_line_format") or "").strip().lower().replace("-", "_")
+        email_source = str(row.get("email_source") or "").strip().lower()
+        is_chatgpt_material = line_format == "chatgpt_api" or (
+            email_source == "generic_api" and bool(str(row.get("code_url") or "").strip())
+        )
+        return str(row.get("password") or "未设置") if is_chatgpt_material else "未设置"
     raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/totp_code/password")
 
 
@@ -239,6 +263,39 @@ def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, runni
             pass
     return {"ok": True, "log": content, "running": running}
 
+def _accepts_gzip(accept_encoding: str | None) -> bool:
+    """Return whether the client explicitly accepts gzip with a valid q value."""
+    text = str(accept_encoding or "").strip()
+    if not text:
+        return False
+    explicit: float | None = None
+    wildcard: float | None = None
+    for raw_item in text.split(","):
+        parts = [part.strip() for part in raw_item.split(";")]
+        coding = parts[0].lower()
+        if not coding:
+            continue
+        quality = 1.0
+        for parameter in parts[1:]:
+            key, separator, value = parameter.partition("=")
+            if key.strip().lower() != "q" or not separator:
+                continue
+            try:
+                parsed_quality = float(value.strip())
+                quality = parsed_quality if math.isfinite(parsed_quality) and 0.0 <= parsed_quality <= 1.0 else 0.0
+            except (TypeError, ValueError):
+                quality = 0.0
+            break
+        if coding == "gzip":
+            # If a client repeats a coding, the last explicit declaration is
+            # the one most HTTP parsers apply; an explicit q=0 still overrides *.
+            explicit = quality
+        elif coding == "*":
+            wildcard = quality
+    accepted_quality = explicit if explicit is not None else (wildcard or 0.0)
+    return accepted_quality > 0.0
+
+
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
     _prepared_downloads: dict[str, dict] = {}
@@ -246,10 +303,8 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.after_request
     def _compress_json_response(response: Response):
         """默认对 JSON API 响应启用 gzip，减少本地前端拉取大列表的传输体积。"""
-        accept_encoding = (request.headers.get("Accept-Encoding") or "").lower()
-        # 默认开启 gzip：浏览器会自动带 gzip；本地脚本未带 Accept-Encoding 时也压缩。
-        # 只有客户端明确声明 identity 且没有 gzip 时，才按明文返回。
-        gzip_allowed = ("gzip" in accept_encoding) or (not accept_encoding)
+        accept_encoding = request.headers.get("Accept-Encoding")
+        gzip_allowed = _accepts_gzip(accept_encoding)
         if (
             response.direct_passthrough
             or response.headers.get("Content-Encoding")
@@ -313,6 +368,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_plan_checks = db.recover_interrupted_plan_checks()
     if recovered_plan_checks:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的套餐查询状态", recovered_plan_checks)
+    recovered_payment_checks = db.recover_interrupted_payment_method_checks()
+    if recovered_payment_checks:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的支付方式查询状态", recovered_payment_checks)
     recovered_extract_links = db.recover_interrupted_extract_links()
     if recovered_extract_links:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的提链状态", recovered_extract_links)
@@ -357,8 +415,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         from core.email_provider import parse_email_sources
         pool = {"total": 0, "available": 0, "used": 0, "failed": 0}
         for src in parse_email_sources(_email_cfg.EMAIL_SOURCE):
-            # GPTMail/MailNest/CloudMail 地址按需生成，不属于本地邮箱池。
-            if src in ("gptmail", "mailnest", "cloudmail", "cloudflare"):
+            # 动态服务地址按需生成，不属于本地邮箱池。
+            if src in ("gptmail", "mailnest", "cloudmail", "cloudflare", "djbnb", "remail"):
                 continue
             one = (
                 db.generic_api_email_pool_summary() if src == "generic_api"
@@ -396,6 +454,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             or request.args.get("twofa_status")
             or ""
         ).strip().lower()
+        status_filter = str(request.args.get("status", default="") or "").strip().lower()
+        allowed_status_filters = {
+            "", "all", "plus", "live", "alive", "failed", "live_failed",
+            "liveness_failed", "trial", "free_trial", "plus_trial",
+            "deactivated", "dead", "invalid",
+        }
+        if status_filter not in allowed_status_filters:
+            return jsonify({"ok": False, "error": "status 仅支持 all/plus/live/failed/trial/deactivated"}), 400
         q = str(request.args.get("q", default="") or "").strip()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
@@ -407,11 +473,67 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, status_filter=status_filter)
             result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
-        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter))
+        rows = db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, status_filter=status_filter)
+        return jsonify([_compact_account_for_list(row) for row in rows])
+
+    @app.post("/api/accounts/import")
+    def api_accounts_import():
+        """导入已有账号；支持 JSON/TXT、multipart 文件及扩展整行格式。"""
+        duplicate_mode = "skip"
+        selected_format = "auto"
+        filename = ""
+        content: str | bytes = b""
+
+        if request.files:
+            upload = request.files.get("file") or next(iter(request.files.values()), None)
+            if upload is None:
+                return jsonify({"ok": False, "error": "请选择要导入的文件"}), 400
+            filename = upload.filename or ""
+            content = upload.read(account_import.MAX_ACCOUNT_IMPORT_BYTES + 1)
+            duplicate_mode = request.form.get("duplicate_mode", "skip")
+            selected_format = request.form.get("format", "auto")
+        else:
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"ok": False, "error": "请求体必须是 JSON 对象或 multipart 文件"}), 400
+            duplicate_mode = data.get("duplicate_mode", "skip")
+            selected_format = data.get("format", "auto")
+            if "records" in data:
+                records, errors = account_import.parse_account_records(data.get("records"))
+                actual_format = "json"
+            else:
+                content = data.get("text", "")
+                if not isinstance(content, (str, bytes)):
+                    return jsonify({"ok": False, "error": "text 必须是字符串"}), 400
+                if isinstance(content, str) and len(content.encode("utf-8")) > account_import.MAX_ACCOUNT_IMPORT_BYTES:
+                    return jsonify({"ok": False, "error": "导入内容不能超过 5 MB"}), 413
+                records, errors, actual_format = account_import.parse_account_content(
+                    content, format=selected_format, filename=str(data.get("filename") or ""),
+                )
+        if isinstance(content, bytes) and len(content) > account_import.MAX_ACCOUNT_IMPORT_BYTES:
+            return jsonify({"ok": False, "error": "导入文件不能超过 5 MB"}), 413
+        if request.files:
+            records, errors, actual_format = account_import.parse_account_content(
+                content, format=selected_format, filename=filename,
+            )
+        mode = str(duplicate_mode or "skip").strip().lower()
+        if mode not in ("skip", "update"):
+            return jsonify({"ok": False, "error": "duplicate_mode 仅支持 skip/update"}), 400
+        if not records and not errors:
+            return jsonify({"ok": False, "error": "没有可导入的账号记录"}), 400
+        result = db.import_registered_accounts(records, duplicate_mode=mode)
+        result.update({
+            "ok": True,
+            "format": actual_format,
+            "parsed": len(records) + len(errors),
+            "errors": errors,
+            "error_count": len(errors),
+        })
+        return jsonify(result)
 
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
@@ -426,6 +548,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             or request.args.get("twofa_status")
             or ""
         ).strip().lower()
+        status_filter = str(request.args.get("status", default="") or "").strip().lower()
+        allowed_status_filters = {
+            "", "all", "plus", "live", "alive", "failed", "live_failed",
+            "liveness_failed", "trial", "free_trial", "plus_trial",
+            "deactivated", "dead", "invalid",
+        }
+        if status_filter not in allowed_status_filters:
+            return jsonify({"ok": False, "error": "status 仅支持 all/plus/live/failed/trial/deactivated"}), 400
         q = str(request.args.get("q", default="") or "").strip()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
@@ -435,10 +565,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, status_filter=status_filter)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, status_filter=status_filter)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 
@@ -969,12 +1099,153 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped_count": len(skipped),
         }), 202
 
+    def _payment_account_from_payload(data: dict):
+        acc_id = data.get("account_id") or data.get("id")
+        if acc_id is None:
+            return None
+        # Account IDs are the only browser-supplied selector; never accept an
+        # email, token, password, or arbitrary checker input as an account key.
+        try:
+            if isinstance(acc_id, bool) or not isinstance(acc_id, (str, int)) or (isinstance(acc_id, str) and not acc_id.strip().isdigit()):
+                return None
+            parsed_id = int(acc_id)
+            if parsed_id <= 0:
+                return None
+            return db.get_account(parsed_id)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _payment_regions_from_payload(data: dict):
+        value = data.get("regions")
+        if value is None:
+            return None, None
+        if not isinstance(value, list) or not value or len(value) > 20 or any(not isinstance(item, str) for item in value):
+            return None, "regions 必须是 1-20 个地区预设名称的数组"
+        regions = [item.strip().lower() for item in value if item.strip()]
+        invalid = [item for item in regions if item not in payment_method_service.available_region_names()]
+        if not regions or invalid:
+            return None, f"不支持的支付方式地区预设: {', '.join(invalid or regions)}"
+        return regions, None
+
+    @app.post("/api/accounts/check-payment")
+    def api_account_check_payment():
+        """把单账号支付方式资格查询加入后台队列。仅使用服务端保存的 Token。"""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        regions, region_error = _payment_regions_from_payload(data)
+        if region_error:
+            return jsonify({"ok": False, "error": region_error, "supported_regions": payment_method_service.available_region_names()}), 400
+        acc = _payment_account_from_payload(data)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        token = str(acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号没有 access_token"}), 400
+        queued = payment_method_service.enqueue_account_payment_method_check(
+            account_id=int(acc.get("id")),
+            email=acc.get("email") or "",
+            access_token=token,
+            trigger="manual",
+            regions=regions,
+        )
+        if queued.get("busy"):
+            return jsonify({"ok": False, **queued}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **queued}), 503
+        return jsonify({"ok": True, "started": True, **queued}), 202
+
+    @app.post("/api/accounts/check-payment-bulk")
+    def api_accounts_check_payment_bulk():
+        """批量查询账号在配置地区发布的支付方式。"""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        regions, region_error = _payment_regions_from_payload(data)
+        if region_error:
+            return jsonify({"ok": False, "error": region_error, "supported_regions": payment_method_service.available_region_names()}), 400
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多查询 500 个账号"}), 400
+        started, busy, failed, skipped = [], [], [], []
+        seen = set()
+        for raw in ids:
+            try:
+                if isinstance(raw, bool) or not isinstance(raw, (str, int)) or (isinstance(raw, str) and not raw.strip().isdigit()):
+                    raise ValueError("invalid id")
+                acc_id = int(raw)
+                if acc_id <= 0:
+                    raise ValueError("invalid id")
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            token = str(acc.get("access_token") or "").strip()
+            if not token:
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "缺少 access_token"})
+                continue
+            queued = payment_method_service.enqueue_account_payment_method_check(
+                account_id=acc_id,
+                email=acc.get("email") or "",
+                access_token=token,
+                trigger="manual_bulk",
+                regions=regions,
+            )
+            item = {"id": acc_id, "email": acc.get("email"), **queued}
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "started": started, "started_count": len(started),
+            "busy": busy, "busy_count": len(busy),
+            "failed": failed, "failed_count": len(failed),
+            "skipped": skipped, "skipped_count": len(skipped),
+            "queue": payment_method_service.queue_settings(),
+        }), 202
+
     @app.get("/api/extract-link/cdk")
     def api_extract_link_cdk():
-        """查询当前配置或传入 CDK 的剩余次数。"""
+        """查询当前配置或传入 CDK 的剩余次数/服务状态。"""
         code = (request.args.get("code") or "").strip() or None
         try:
-            return jsonify({"ok": True, **extract_link_service.query_cdk(cdk=code)})
+            result = extract_link_service.query_cdk(cdk=code)
+            if isinstance(result, dict) and str(result.get("backend") or "") == "djbnb":
+                result = {k: v for k, v in result.items() if k not in {"code", "cardCode"}}
+            return jsonify({"ok": True, **result})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.get("/api/extract-link/djbnb/meta")
+    def api_extract_link_djbnb_meta():
+        """获取 DJB 可用通道、国家目录和引擎限制。"""
+        try:
+            from core import djb_client
+            return jsonify({"ok": True, **djb_client.get_meta()})
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/extract-link/djbnb/card-check")
+    def api_extract_link_djbnb_card_check():
+        """校验 DJB 卡密，不消耗次数。"""
+        data = request.get_json(silent=True) or {}
+        code = str(data.get("code") or "").strip() or None
+        try:
+            from core import djb_client
+            result = djb_client.check_card(code)
+            safe = {k: v for k, v in result.items() if k not in {"code", "cardCode"}}
+            return jsonify({"ok": True, **safe})
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
 

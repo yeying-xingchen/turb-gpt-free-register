@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Node runtime dependency for the vendored OpenAI Sentinel VM adapter",
+  "dependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

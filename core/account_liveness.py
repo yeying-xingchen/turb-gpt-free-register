@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from core import db
 from core.session import BrowserSession
@@ -219,21 +220,76 @@ def _extract_continue_url(result: dict | None) -> str:
 
 
 def _extract_factor_id(result: dict | None, continue_url: str) -> str:
+    """Extract an MFA factor identifier from all known auth response shapes."""
     if isinstance(result, dict):
         page = result.get("page") or {}
         page = page if isinstance(page, dict) else {}
-        payload = page.get("payload") or {}
+        candidates = [
+            page.get("factor_id"),
+            page.get("factorId"),
+            result.get("factor_id"),
+            result.get("factorId"),
+        ]
+        payload = page.get("payload")
         if isinstance(payload, dict):
-            factor_id = str(payload.get("factor_id") or "").strip()
-            if factor_id:
-                return factor_id
-        if isinstance(page.get("payload"), dict):
-            factor_id = str(page["payload"].get("factor_id") or "").strip()
-            if factor_id:
-                return factor_id
-    if "/mfa-challenge/" in continue_url:
-        return continue_url.rstrip("/").rsplit("/", 1)[-1]
+            candidates.extend([
+                payload.get("factor_id"),
+                payload.get("factorId"),
+                payload.get("id")
+                if str(payload.get("type") or "").lower() in {"totp", "mfa"}
+                else None,
+            ])
+        factors = page.get("factors") or result.get("factors")
+        if isinstance(factors, list):
+            for factor in factors:
+                if isinstance(factor, dict) and str(factor.get("type") or "").lower() in {"totp", "mfa"}:
+                    candidates.extend([factor.get("id"), factor.get("factor_id"), factor.get("factorId")])
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if value:
+                return value
+    try:
+        parsed = urlparse(str(continue_url or ""))
+        path_parts = [part for part in parsed.path.split("/") if part]
+        for marker in ("mfa-challenge", "mfa", "factor"):
+            if marker in path_parts:
+                index = path_parts.index(marker)
+                if index + 1 < len(path_parts):
+                    return path_parts[index + 1]
+        query = parse_qs(parsed.query)
+        for key in ("factor_id", "factorId", "id"):
+            if query.get(key) and str(query[key][0]).strip():
+                return str(query[key][0]).strip()
+    except Exception:
+        pass
     return ""
+
+
+def _is_mfa_challenge(result: dict | None, continue_url: str) -> bool:
+    """Detect MFA/TOTP pages across the auth API's payload and URL shapes."""
+    url = str(continue_url or "").lower()
+    if any(marker in url for marker in (
+        "mfa", "multi-factor", "multifactor", "two-factor", "two_factor", "totp",
+    )):
+        return True
+    if not isinstance(result, dict):
+        return False
+    page = result.get("page") if isinstance(result.get("page"), dict) else {}
+    page_type = str(page.get("type") or result.get("type") or "").lower().replace("-", "_")
+    if page_type in {
+        "mfa", "mfa_challenge", "totp", "totp_challenge",
+        "two_factor", "two_factor_challenge",
+    }:
+        return True
+    # Keep this fallback narrow: an unrelated ``mfa: false`` account field must
+    # not send a normal login response into the TOTP branch.
+    text = json.dumps(result, ensure_ascii=False, separators=(",", ":")).lower()
+    return any(marker in text for marker in (
+        '"mfa_required":true', '"requires_mfa":true', '"factor_id":',
+        '"factorid":', '"factor_type":"totp"', '"challenge_type":"totp"',
+        '"challenge_type":"mfa"', "multi-factor", "multifactor",
+        "two-factor", "two_factor",
+    ))
 
 
 def _password_verify(session: BrowserSession, password: str) -> dict:
@@ -286,6 +342,35 @@ def _mfa_verify(session: BrowserSession, factor_id: str, code: str) -> dict:
 def _follow_continue_and_fetch(session: BrowserSession, continue_url: str, *, referer: str) -> dict:
     follow_oauth_callback(session, continue_url, referer=referer)
     return fetch_session(session)
+
+
+def _complete_totp_challenge(
+    session: BrowserSession,
+    email: str,
+    result: dict,
+    continue_url: str,
+) -> dict:
+    """Complete a password-login MFA challenge and fetch the new session."""
+    factor_id = _extract_factor_id(result, continue_url)
+    secret = _account_totp_secret(email)
+    if not factor_id:
+        raise RuntimeError(f"密码登录后进入 MFA 但未拿到 factor_id: {result}")
+    if not secret:
+        raise RuntimeError(f"密码登录后进入 MFA，但账号没有 totp_secret：{email}")
+    logger.info("[查活] 自动识别为 TOTP/MFA 登录：%s factor_id=%s", email, factor_id)
+    _mfa_issue_challenge(session, factor_id)
+    code = _account_totp_code(email)
+    if not code:
+        raise RuntimeError(f"无法生成 TOTP 验证码：{email}")
+    mfa_result = _mfa_verify(session, factor_id, code)
+    mfa_continue_url = _extract_continue_url(mfa_result) or continue_url
+    if not mfa_continue_url:
+        raise RuntimeError(f"MFA 验证成功但没有 continue_url: {mfa_result}")
+    return _follow_continue_and_fetch(
+        session,
+        mfa_continue_url,
+        referer=f"https://auth.openai.com/mfa-challenge/{factor_id}",
+    )
 
 
 def _stored_access_token(email: str) -> str:
@@ -480,26 +565,12 @@ def _login_via_password_or_otp(
     page = page if isinstance(page, dict) else {}
     page_type = str(page.get("type") or "")
 
-    if "/mfa-challenge/" in continue_url or page_type == "mfa_challenge":
-        factor_id = _extract_factor_id(password_result, continue_url)
-        secret = _account_totp_secret(email)
-        if not factor_id:
-            raise RuntimeError(f"密码登录后进入 MFA 但未拿到 factor_id: {password_result}")
-        if not secret:
-            raise RuntimeError(f"密码登录后进入 MFA，但账号没有 totp_secret：{email}")
-        logger.info("[查活] 已进入 MFA challenge，开始提交 TOTP：%s factor_id=%s", email, factor_id)
-        _mfa_issue_challenge(session, factor_id)
-        code = _account_totp_code(email)
-        if not code:
-            raise RuntimeError(f"无法生成 TOTP 验证码：{email}")
-        mfa_result = _mfa_verify(session, factor_id, code)
-        mfa_continue_url = _extract_continue_url(mfa_result) or continue_url
-        if not mfa_continue_url:
-            raise RuntimeError(f"MFA 验证成功但没有 continue_url: {mfa_result}")
-        return _follow_continue_and_fetch(
+    if _is_mfa_challenge(password_result, continue_url):
+        return _complete_totp_challenge(
             session,
-            mfa_continue_url,
-            referer=f"https://auth.openai.com/mfa-challenge/{factor_id}",
+            email,
+            password_result,
+            continue_url,
         )
 
     if "email-verification" in continue_url or page_type in {"email_verification", "email_otp_send"}:
@@ -616,14 +687,10 @@ def check_account_liveness(
     try:
         fh = logging.FileHandler(str(path), encoding="utf-8")
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%H:%M:%S",
-        ))
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
         fh.addFilter(lambda record: record.threadName == thread_name)
         root_logger.addHandler(fh)
 
-        logger.info("[查活] 日志文件：%s", path)
         logger.info("[查活] 开始重新登录：%s", email)
         existing_access_token = _stored_access_token(email)
         has_totp = bool(_account_totp_secret(email))
@@ -671,7 +738,6 @@ def check_account_liveness(
         access_token = str(session_info.get("accessToken") or "")
         if not access_token:
             raise RuntimeError("重新登录后未拿到 accessToken")
-
         user = session_info.get("user") or {}
         account = session_info.get("account") or {}
         logger.info("[查活] 正常：%s user_id=%s plan=%s", email, user.get("id"), account.get("planType"))

@@ -3,6 +3,7 @@
 curl_cffi Session 封装
 统一管理 Cookie、请求头和 TLS 指纹
 """
+import hashlib
 import logging
 import hashlib
 import random
@@ -607,6 +608,11 @@ class BrowserSession:
         headers.setdefault("x-openai-target-path", path)
         headers.setdefault("x-openai-target-route", self._chatgpt_target_route(path))
         return headers
+
+    def reset_circuit_breaker(self) -> None:
+        """Clear a best-effort bootstrap circuit state before formal auth."""
+        self.blocked_until = 0.0
+        self.blocked_reason = ""
 
     def _raise_if_circuit_open(self) -> None:
         if self.blocked_until and time.time() < self.blocked_until:

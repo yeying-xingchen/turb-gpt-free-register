@@ -107,22 +107,47 @@ def _codex_result(
 
 
 def _account_registration_password(email: str) -> str:
-    """读取账号的注册密码；不存在则返回空字符串。"""
+    """Return the ChatGPT registration password, never a mail-pool password.
+
+    Most legacy ``password`` fields belong to the Outlook/IMAP mailbox and must
+    not be submitted to OpenAI.  The generic API ``chatgpt_api`` material format
+    is the intentional exception: its password field is the ChatGPT login
+    password, and imported records retain the format/source markers below.
+    """
     try:
-        acc = db.get_account_by_email(email)
-        if not acc:
+        account = db.get_account_by_email(email)
+        if not account:
             return ""
-        extra_raw = acc.get("extra_json")
+        extra_raw = account.get("extra_json")
         extra = {}
         if isinstance(extra_raw, str) and extra_raw.strip():
             try:
-                extra = json.loads(extra_raw)
+                parsed = json.loads(extra_raw)
+                if isinstance(parsed, dict):
+                    extra = parsed
             except Exception:
-                extra = {}
+                pass
         elif isinstance(extra_raw, dict):
             extra = extra_raw
-        return str(extra.get("registration_password") or acc.get("registration_password") or "").strip()
+
+        explicit = str(
+            extra.get("registration_password")
+            or account.get("registration_password")
+            or ""
+        ).strip()
+        if explicit:
+            return explicit
+
+        line_format = str(account.get("account_line_format") or "").strip().lower().replace("-", "_")
+        email_source = str(account.get("email_source") or "").strip().lower()
+        is_chatgpt_material = line_format == "chatgpt_api" or (
+            email_source == "generic_api" and bool(str(account.get("code_url") or "").strip())
+        )
+        if is_chatgpt_material:
+            return str(account.get("password") or "").strip()
+        return ""
     except Exception:
+        logger.debug("[Codex] cannot load registration password for %s", email, exc_info=True)
         return ""
 
 

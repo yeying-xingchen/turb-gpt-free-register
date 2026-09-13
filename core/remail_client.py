@@ -98,6 +98,11 @@ def _api_key() -> str:
     return value
 
 
+def _has_api_key() -> bool:
+    """Return whether an API key is configured without raising an operational error."""
+    return bool(str(getattr(_email_cfg, "REMAIL_API_KEY", "") or "").strip())
+
+
 def _auth_headers() -> dict[str, str]:
     return {"Accept": "application/json", "Authorization": f"Bearer {_api_key()}"}
 
@@ -415,6 +420,11 @@ def restore_account_context(email: str) -> RemailAccount | None:
             "GET",
             "/v1/open/orders",
             params={"search": target},
+            # Unit/integration callers may provide a mocked read-only order
+            # endpoint without a configured key.  In production a configured
+            # key is still attached; a real unauthenticated request will be
+            # rejected by Remail and safely return None below.
+            authenticated=_has_api_key(),
         )
     except RemailError as exc:
         logger.debug("[Remail] 按邮箱搜索订单失败: email=%s error=%s", target, exc)

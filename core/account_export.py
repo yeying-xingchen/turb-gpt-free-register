@@ -687,27 +687,56 @@ def save_account_data(
             auto_plan_check = False
     if not auto_plan_check:
         logger.info(f"[Plan] 注册后自动套餐查询已跳过: id={row_id}, email={email}")
-        return row_id
-    # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
-    # 入队，由专用线程池异步查询并回写，避免占用注册工作线程。
-    try:
-        from core.plan_check_service import enqueue_account_plan_check
+    else:
+        # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
+        # 入队，由专用线程池异步查询，避免占用注册工作线程。
+        try:
+            from core.plan_check_service import enqueue_account_plan_check
 
-        queued = enqueue_account_plan_check(
+            queued = enqueue_account_plan_check(
+                account_id=row_id,
+                email=email,
+                access_token=access_token,
+                trigger="registration_auto",
+            )
+            if queued.get("accepted"):
+                logger.info(f"[Plan] 注册后自动查询已入队: id={row_id}, email={email}")
+            elif queued.get("busy"):
+                logger.info(f"[Plan] 账号已有套餐查询，注册流程不重复入队: id={row_id}, email={email}")
+            else:
+                logger.warning(f"[Plan] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
+        except Exception as exc:
+            logger.warning(
+                f"[Plan] 注册后自动查询入队异常（不影响注册结果）: "
+                f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
+            )
+
+    try:
+        from config import payment as _payment_cfg
+        auto_payment_check = bool(getattr(_payment_cfg, "PAYMENT_METHOD_AUTO_CHECK_AFTER_REGISTER", False))
+    except Exception:
+        auto_payment_check = False
+    if not auto_payment_check:
+        logger.info(f"[Payment] 注册后自动支付方式查询已跳过: id={row_id}, email={email}")
+        return row_id
+
+    try:
+        from core.payment_method_service import enqueue_account_payment_method_check
+        queued = enqueue_account_payment_method_check(
             account_id=row_id,
             email=email,
             access_token=access_token,
             trigger="registration_auto",
         )
         if queued.get("accepted"):
-            logger.info(f"[Plan] 注册后自动查询已入队: id={row_id}, email={email}")
+            logger.info(f"[Payment] 注册后自动支付方式查询已入队: id={row_id}, email={email}")
         elif queued.get("busy"):
-            logger.info(f"[Plan] 账号已有套餐查询，注册流程不重复入队: id={row_id}, email={email}")
+            logger.info(f"[Payment] 账号已有支付方式查询，注册流程不重复入队: {email}")
         else:
-            logger.warning(f"[Plan] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
+            logger.warning(f"[Payment] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
     except Exception as exc:
         logger.warning(
-            f"[Plan] 注册后自动查询入队异常（不影响注册结果）: "
+            f"[Payment] 注册后自动支付方式查询入队异常（不影响注册结果）: "
             f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
         )
     return row_id
