@@ -118,6 +118,11 @@ def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
         getattr(_twofa_cfg, "TWOFA_REAUTH_RETRY_DELAY", 3.0) or 0.0
     )))
 
+    # 新建协议会话此前会从 ChatGPT 直接命中复杂 authorize URL，auth 域没有
+    # document/locale/CF Cookie 上下文。先用简单页面做 best-effort 预热；预热
+    # 和正式 authorize 仍严格复用同一个 BrowserSession/deviceId/Cookie Jar。
+    _warm_auth_document_for_reauth(session)
+
     for attempt in range(1, max_attempts + 1):
         try:
             result = _follow_reauth(session, auth_url)
@@ -146,6 +151,33 @@ def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
                 time.sleep(delay)
 
     raise RuntimeError("authorize 导航重试耗尽")
+
+
+def _warm_auth_document_for_reauth(session: BrowserSession) -> None:
+    """预热 auth.openai.com 顶层文档；403 时保留新 Cookie 后有限重试。"""
+    get_headers = getattr(session, "get_auth_navigate_headers", None)
+    request_get = getattr(session, "get", None)
+    if not callable(get_headers) or not callable(request_get):
+        return
+    headers = get_headers(referer="", user_initiated=False)
+    for attempt in range(1, 3):
+        try:
+            resp = request_get(
+                "https://auth.openai.com/log-in",
+                headers=headers,
+                allow_redirects=True,
+            )
+            status = int(getattr(resp, "status_code", 0) or 0)
+            if status < 400:
+                logger.info("[2FA] Auth document 预热完成")
+                return
+            logger.info("[2FA] Auth document 预热返回 HTTP %s，保留响应 Cookie", status)
+        except Exception as exc:
+            logger.debug("[2FA] Auth document 预热异常：%s: %s", type(exc).__name__, str(exc)[:160])
+        _clear_twofa_session_circuit(session, source="Auth document 预热")
+        if attempt < 2:
+            time.sleep(float(attempt))
+    logger.info("[2FA] Auth document 预热未通过，继续正式 authorize 重试链")
 
 
 def _post_register_dwell_seconds() -> float:

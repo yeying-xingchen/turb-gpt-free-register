@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 _GEO_CACHE: dict[str, dict] = {}
 _GEO_CACHE_LOCK = threading.Lock()
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
+_COUNTRY_NAME_TO_CODE = {
+    "JAPAN": "JP", "CHINA": "CN", "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US",
+    "UNITED KINGDOM": "GB", "GREAT BRITAIN": "GB", "VIETNAM": "VN", "VIET NAM": "VN",
+    "THAILAND": "TH", "SINGAPORE": "SG", "HONG KONG": "HK", "TAIWAN": "TW",
+    "SOUTH KOREA": "KR", "REPUBLIC OF KOREA": "KR", "INDONESIA": "ID", "MALAYSIA": "MY",
+    "PHILIPPINES": "PH", "INDIA": "IN", "AUSTRALIA": "AU", "CANADA": "CA",
+    "GERMANY": "DE", "FRANCE": "FR", "NETHERLANDS": "NL", "BRAZIL": "BR",
+}
 
 
 def _seed_uuid(seed: str, salt: str) -> str:
@@ -176,6 +184,11 @@ class BrowserSession:
         # “头部/参数/JS 指纹有设备 ID，但 Cookie Jar 为空”的不一致。
         for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
             self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
+        # 参考真实前端会话：语言不仅体现在 Accept-Language/oai-language，也写入
+        # 同一个 Cookie Jar，避免代理为 JP 但 Cookie 仍泄漏默认地区。
+        locale = self.navigator_language()
+        for domain in ("chatgpt.com", "auth.openai.com"):
+            self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
 
         # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
         self._cf_cookie_seen = self.cf_cookie_snapshot()
@@ -355,6 +368,13 @@ class BrowserSession:
         return {}
 
     @staticmethod
+    def _normalize_country_code(value: object) -> str:
+        text = str(value or "").strip().upper().replace("_", " ")
+        if len(text) == 2 and text.isalpha():
+            return text
+        return _COUNTRY_NAME_TO_CODE.get(text, text if len(text) == 2 else "")
+
+    @staticmethod
     def _normalize_geo_response(data: dict) -> dict:
         """兼容 ipinfo / ipapi / ipwho.is 等常见 JSON 字段。"""
         if not isinstance(data, dict):
@@ -362,9 +382,18 @@ class BrowserSession:
         timezone = data.get("timezone")
         if isinstance(timezone, dict):
             timezone = timezone.get("id") or timezone.get("name")
+        # ipwho.is 的 country="Japan"、country_code="JP"；旧逻辑优先 country
+        # 会得到伪代码 JAPAN，随后语言画像错误回落 en-US。始终优先 ISO 字段。
+        raw_country = data.get("country_code") or data.get("countryCode")
+        if not raw_country:
+            country_obj = data.get("country")
+            if isinstance(country_obj, dict):
+                raw_country = country_obj.get("code") or country_obj.get("iso_code") or country_obj.get("name")
+            else:
+                raw_country = country_obj
         return {
             "ip": data.get("ip") or data.get("query"),
-            "country": (data.get("country") or data.get("country_code") or data.get("countryCode") or "").upper(),
+            "country": BrowserSession._normalize_country_code(raw_country),
             "region": data.get("region") or data.get("regionName"),
             "city": data.get("city"),
             "timezone": timezone or "",
@@ -524,10 +553,11 @@ class BrowserSession:
             "sec-fetch-site": self._sec_fetch_site_for(target_origin, referer),
             "sec-fetch-mode": "navigate",
             "sec-fetch-dest": "document",
-            "referer": referer,
             "priority": "u=0, i",
             "upgrade-insecure-requests": "1",
         })
+        if referer:
+            headers["referer"] = referer
         if user_initiated:
             headers["sec-fetch-user"] = "?1"
         # document 导航由浏览器网络栈发出，不携带 fetch/XHR 使用的
@@ -543,10 +573,11 @@ class BrowserSession:
             "sec-fetch-site": self._sec_fetch_site_for("https://chatgpt.com", referer),
             "sec-fetch-mode": "navigate",
             "sec-fetch-dest": "document",
-            "referer": referer,
             "priority": "u=0, i",
             "upgrade-insecure-requests": "1",
         })
+        if referer:
+            headers["referer"] = referer
         if user_initiated:
             headers["sec-fetch-user"] = "?1"
         return headers

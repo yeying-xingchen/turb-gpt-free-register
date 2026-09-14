@@ -41,6 +41,17 @@ class SessionNavigationHeaderTests(unittest.TestCase):
         self.assertEqual(profile["navigator_language"], "en-US")
         self.assertEqual(profile["timezone_iana"], "UTC")
 
+    def test_geo_country_name_is_normalized_to_iso_code(self):
+        geo = BrowserSession._normalize_geo_response({
+            "country": "Japan",
+            "country_code": "JP",
+            "timezone": "Asia/Tokyo",
+        })
+        self.assertEqual(geo["country"], "JP")
+
+        geo_without_code = BrowserSession._normalize_geo_response({"country": "Vietnam"})
+        self.assertEqual(geo_without_code["country"], "VN")
+
     def _session_stub(self):
         session = object.__new__(BrowserSession)
         session.browser_profile = {
@@ -69,6 +80,15 @@ class SessionNavigationHeaderTests(unittest.TestCase):
         )
         self.assertNotIn("origin", headers)
         self.assertFalse(any(key.startswith("x-datadog-") for key in headers))
+
+    def test_external_oauth_navigation_has_no_fake_referer(self):
+        headers = self._session_stub().get_auth_navigate_headers(referer="")
+
+        self.assertEqual(headers["sec-fetch-site"], "none")
+        self.assertEqual(headers["sec-fetch-mode"], "navigate")
+        self.assertEqual(headers["sec-fetch-dest"], "document")
+        self.assertEqual(headers["sec-fetch-user"], "?1")
+        self.assertNotIn("referer", headers)
 
 
 if __name__ == "__main__":
