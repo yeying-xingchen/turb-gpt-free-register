@@ -17,9 +17,15 @@ ENABLE_2FA = False
 TWOFA_REAUTH_MAX_ATTEMPTS = 3
 TWOFA_REAUTH_RETRY_DELAY = 3.0
 
+# 2FA 后台队列。workers 是实际同时执行的账号数，修改后需重启进程以重建线程池。
+TWOFA_WORKERS = 4
+TWOFA_QUEUE_LIMIT = 200
+
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'ENABLE_2FA': 'bool',
     'TWOFA_REAUTH_MAX_ATTEMPTS': 'int',
     'TWOFA_REAUTH_RETRY_DELAY': 'float',
+    'TWOFA_WORKERS': 'int',
+    'TWOFA_QUEUE_LIMIT': 'int',
 })

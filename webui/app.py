@@ -609,7 +609,12 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, **queued_payload}), 409
         if not queued.get("accepted"):
             return jsonify({"ok": False, **queued_payload}), 503
-        return jsonify({"ok": True, "started": True, **queued_payload}), 202
+        return jsonify({
+            "ok": True,
+            "started": True,
+            "queue": twofa_service.queue_settings(),
+            **queued_payload,
+        }), 202
 
     @app.post("/api/accounts/<int:acc_id>/change-email")
     def api_account_change_email(acc_id: int):
@@ -760,6 +765,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "failed_count": len(failed),
             "skipped": skipped,
             "skipped_count": len(skipped),
+            "queue": twofa_service.queue_settings(),
         }), 202
 
     @app.post("/api/accounts/note-bulk")
