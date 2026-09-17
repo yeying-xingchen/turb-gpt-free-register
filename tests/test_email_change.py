@@ -101,6 +101,41 @@ class EmailChangeTests(unittest.TestCase):
         self.assertEqual(login.call_args.args[1], "Old@Example.com")
         self.assertEqual(login.call_args.kwargs["email_source"], "imap")
 
+    def test_recent_login_callback_403_retries_full_flow_with_direct_session(self):
+        session = MagicMock()
+        session.proxy = "socks5://proxy.example:1080"
+        proxy_session = MagicMock()
+        direct_session = MagicMock()
+        with patch("core.account_liveness._network_preflight_with_retry", side_effect=[
+                 (proxy_session, "https://auth.example/proxy"),
+                 (direct_session, "https://auth.example/direct"),
+             ]) as preflight, \
+             patch("core.openai_auth.follow_authorize", side_effect=[
+                 RuntimeError("当前 BrowserSession 已熔断冷却：HTTP 403 from callback/openai"),
+                 "https://auth.example/login",
+             ]), \
+             patch("core.account_liveness._login_via_password_or_otp", return_value={
+                 "accessToken": "direct-token",
+             }) as login, \
+             patch.object(email_change_service, "_append_log") as append_log:
+            used_session, token = email_change_service._refresh_recent_login(
+                session,
+                account_id=20,
+                email="old@example.com",
+                email_source="imap",
+            )
+
+        self.assertIs(used_session, direct_session)
+        self.assertEqual(token, "direct-token")
+        self.assertEqual(preflight.call_args_list[0].args[:2], (
+            "old@example.com", "socks5://proxy.example:1080",
+        ))
+        self.assertEqual(preflight.call_args_list[1].args[:2], ("old@example.com", ""))
+        self.assertEqual(preflight.call_args_list[1].kwargs["fingerprint_state"], {})
+        proxy_session.session.close.assert_called_once_with()
+        self.assertIs(login.call_args.args[0], direct_session)
+        self.assertTrue(any("独立直连兜底" in call.args[1] for call in append_log.call_args_list))
+
     def test_post_change_live_check_reuses_current_session(self):
         session = MagicMock()
         session.proxy = "socks5://127.0.0.1:7897"

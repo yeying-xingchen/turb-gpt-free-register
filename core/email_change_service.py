@@ -216,33 +216,67 @@ def _refresh_recent_login(
         fingerprint_state["browser_profile"] = dict(browser_profile)
 
     login_started = time.monotonic()
-    login_session, authorize_url = _network_preflight_with_retry(
-        email,
-        getattr(session, "proxy", None),
-        fingerprint_state=fingerprint_state,
-    )
-    otp_after_ts = time.time()
-    final_url = follow_authorize(login_session, authorize_url)
-    dead_code = detect_account_unusable_text(final_url)
-    if dead_code:
-        raise AccountUnusableError(
-            f"账号已废弃（{dead_code}）",
-            error_code=dead_code,
-        )
-    info = _login_via_password_or_otp(
-        login_session,
-        email,
-        otp_after_ts,
-        email_source=email_source or None,
-    )
-    fresh_token = str((info or {}).get("accessToken") or "").strip()
-    if not fresh_token:
-        raise RuntimeError("Recent Login 重新登录完成，但未获取到新 access_token")
-    _append_log(
-        account_id,
-        f"Recent Login 完成：查活重新登录成功，已获取新鲜 AT，cost={_cost(login_started)}",
-    )
-    return login_session, fresh_token
+    selected_proxy = getattr(session, "proxy", None)
+    # 与后台查活一致：代理路线的完整认证链只要收到 403，就用一套完全
+    # 独立的直连会话重跑。OAuth callback 的 403 会让当前 BrowserSession
+    # 进入 15 分钟熔断；仅清除熔断后继续请求既不能修复出口，也容易复用
+    # 已污染的 CF Cookie，因此必须从 CSRF 开始重新登录。
+    routes = [(selected_proxy, fingerprint_state, "当前代理路线")]
+    if selected_proxy:
+        routes.append(("", {}, "独立直连兜底"))
+
+    last_exc: BaseException | None = None
+    for route_index, (route_proxy, route_state, route_label) in enumerate(routes):
+        login_session: BrowserSession | None = None
+        try:
+            _append_log(account_id, f"Recent Login 路线开始：{route_label}")
+            login_session, authorize_url = _network_preflight_with_retry(
+                email,
+                route_proxy,
+                fingerprint_state=route_state,
+            )
+            otp_after_ts = time.time()
+            final_url = follow_authorize(login_session, authorize_url)
+            dead_code = detect_account_unusable_text(final_url)
+            if dead_code:
+                raise AccountUnusableError(
+                    f"账号已废弃（{dead_code}）",
+                    error_code=dead_code,
+                )
+            info = _login_via_password_or_otp(
+                login_session,
+                email,
+                otp_after_ts,
+                email_source=email_source or None,
+            )
+            fresh_token = str((info or {}).get("accessToken") or "").strip()
+            if not fresh_token:
+                raise RuntimeError("Recent Login 重新登录完成，但未获取到新 access_token")
+            _append_log(
+                account_id,
+                f"Recent Login 完成：route={route_label}，已获取新鲜 AT，cost={_cost(login_started)}",
+            )
+            return login_session, fresh_token
+        except AccountUnusableError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            is_proxy_403 = route_index == 0 and bool(selected_proxy) and "403" in str(exc)
+            if not is_proxy_403:
+                raise
+            _append_log(
+                account_id,
+                "Recent Login 代理路线收到 403/会话熔断，"
+                f"关闭失败会话并从 CSRF 开始使用独立直连兜底：{type(exc).__name__}: {str(exc)[:260]}",
+            )
+            if login_session is not None:
+                try:
+                    login_session.session.close()
+                except Exception:
+                    pass
+
+    assert last_exc is not None
+    raise last_exc
 
 
 def _begin_change_with_optional_reauth(
