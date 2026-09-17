@@ -6,6 +6,7 @@ curl_cffi Session 封装
 import logging
 import hashlib
 import random
+import re
 import threading
 import time
 import uuid
@@ -113,6 +114,9 @@ class BrowserSession:
         else:
             self.auth_session_logging_id = str(uuid.uuid4())
 
+        # Auth Web 在同一份 document 内复用该 ID；真正发生页面导航时再轮换。
+        self.document_navigation_id = str(uuid.uuid4())
+
         # ChatGPT 前端会话 ID：CES / Statsig / API 链路内保持稳定。
         if oai_session_id:
             self.oai_session_id = str(oai_session_id)
@@ -130,6 +134,10 @@ class BrowserSession:
             self.datadog_trace_id = str(random.getrandbits(63))
             self.datadog_parent_id = str(random.getrandbits(63))
         self.datadog_origin = "rum"
+        # 先使用配置默认值，加载真实 ChatGPT 登录页后从 data-build/data-seq
+        # 动态同步，避免滚动发布期间继续发送过期的前端版本头。
+        self.client_build_number = str(OAI_CLIENT_BUILD_NUMBER)
+        self.client_version = str(OAI_CLIENT_VERSION)
 
         # Sentinel SDK 内部 sid：真实 SDK 会单独生成一个 UUID，和 oai-did 不是同一个值。
         # Python 初始 p 与 Node Runner 最终 token 都复用这个 sid，保持同一 SDK 实例语义。
@@ -139,6 +147,11 @@ class BrowserSession:
             self.sentinel_sid = _seed_uuid(self.fingerprint_seed, "sentinel_sid")
         else:
             self.sentinel_sid = str(uuid.uuid4())
+        # 密码注册 iframe 与顶层 Auth 页是两个独立 Sentinel SDK 实例。
+        if self.fingerprint_seed:
+            self.sentinel_iframe_sid = _seed_uuid(self.fingerprint_seed, "sentinel_iframe_sid")
+        else:
+            self.sentinel_iframe_sid = str(uuid.uuid4())
         if self.fingerprint_seed:
             self.react_listening_key = "_reactListening" + _seed_uuid(self.fingerprint_seed, "react_listening_key").replace("-", "")[:12]
             self.react_container_key = "__reactContainer$" + _seed_uuid(self.fingerprint_seed, "react_container_key").replace("-", "")[:11]
@@ -462,10 +475,18 @@ class BrowserSession:
 
     def _attach_auth_rum_headers(self, headers: dict) -> dict:
         """Auth Web JSON 接口头：HAR 中只出现 RUM/trace/access-flow，不带 oai-client-*。"""
+        # 浏览器每个 fetch 都创建新的 span，而不是整个登录链复用同一 trace。
+        self.datadog_trace_id = str(random.getrandbits(64) or 1)
+        self.datadog_parent_id = str(random.getrandbits(64) or 1)
         headers.update(self.get_trace_context_headers())
         headers["x-access-flow-invocation-id"] = str(uuid.uuid4())
+        headers["x-openai-document-navigation-id"] = self.document_navigation_id
         headers.update(self.get_datadog_headers())
         return headers
+
+    def rotate_document_navigation_id(self) -> str:
+        self.document_navigation_id = str(uuid.uuid4())
+        return self.document_navigation_id
 
     def js_timezone_offset_min(self) -> int:
         """返回 JS Date.getTimezoneOffset() 语义：UTC-local，东八区为 -480。"""
@@ -479,12 +500,34 @@ class BrowserSession:
 
     def _attach_oai_context_headers(self, headers: dict) -> dict:
         """补齐同一设备上下文头，和 oai-did Cookie / OAuth ext-oai-did 保持一致。"""
-        headers["oai-client-build-number"] = OAI_CLIENT_BUILD_NUMBER
-        headers["oai-client-version"] = OAI_CLIENT_VERSION
+        headers["oai-client-build-number"] = str(getattr(self, "client_build_number", OAI_CLIENT_BUILD_NUMBER))
+        headers["oai-client-version"] = str(getattr(self, "client_version", OAI_CLIENT_VERSION))
         headers["oai-device-id"] = self.device_id
         headers["oai-language"] = self.navigator_language()
         headers["oai-session-id"] = self.oai_session_id
         return headers
+
+    def observe_chatgpt_document(self, response) -> None:
+        """从本次真实登录页 HTML 同步 ChatGPT 前端 build 元数据。"""
+        try:
+            final_url = str(getattr(response, "url", "") or "")
+            if urlparse(final_url).hostname != "chatgpt.com":
+                return
+            html = str(getattr(response, "text", "") or "")
+            build = re.search(r'\bdata-build=["\']([^"\']+)', html[:200000])
+            seq = re.search(r'\bdata-seq=["\']([^"\']+)', html[:200000])
+            if build:
+                self.client_version = build.group(1)
+                self.browser_profile["build_id"] = self.client_version
+            if seq:
+                self.client_build_number = seq.group(1)
+            if build or seq:
+                logger.info(
+                    "[指纹] 已从 ChatGPT 登录页同步前端版本：build=%s seq=%s",
+                    self.client_version, self.client_build_number,
+                )
+        except Exception as exc:
+            logger.debug("[指纹] 解析 ChatGPT 登录页 build 失败：%s", exc)
 
     def _attach_frontend_api_headers(self, headers: dict) -> dict:
         """前端 API 统一头：BrowserProfile + oai 上下文 + Datadog。"""
@@ -549,7 +592,6 @@ class BrowserSession:
         headers = self._get_common_headers()
         headers.update({
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "cache-control": "max-age=0",
             "sec-fetch-site": self._sec_fetch_site_for(target_origin, referer),
             "sec-fetch-mode": "navigate",
             "sec-fetch-dest": "document",
@@ -569,7 +611,6 @@ class BrowserSession:
         headers = self._get_common_headers()
         headers.update({
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "cache-control": "max-age=0",
             "sec-fetch-site": self._sec_fetch_site_for("https://chatgpt.com", referer),
             "sec-fetch-mode": "navigate",
             "sec-fetch-dest": "document",
@@ -599,7 +640,25 @@ class BrowserSession:
             "sec-fetch-dest": "empty",
             "priority": "u=1, i",
         })
-        return self._attach_frontend_api_headers(headers)
+        # 成功浏览器样本的 Sentinel iframe fetch 不带 oai-client-* 或
+        # x-datadog-*，只保留标准 CORS 请求头。
+        return headers
+
+    def get_sentinel_frame_headers(self, user_initiated: bool = False) -> dict:
+        """Sentinel SDK iframe 的同站文档导航头。"""
+        headers = self._get_common_headers()
+        headers.update({
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "referer": "https://auth.openai.com/",
+            "sec-fetch-site": "same-site",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-dest": "iframe",
+            "priority": "u=0, i",
+            "upgrade-insecure-requests": "1",
+        })
+        if user_initiated:
+            headers["sec-fetch-user"] = "?1"
+        return headers
 
 
     @staticmethod

@@ -313,6 +313,12 @@ def follow_oauth_callback(session: BrowserSession, continue_url: str, referer: s
 
     logger.info(f"[OAuth回调] 跟随 continue_url 完成 OAuth 回调...")
     resp = session.get(continue_url, headers=headers, allow_redirects=True)
+    # 必须在本阶段暴露 callback 的 403/429；否则 BrowserSession 虽已熔断，
+    # 错误却会延迟到 fetch_session，查活无法针对 callback 原请求重试。
+    resp.raise_for_status()
+    observe = getattr(session, "observe_chatgpt_document", None)
+    if callable(observe):
+        observe(resp)
     logger.info(f"[OAuth回调] 完成, 最终落点: {resp.url}")
     return resp.url
 

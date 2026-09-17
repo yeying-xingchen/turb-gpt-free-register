@@ -73,7 +73,7 @@ class SessionNavigationHeaderTests(unittest.TestCase):
         self.assertEqual(headers["sec-fetch-mode"], "navigate")
         self.assertEqual(headers["sec-fetch-dest"], "document")
         self.assertEqual(headers["sec-fetch-user"], "?1")
-        self.assertEqual(headers["cache-control"], "max-age=0")
+        self.assertNotIn("cache-control", headers)
         self.assertEqual(
             headers["accept-language"],
             "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -89,6 +89,15 @@ class SessionNavigationHeaderTests(unittest.TestCase):
         self.assertEqual(headers["sec-fetch-dest"], "document")
         self.assertEqual(headers["sec-fetch-user"], "?1")
         self.assertNotIn("referer", headers)
+
+    def test_initial_chatgpt_navigation_matches_address_bar_navigation(self):
+        headers = self._session_stub().get_chatgpt_navigate_headers(referer="")
+
+        self.assertEqual(headers["sec-fetch-site"], "none")
+        self.assertEqual(headers["sec-fetch-mode"], "navigate")
+        self.assertEqual(headers["sec-fetch-dest"], "document")
+        self.assertNotIn("referer", headers)
+        self.assertNotIn("cache-control", headers)
 
 
 if __name__ == "__main__":

@@ -272,7 +272,7 @@ WINDOW_KEY_SAMPLES = [
 SCRIPT_SRC_SAMPLES = [
     "https://accounts.google.com/gsi/client",
     "https://chatgpt.com/cdn-cgi/challenge-platform/scripts/jsd/api.js?onload=jsdOnload",
-    "https://sentinel.openai.com/sentinel/20260219f9f6/sdk.js",
+    "https://sentinel.openai.com/sentinel/20260810913b/sdk.js",
 ]
 
 WINDOW_FEATURE_FLAGS = {
@@ -344,6 +344,23 @@ def build_browser_environment(geo: dict | None = None, base_profile: dict | None
         "window_feature_flags": dict(WINDOW_FEATURE_FLAGS),
         "build_id": __import__("config.openai_protocol", fromlist=["OPENAI_BUILD_ID"]).OPENAI_BUILD_ID,
     })
+    # Sentinel VM 与 HTTP 指纹必须使用同一组 screen/window/viewport/GPU 画像。
+    screen_width = int(profile.get("screen_width", 1680))
+    screen_height = int(profile.get("screen_height", 1050))
+    profile.setdefault("screen_avail_width", screen_width)
+    profile.setdefault("screen_avail_height", max(0, screen_height - 25))
+    profile.setdefault("color_depth", 24)
+    profile.setdefault("outer_width", int(profile["screen_avail_width"]))
+    profile.setdefault("outer_height", int(profile["screen_avail_height"]))
+    profile.setdefault("viewport_width", int(profile["outer_width"]))
+    profile.setdefault("viewport_height", max(0, int(profile["outer_height"]) - 87))
+    cores = int(profile.get("hardware_concurrency", 8))
+    chip = "Apple M2 Max" if cores >= 12 else "Apple M2 Pro" if cores >= 10 else "Apple M2"
+    profile.setdefault("webgl_vendor", "Google Inc. (Apple)")
+    profile.setdefault(
+        "webgl_renderer",
+        f"ANGLE (Apple, ANGLE Metal Renderer: {chip}, Unspecified Version)",
+    )
     return profile
 
 
