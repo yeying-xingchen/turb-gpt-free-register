@@ -6223,7 +6223,13 @@ function renderConfigRecommendedLinks(f) {
     if (!/^https?:\/\//i.test(url)) return '';
     const label = String(item?.label || url);
     const description = String(item?.description || '').trim();
-    return `<span class="config-recommendations-item"><a href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>${description ? `：${esc(description)}` : ''}</span>`;
+    const descriptionLinkUrl = String(item?.description_link_url || '').trim();
+    const descriptionLinkLabel = String(item?.description_link_label || '').trim();
+    const descriptionAfterLink = String(item?.description_after_link || '');
+    const descriptionHtml = description
+      ? `：${esc(description)}${/^https?:\/\//i.test(descriptionLinkUrl) && descriptionLinkLabel ? `<a href="${attrEsc(descriptionLinkUrl)}" target="_blank" rel="noopener noreferrer">${esc(descriptionLinkLabel)}</a>${esc(descriptionAfterLink)}` : ''}`
+      : '';
+    return `<span class="config-recommendations-item"><a href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>${descriptionHtml}</span>`;
   }).filter(Boolean).join('');
   if (!items) return '';
   return `<div class="config-recommendations" role="note"><span class="config-recommendations-title">推荐家宽</span>${items}</div>`;

@@ -18,6 +18,13 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 
 ---
 
+## 特别鸣谢
+
+[![IPWO 住宅代理](./static/telegram-cloud-photo-size-5-6154589162401632962-y.jpg)](https://www.ipwo.net/?ref=githubfreeregister)
+
+IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多地区网络环境配置，适用于 AI 应用、浏览器自动化、海外服务访问及数据采集等场景。
+重点！2GB 动态住宅流量无门槛发放，[领取入口](https://www.ipwo.net/?ref=githubfreeregister)，进群不定时 IP 福利发放。
+
 ## 功能概览
 
 ### 注册
@@ -177,8 +184,32 @@ Roxy/Selenium 会在当前 Chrome target 上启用 CDP `Profiler.startPreciseCov
 安装依赖：
 
 ```bash
-pip install -r requirements.txt
+# 推荐使用项目虚拟环境，不要直接使用系统 pip
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
 node --version
+```
+
+启动 WebUI 时，`webui.sh` 会优先使用 `.venv/bin/python`：
+
+```bash
+./webui.sh start
+```
+
+如果 macOS 升级或卸载了创建虚拟环境时使用的 Python，旧 `.venv` 中的 Python 软链接可能失效。此时请使用当前已安装的 Python 重新创建环境：
+
+```bash
+rm -rf .venv
+python3.12 -m venv .venv   # 也可以替换为当前已安装的 Python 3.10+
+.venv/bin/python -m pip install -r requirements.txt
+./webui.sh start
+```
+
+验证当前 WebUI 使用的解释器和 Flask：
+
+```bash
+.venv/bin/python -c 'import sys, flask; print(sys.executable); print(flask.__version__)'
 ```
 
 ### 密钥配置（.env）
