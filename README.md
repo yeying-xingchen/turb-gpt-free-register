@@ -20,10 +20,10 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 
 ## 特别鸣谢
 
-[![IPWO 住宅代理](./static/telegram-cloud-photo-size-5-6154589162401632962-y.jpg)](https://www.ipwo.net/?ref=githubfreeregister)
+[![IPWO 住宅代理](https://raw.githubusercontent.com/myfanhua/turb-gpt-free-register/main/static/telegram-cloud-photo-size-5-6154589162401632962-y.jpg)](https://www.ipwo.net/?code=XEP358YGZ)
 
 IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多地区网络环境配置，适用于 AI 应用、浏览器自动化、海外服务访问及数据采集等场景。
-重点！2GB 动态住宅流量无门槛发放，[领取入口](https://www.ipwo.net/?ref=githubfreeregister)，进群不定时 IP 福利发放。
+重点！2GB 动态住宅流量无门槛发放，[领取入口](https://www.ipwo.net/?code=XEP358YGZ)，进群不定时 IP 福利发放。
 
 ## 功能概览
 

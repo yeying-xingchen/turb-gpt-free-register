@@ -531,10 +531,10 @@ EDITABLE_FIELDS = [
         "recommended_links": [
             {
                 "label": "IPWO 家宽",
-                "url": "https://www.ipwo.net/?ref=githubfreeregister",
+                "url": "https://www.ipwo.net/?code=XEP358YGZ",
                 "description": "IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多地区网络环境配置，适用于 AI 应用、浏览器自动化、海外服务访问及数据采集等场景。重点！2GB 动态住宅流量无门槛发放，",
                 "description_link_label": "领取入口",
-                "description_link_url": "https://www.ipwo.net/?ref=githubfreeregister",
+                "description_link_url": "https://www.ipwo.net/?code=XEP358YGZ",
                 "description_after_link": "，进群不定时 IP 福利发放。",
             },
             {
