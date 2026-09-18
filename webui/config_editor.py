@@ -283,6 +283,14 @@ EDITABLE_FIELDS = [
         "label": "启用 2FA(TOTP)", "help": "注册完成后自动设置动态口令（会多收一封 OTP 邮件）",
     },
     {
+        "key": "TWOFA_WORKERS", "file": "twofa.py", "type": "int", "group": "功能开关",
+        "label": "2FA并发数", "help": "同时执行的2FA设置任务数，默认4，范围1-16；修改后需重启服务",
+    },
+    {
+        "key": "TWOFA_QUEUE_LIMIT", "file": "twofa.py", "type": "int", "group": "功能开关",
+        "label": "2FA队列容量", "help": "允许排队等待的2FA任务总数，默认200",
+    },
+    {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
         "label": "启用 Flow 触发", "help": "注册成功后自动调用内部 Flow 接口（不影响注册结果）",
     },
@@ -523,6 +531,14 @@ EDITABLE_FIELDS = [
         "key": "PROXY_POOL", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
         "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理",
         "recommended_links": [
+            {
+                "label": "IPWO 家宽",
+                "url": "https://www.ipwo.net/?code=XEP358YGZ",
+                "description": "IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多地区网络环境配置，适用于 AI 应用、浏览器自动化、海外服务访问及数据采集等场景。重点！2GB 动态住宅流量无门槛发放，",
+                "description_link_label": "领取入口",
+                "description_link_url": "https://www.ipwo.net/?code=XEP358YGZ",
+                "description_after_link": "，进群不定时 IP 福利发放。",
+            },
             {
                 "label": "IPRocket 家宽",
                 "url": "https://iprocket.io?viteCode=1PVNyLuJ",

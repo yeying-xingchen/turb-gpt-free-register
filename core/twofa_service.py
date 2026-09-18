@@ -9,14 +9,26 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from config import email as _email_cfg
+from config import twofa as _twofa_cfg
 from core import db
 from core.account_export import setup_2fa
 from core.session import BrowserSession
 
 logger = logging.getLogger(__name__)
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="twofa")
-_QUEUE_SLOTS = threading.BoundedSemaphore(50)
+
+def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
+    try:
+        value = int(getattr(_twofa_cfg, name, default) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(lower, min(upper, value))
+
+
+_WORKERS = _int_setting("TWOFA_WORKERS", 4, 1, 16)
+_QUEUE_LIMIT = _int_setting("TWOFA_QUEUE_LIMIT", 200, _WORKERS, 5000)
+_EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="twofa")
+_QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 _RUNNING: set[int] = set()
 _LOCK = threading.Lock()
 _LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
@@ -62,6 +74,7 @@ def _run_twofa(
     trigger: str,
 ) -> dict:
     fh: logging.FileHandler | None = None
+    session: BrowserSession | None = None
     root_logger = logging.getLogger()
     thread_name = threading.current_thread().name
     try:
@@ -104,6 +117,11 @@ def _run_twofa(
         logger.exception("[2FA] 后台异常: %s", email)
         return result
     finally:
+        if session is not None:
+            try:
+                session.session.close()
+            except Exception:
+                pass
         if fh is not None:
             try:
                 root_logger.removeHandler(fh)
@@ -113,6 +131,16 @@ def _run_twofa(
         with _LOCK:
             _RUNNING.discard(int(account_id))
         _QUEUE_SLOTS.release()
+
+
+def queue_settings() -> dict:
+    with _LOCK:
+        running = len(_RUNNING)
+    return {
+        "workers": _WORKERS,
+        "queue_limit": _QUEUE_LIMIT,
+        "running": running,
+    }
 
 
 def enqueue_account_totp_setup(
