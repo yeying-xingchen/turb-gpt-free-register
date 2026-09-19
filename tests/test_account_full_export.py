@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import unittest
+from unittest import mock
 
 import core.db as db
 
@@ -57,6 +58,40 @@ class AccountFullExportTests(unittest.TestCase):
         line = db._account_full_export_line(row)
         # 来源为空时保留空字段（------），不破坏整体结构
         self.assertTrue(line.startswith("a@b.com------Pass123---https://2fa.run/----2FA:ABCDEF123"))
+
+    def test_generic_api_resolves_to_code_url_link(self):
+        # generic_api 账号应解析出邮箱池里的完整取码链接，而非裸字符串 generic_api
+        with mock.patch.object(
+            db, "get_generic_api_email_by_email",
+            return_value={"code_url": "http://127.0.0.1:5055/code?email=a@b.com"},
+        ):
+            row = self._row(email_source="generic_api")
+            line = db._account_full_export_line(row)
+        self.assertEqual(
+            line,
+            "a@b.com---http://127.0.0.1:5055/code?email=a@b.com---Pass123---https://2fa.run/----2FA:ABCDEF123",
+        )
+
+    def test_generic_api_constructs_link_when_pool_missing(self):
+        # 邮箱池查不到该邮箱时，按 OmniMail 约定拼出完整取码链接
+        import config.email as ce
+        with mock.patch.object(
+            db, "get_generic_api_email_by_email", return_value=None
+        ), mock.patch.object(ce, "OMNIMAIL_BASE", "https://omnimail.example/api", create=True):
+            row = self._row(email_source="generic_api")
+            line = db._account_full_export_line(row)
+        self.assertEqual(
+            line,
+            "a@b.com---https://omnimail.example/api/messages?mailbox=a@b.com---Pass123---https://2fa.run/----2FA:ABCDEF123",
+        )
+
+    def test_build_code_url_with_base(self):
+        import config.email as ce
+        with mock.patch.object(ce, "OMNIMAIL_BASE", "https://example.com/api/", create=True):
+            self.assertEqual(
+                db._build_generic_api_code_url("a@b.com"),
+                "https://example.com/api/messages?mailbox=a@b.com",
+            )
 
 
 if __name__ == "__main__":
