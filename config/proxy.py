@@ -107,10 +107,25 @@ def proxy_is_cooling_down(proxy: str | None) -> bool:
         return float(item.get("cooldown_until", 0.0) or 0.0) > time.time()
 
 
-def pick_proxy(exclude: set[str] | list[str] | tuple[str, ...] | None = None) -> str:
-    """从代理池随机抽取健康出口；可排除本次任务已经使用的代理。"""
+def pick_proxy(
+    exclude: set[str] | list[str] | tuple[str, ...] | None = None,
+    *,
+    allow_excluded_fallback: bool = False,
+) -> str:
+    """从代理池随机抽取健康出口。
+
+    ``allow_excluded_fallback`` 用于动态住宅代理：代理商可能只有一个入口 URL，
+    但每次新建连接会轮换真实出口 IP。池中没有未使用 URL 时，允许重新使用入口，
+    但仍会新建完整 BrowserSession 并重新探测 Geo。
+    """
     excluded = {_proxy_key(item) for item in (exclude or ()) if _proxy_key(item)}
     candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item) not in excluded]
+    if not candidates and allow_excluded_fallback:
+        all_candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item)]
+        # 只有单入口动态住宅池才允许复用 URL；多入口池已经完成轮换时，
+        # 不要把已失败的静态出口再次选回来。
+        if len(set(all_candidates)) == 1:
+            candidates = all_candidates
     if not candidates:
         return ""
     if PROXY_ADAPTIVE_ROUTING:
