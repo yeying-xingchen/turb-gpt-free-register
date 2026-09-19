@@ -631,6 +631,30 @@ def _account_line(row: dict) -> str:
     return "----".join(parts)
 
 
+# “完整导出”里 2FA 段固定的站点占位（需求指定的固定文案）。
+_TWOFA_EXPORT_URL = "https://2fa.run/"
+
+
+def _account_full_export_line(row: dict) -> str:
+    """生成“完整导出”单行，格式严格按需求：
+
+        邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥
+
+    - 邮箱接码API：账号的邮箱来源（email_source），即接码所用的邮箱服务/API。
+    - 密码：ChatGPT 账号自身登录密码（registration_password）。
+    - 2FA：固定前缀 “2FA:” 拼接 TOTP 密钥。
+    分隔符：前四段之间为 “---”，2FA 段之前为 “----”（与需求保持一致）。
+    """
+    email = str(row.get("email") or "").strip()
+    email_api = str(row.get("email_source") or "").strip()
+    # 仅填 ChatGPT 注册密码；若该账号没有，则留空。
+    password = _extract_registration_password(row)
+    totp = str(row.get("totp_secret") or "").strip()
+    line = "---".join([email, email_api, password, _TWOFA_EXPORT_URL])
+    line = line + "----" + ("2FA:" + totp)
+    return line
+
+
 def _registered_email_line(row: dict) -> str:
     """生成注册成功邮箱 TXT 的行内容；token 由注册成功的token.txt 单独保存。"""
     return row.get("original_email_line") or row.get("email") or ""
