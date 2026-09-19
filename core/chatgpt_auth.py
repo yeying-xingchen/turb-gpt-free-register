@@ -31,16 +31,18 @@ def _ensure_authorize_context(authorize_url: str, session: BrowserSession, email
         params = parse_qs(parsed.query, keep_blank_values=True)
         # 旧实现主动注入该字段；当前成功浏览器 authorize 已不携带。
         changed = bool(params.pop("ext-passkey-client-capabilities", None))
+        ui_locale = session.navigator_language()
         required = {
             "ext-oai-did": session.device_id,
             "auth_session_logging_id": session.auth_session_logging_id,
             "screen_hint": "login_or_signup",
             "login_hint": email,
+            "ui_locales": ui_locale,
             "ccaps": _CC_CAPS,
             "auth_return_target_category": "chatgpt_home",
         }
         for key, value in required.items():
-            if key in {"ccaps", "auth_return_target_category"}:
+            if key in {"ccaps", "auth_return_target_category", "ui_locales"}:
                 if params.get(key) != [value]:
                     params[key] = [value]
                     changed = True
@@ -49,6 +51,11 @@ def _ensure_authorize_context(authorize_url: str, session: BrowserSession, email
                 changed = True
         if not changed:
             return authorize_url
+        logger.info(
+            "[步骤3] authorize 上下文已对齐：ui_locales=%s oai-did=%s",
+            ui_locale,
+            str(session.device_id)[:12] + "...",
+        )
         return parsed._replace(query=urlencode(params, doseq=True)).geturl()
     except Exception:
         return authorize_url
