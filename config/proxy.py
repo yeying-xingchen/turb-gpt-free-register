@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-
 """
 代理池配置
 
@@ -13,8 +11,6 @@ from __future__ import annotations
 """
 from config.env_loader import apply_env_overrides
 import random
-import threading
-import time
 
 
 # 本地代理入口；实际出口地区以代理/分流规则为准。
@@ -23,16 +19,24 @@ PROXY_POOL = [
     "socks5://127.0.0.1:7897",
 ]
 
+# 代理池使用的本地上游代理。填写后形成：本地上游 -> 代理池目标代理 -> ChatGPT；
+# 留空则直接使用代理池中的目标代理，不启动链式中继。
+PROXY_POOL_UPSTREAM_PROXY = ""
+
 # 套餐/Plus 试用资格查询与 Codex Agent Token 生成共用这组独立网络策略，
 # 避免批量请求被注册代理池中的临时本地代理拖垮，也避免无条件直连造成出口策略失控。
-#   auto   = 优先使用 PLAN_CHECK_PROXY 或代理池；本地代理端口未监听时回退直连
+#   auto   = 优先使用 PLAN_CHECK_PROXY 或代理池；没有代理时才按 direct 运行
 #   proxy  = 强制使用 PLAN_CHECK_PROXY 或代理池，失败直接报错
 #   direct = 始终直连
 PLAN_CHECK_PROXY_MODE = "auto"
 
 # 套餐查询 / Codex Agent Token 生成专用代理。留空时 auto/proxy 模式从 PROXY_POOL 选择。
 # 代理可能包含账号密码，因此 WebUI 会把它保存到 .env。
-PLAN_CHECK_PROXY = ""
+PLAN_CHECK_PROXY = []
+
+# 套餐查询 / Codex Agent Token 生成的上游代理。填写后形成：本地代理 -> 动态代理 -> ChatGPT。
+# 例如 http://127.0.0.1:7897；留空则直接连接 PLAN_CHECK_PROXY。
+PLAN_CHECK_UPSTREAM_PROXY = ""
 
 # 查套餐 / 生成 Codex Agent Token 使用独立的短超时和有限重试，避免后台任务长时间卡住。
 PLAN_CHECK_TIMEOUT = 15.0
@@ -50,89 +54,10 @@ PLAN_CHECK_QUEUE_LIMIT = 500
 PLAN_CHECK_MIN_INTERVAL = 1.0
 PLAN_CHECK_JITTER = 0.8
 
-# 自适应代理池：
-#   True  = 403/429/网络失败时把当前出口临时降权，下一次从池中换新出口
-#   False = 保持单纯随机抽取，不记录出口健康状态
-PROXY_ADAPTIVE_ROUTING = True
-PROXY_COOLDOWN_403_SECONDS = 900
-PROXY_COOLDOWN_429_SECONDS = 300
-PROXY_MAX_ROUTE_ATTEMPTS = 4
 
-_PROXY_HEALTH: dict[str, dict[str, float | int | str]] = {}
-_PROXY_HEALTH_LOCK = threading.Lock()
-
-
-def _proxy_key(value: str | None) -> str:
-    return str(value or "").strip()
-
-
-def report_proxy_result(
-    proxy: str | None,
-    *,
-    status: int | None = None,
-    ok: bool | None = None,
-    error: str = "",
-) -> None:
-    """记录代理出口健康状态，供后续自适应选路使用。"""
-    key = _proxy_key(proxy)
-    if not key or not PROXY_ADAPTIVE_ROUTING:
-        return
-    now = time.time()
-    status = int(status or 0)
-    with _PROXY_HEALTH_LOCK:
-        item = _PROXY_HEALTH.setdefault(key, {"failures": 0, "cooldown_until": 0.0})
-        if ok is True or status in range(200, 400):
-            item["failures"] = 0
-            item["cooldown_until"] = 0.0
-            item["last_ok"] = now
-            return
-
-        if status == 403:
-            cooldown = max(0, int(PROXY_COOLDOWN_403_SECONDS))
-        elif status == 429:
-            cooldown = max(0, int(PROXY_COOLDOWN_429_SECONDS))
-        else:
-            cooldown = 60
-        item["failures"] = int(item.get("failures", 0) or 0) + 1
-        item["cooldown_until"] = now + cooldown
-        item["last_error"] = str(error or f"HTTP {status}" if status else error)[:300]
-
-
-def proxy_is_cooling_down(proxy: str | None) -> bool:
-    key = _proxy_key(proxy)
-    if not key or not PROXY_ADAPTIVE_ROUTING:
-        return False
-    with _PROXY_HEALTH_LOCK:
-        item = _PROXY_HEALTH.get(key) or {}
-        return float(item.get("cooldown_until", 0.0) or 0.0) > time.time()
-
-
-def pick_proxy(
-    exclude: set[str] | list[str] | tuple[str, ...] | None = None,
-    *,
-    allow_excluded_fallback: bool = False,
-) -> str:
-    """从代理池随机抽取健康出口。
-
-    ``allow_excluded_fallback`` 用于动态住宅代理：代理商可能只有一个入口 URL，
-    但每次新建连接会轮换真实出口 IP。池中没有未使用 URL 时，允许重新使用入口，
-    但仍会新建完整 BrowserSession 并重新探测 Geo。
-    """
-    excluded = {_proxy_key(item) for item in (exclude or ()) if _proxy_key(item)}
-    candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item) not in excluded]
-    if not candidates and allow_excluded_fallback:
-        all_candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item)]
-        # 只有单入口动态住宅池才允许复用 URL；多入口池已经完成轮换时，
-        # 不要把已失败的静态出口再次选回来。
-        if len(set(all_candidates)) == 1:
-            candidates = all_candidates
-    if not candidates:
-        return ""
-    if PROXY_ADAPTIVE_ROUTING:
-        healthy = [item for item in candidates if not proxy_is_cooling_down(item)]
-        if healthy:
-            candidates = healthy
-    return random.choice(candidates)
+def pick_proxy() -> str:
+    """从代理池中随机抽取一个代理 URL；池为空时返回空串（即不使用代理）。"""
+    return random.choice(PROXY_POOL) if PROXY_POOL else ""
 
 
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
@@ -141,16 +66,14 @@ PROXY = pick_proxy()
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'PROXY_POOL': 'list_str_multiline',
+    'PROXY_POOL_UPSTREAM_PROXY': 'str',
     'PLAN_CHECK_PROXY_MODE': 'str',
-    'PLAN_CHECK_PROXY': 'str',
+    'PLAN_CHECK_PROXY': 'list_str_multiline',
+    'PLAN_CHECK_UPSTREAM_PROXY': 'str',
     'PLAN_CHECK_TIMEOUT': 'float',
     'PLAN_CHECK_MAX_ATTEMPTS': 'int',
     'PLAN_CHECK_RETRY_DELAY': 'float',
     'PLAN_CHECK_REGISTRATION_RECHECK_DELAY': 'float',
-    'PROXY_ADAPTIVE_ROUTING': 'bool',
-    'PROXY_COOLDOWN_403_SECONDS': 'int',
-    'PROXY_COOLDOWN_429_SECONDS': 'int',
-    'PROXY_MAX_ROUTE_ATTEMPTS': 'int',
     'PLAN_CHECK_WORKERS': 'int',
     'PLAN_CHECK_QUEUE_LIMIT': 'int',
     'PLAN_CHECK_MIN_INTERVAL': 'float',

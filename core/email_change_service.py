@@ -16,8 +16,7 @@ from core.email_provider import (
     acquire_email_from_source, email_material_line,
     release_email_if_unconsumed, wait_for_otp,
 )
-from core.session import BrowserSession
-from config import proxy as _proxy_cfg
+from core.session import BrowserSession, close_browser_session
 
 logger = logging.getLogger(__name__)
 _EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="email-change")
@@ -69,28 +68,6 @@ def _new_session(account_id: int, proxy, *, email: str = "") -> BrowserSession:
     return BrowserSession(proxy=proxy, fingerprint_seed=seed)
 
 
-def _is_switchable_route_error(exc: BaseException) -> bool:
-    text = str(exc or "").lower()
-    return any(
-        hint in text
-        for hint in (
-            "403", "429", "502", "503", "504",
-            "proxy", "socks", "timeout", "timed out",
-            "connection", "closed", "reset",
-        )
-    )
-
-
-def _pick_route_proxy(used: set[str]) -> str:
-    """优先选择未使用 URL；动态住宅池耗尽时允许重新建立同入口会话。"""
-    return str(
-        _proxy_cfg.pick_proxy(
-            exclude=used,
-            allow_excluded_fallback=True,
-        ) or ""
-    ).strip()
-
-
 def _response_error(resp) -> str:
     try:
         data = resp.json()
@@ -126,10 +103,9 @@ def _post_with_network_retry(
     session: BrowserSession, *, account_id: int, path: str, token: str, payload: dict,
     fingerprint_email: str = "",
 ) -> tuple[dict, BrowserSession]:
-    """传输故障或 403/429/5xx 时换代理会话重试。"""
+    """TLS reset/超时等传输故障时换会话重试，最后一次明确直连兜底。"""
     last_exc: Exception | None = None
     current = session
-    used_proxies = {str(getattr(current, "proxy", "") or "").strip()}
     for attempt in range(1, 4):
         attempt_started = time.monotonic()
         _append_log(
@@ -153,19 +129,13 @@ def _post_with_network_retry(
                 f"HTTP 请求失败：path={path} attempt={attempt}/3 cost={_cost(attempt_started)} "
                 f"error={type(exc).__name__}: {text[:300]}",
             )
-            # 明确的业务 4xx 不重复提交；403/429 属于出口风控，允许换路；
-            # 5xx/传输错误也允许换路。
-            if (
-                isinstance(exc, RuntimeError)
-                and "返回 4" in text
-                and "返回 403" not in text
-                and "返回 429" not in text
-            ):
+            # 明确的业务 4xx 不重复提交；网络错误、429 和 5xx 才重试。
+            if isinstance(exc, RuntimeError) and "返回 4" in text and "返回 429" not in text:
                 raise
             if attempt >= 3:
                 break
             delay = attempt * 2
-            next_route = "代理池新会话"
+            next_route = "代理池新会话" if attempt == 1 else "直连兜底"
             _append_log(
                 account_id,
                 f"请求异常（第 {attempt}/3 次）：{type(exc).__name__}: {text[:300]}；"
@@ -173,14 +143,10 @@ def _post_with_network_retry(
             )
             logger.warning("[邮箱换绑] %s attempt=%s failed: %s", path, attempt, text[:300])
             time.sleep(delay)
-            # 每次失败都从自适应代理池换一个未使用出口；只有代理池为空时才直连。
-            next_proxy = _pick_route_proxy(used_proxies)
-            if next_proxy:
-                used_proxies.add(next_proxy)
-                current = _new_session(account_id, next_proxy, email=fingerprint_email)
-            else:
-                # 代理池为空时才允许最后一次直连。
-                current = _new_session(account_id, "", email=fingerprint_email)
+            # 第二次从代理池重新选择出口；第三次明确直连，避免坏代理持续 reset。
+            current = _new_session(
+                account_id, None if attempt == 1 else "", email=fingerprint_email,
+            )
     assert last_exc is not None
     raise last_exc
 
@@ -236,7 +202,9 @@ def _refresh_recent_login(
 
     # 保留本次换绑已经生成的账号级设备身份和浏览器画像，同时让查活预检
     # 创建干净的登录 Cookie Jar，并获得其网络重试能力。
-    fingerprint_state = {"fingerprint_seed": f"account:{email.lower()}"}
+    fingerprint_state = {
+        "fingerprint_seed": f"account:{email.lower()}",
+    }
     for key in (
         "device_id", "auth_session_logging_id", "oai_session_id", "sentinel_sid",
     ):
@@ -244,31 +212,27 @@ def _refresh_recent_login(
         if value:
             fingerprint_state[key] = value
     browser_profile = getattr(session, "browser_profile", None)
-    current_profile_state = dict(fingerprint_state)
     if isinstance(browser_profile, dict):
-        current_profile_state["browser_profile"] = dict(browser_profile)
+        fingerprint_state["browser_profile"] = dict(browser_profile)
 
     login_started = time.monotonic()
     selected_proxy = getattr(session, "proxy", None)
-    # 自适应代理池：当前出口失败后，动态选择下一个出口，从 CSRF 开始完整重跑。
-    # 不能在进入循环前一次性构造 routes：动态住宅池可能只有一个入口 URL，
-    # 但每次新建会话会轮换真实出口 IP。
-    # 新路线不复用旧路线的 browser_profile，让 BrowserSession 按新出口 Geo 自动生成
-    # navigator.language / Accept-Language / timezone 等画像；设备种子仍保持账号级稳定。
-    used_routes = {str(selected_proxy or "").strip()} if selected_proxy else set()
-    max_routes = max(1, int(getattr(_proxy_cfg, "PROXY_MAX_ROUTE_ATTEMPTS", 4) or 4))
+    # 与后台查活一致：代理路线的完整认证链只要收到 403，就用一套完全
+    # 独立的直连会话重跑。OAuth callback 的 403 会让当前 BrowserSession
+    # 进入 15 分钟熔断；仅清除熔断后继续请求既不能修复出口，也容易复用
+    # 已污染的 CF Cookie，因此必须从 CSRF 开始重新登录。
+    routes = [(selected_proxy, fingerprint_state, "当前代理路线")]
+    if selected_proxy:
+        routes.append(("", {}, "独立直连兜底"))
+
     last_exc: BaseException | None = None
-    route_proxy = selected_proxy
-    route_state = current_profile_state
-    route_label = "当前代理路线"
-    for route_index in range(max_routes):
+    for route_index, (route_proxy, route_state, route_label) in enumerate(routes):
         login_session: BrowserSession | None = None
         try:
             _append_log(account_id, f"Recent Login 路线开始：{route_label}")
             login_session, authorize_url = _network_preflight_with_retry(
                 email,
                 route_proxy,
-                max_attempts=1,
                 fingerprint_state=route_state,
             )
             otp_after_ts = time.time()
@@ -297,39 +261,19 @@ def _refresh_recent_login(
             raise
         except Exception as exc:
             last_exc = exc
-            if route_proxy and _is_switchable_route_error(exc):
-                status = 403 if "403" in str(exc) else 429 if "429" in str(exc) else None
-                try:
-                    _proxy_cfg.report_proxy_result(
-                        route_proxy,
-                        status=status,
-                        error=str(exc)[:300],
-                    )
-                except Exception:
-                    pass
-            if not _is_switchable_route_error(exc) or route_index >= max_routes - 1:
+            is_proxy_403 = route_index == 0 and bool(selected_proxy) and "403" in str(exc)
+            if not is_proxy_403:
                 raise
             _append_log(
                 account_id,
-                "Recent Login 当前出口收到可重试网络错误，"
-                f"关闭失败会话并切换代理池新出口，从 CSRF 开始重跑：{type(exc).__name__}: {str(exc)[:260]}",
+                "Recent Login 代理路线收到 403/会话熔断，"
+                f"关闭失败会话并从 CSRF 开始使用独立直连兜底：{type(exc).__name__}: {str(exc)[:260]}",
             )
             if login_session is not None:
                 try:
-                    login_session.session.close()
+                    close_browser_session(login_session)
                 except Exception:
                     pass
-            next_proxy = _pick_route_proxy(used_routes)
-            if not next_proxy:
-                route_proxy = ""
-                route_label = "代理池为空/直连兜底"
-                route_state = {}
-            else:
-                used_routes.add(next_proxy)
-                route_proxy = next_proxy
-                route_label = f"代理池自适应路线#{route_index + 1}"
-                # 只保留账号级 seed 和设备标识，不复用上一条路线的 Geo 画像。
-                route_state = dict(fingerprint_state)
 
     assert last_exc is not None
     raise last_exc
@@ -462,18 +406,13 @@ def _run(account_id: int, source: str) -> dict:
 
         stage = "创建网络会话"
         saved_proxy = _proxy(account.get("proxy_used"))
-        # 账号保存的出口如果已被自适应策略冷却，则跳过它，直接从池里选健康出口。
-        if saved_proxy and _proxy_cfg.proxy_is_cooling_down(saved_proxy):
-            _append_log(account_id, "账号历史代理仍在冷却，跳过该出口并从代理池重新选路")
-            saved_proxy = ""
-        initial_proxy = saved_proxy or _proxy_cfg.pick_proxy()
-        # 账号没有可复用的真实代理 URL 时，按全局代理池选路，而不是直接裸连。
+        # 账号没有可复用的真实代理 URL 时，先按全局代理池选路，而不是直接裸连。
         current_email = str(account.get("email") or "").strip()
         current_source = str(account.get("email_source") or "").strip().lower()
-        session = _new_session(account_id, initial_proxy or "", email=current_email)
+        session = _new_session(account_id, saved_proxy or None, email=current_email)
         _append_log(
             account_id,
-            f"网络会话已创建：route={'账号代理' if saved_proxy else '自适应代理池/默认网络'} "
+            f"网络会话已创建：route={'账号代理' if saved_proxy else '全局代理池/默认网络'} "
             f"proxy={_proxy_label(getattr(session, 'proxy', None))}",
         )
         _append_log(account_id, f"指纹摘要：{session.fingerprint_summary_text()}")

@@ -22,7 +22,6 @@ from urllib.parse import quote, unquote, urlparse, urlunparse, parse_qsl, urlenc
 import requests
 
 from config import email as _email_cfg
-from config import proxy as _proxy_cfg
 from core.otp_utils import extract_otp
 
 logger = logging.getLogger(__name__)
@@ -771,13 +770,13 @@ def fetch_latest_otp(
             email,
         )
 
-    selected_proxy = str(_proxy_cfg.pick_proxy() or "").strip()
+    selected_proxy = str(getattr(_email_cfg, "GENERIC_API_PROXY", "") or "").strip()
     routes: list[tuple[str, str]] = []
     if selected_proxy:
-        routes.append(("proxy", selected_proxy))
+        routes.append(("generic_api_local_proxy", selected_proxy))
     routes.append(("direct", ""))
     logger.info(
-        "[GenericAPI] HTTP 路由：首选=%s，网络异常时%s",
+        "[GenericAPI] HTTP 路由：专用代理=%s，网络异常时%s（不读取 PROXY_POOL）",
         _redact_proxy_url(selected_proxy),
         "回退直连" if selected_proxy else "使用直连",
     )
@@ -793,9 +792,11 @@ def fetch_latest_otp(
             page_result = yy_result = resp = None
             text = ""
             for route_index, (_route_name, route_proxy) in enumerate(routes):
+                relay = None
                 try:
+                    effective_proxy = route_proxy
                     page_result, yy_result, resp, text = _fetch_poll_payload(
-                        proxy_url=route_proxy,
+                        proxy_url=effective_proxy,
                         poll_url=poll_url,
                         email=email,
                         headers=headers,
@@ -816,6 +817,9 @@ def fetch_latest_otp(
                         exc,
                         "，切换直连重试" if has_fallback else "",
                     )
+                finally:
+                    if relay is not None:
+                        relay.close()
             if route_error is not None:
                 raise route_error
 

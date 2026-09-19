@@ -10,7 +10,7 @@ from pathlib import Path
 
 from core import db
 from core.account_liveness import check_account_liveness, log_path
-from core.chatgpt_plan import resolve_plan_check_route
+from core.chatgpt_plan import _mask_proxy, open_plan_check_proxy, resolve_plan_check_route
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
 
 
 def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: str) -> dict:
+    relay = None
     try:
         with _LOCK:
             _RUNNING.add(int(account_id))
@@ -47,6 +48,11 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             return {"ok": False, "status": "failed", "error": "账号已删除或查活状态已被重置"}
         route = resolve_plan_check_route(explicit_proxy=proxy)
         selected_proxy = route.get("proxy")
+        from config import proxy as proxy_cfg
+        timeout = float(getattr(proxy_cfg, "PLAN_CHECK_TIMEOUT", 15.0) or 15.0)
+        effective_proxy, relay = open_plan_check_proxy(
+            route, selected_proxy, timeout=timeout,
+        )
         # 查活必须沿用账号注册时记录的邮箱来源。不能只调用
         # resolve_email_source(email)：Remail 等临时邮箱的上下文只在领取进程
         # 内存中存在，服务重启后按当前 EMAIL_SOURCE 推断会把来源判错。
@@ -69,7 +75,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         fingerprint_state: dict = {}
         result = check_account_liveness(
             email,
-            proxy=selected_proxy,
+            proxy=effective_proxy,
             clear_log=False,
             email_source=email_source,
             fingerprint_state=fingerprint_state,
@@ -105,6 +111,13 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             _append_log(email, f"[查活] 完成：账号已废 {result.get('error') or ''}")
         else:
             _append_log(email, f"[查活] 完成：失败 {result.get('error') or ''}")
+        result.update({
+            "network_route": route.get("network_route"),
+            "proxy_used": _mask_proxy(selected_proxy) or None,
+            "upstream_proxy_used": route.get("upstream_proxy_used"),
+            "proxy_mode": route.get("proxy_mode"),
+            "proxy_fallback_reason": route.get("proxy_fallback_reason"),
+        })
         return result
     except Exception as exc:
         result = {
@@ -124,6 +137,8 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             pass
         return result
     finally:
+        if relay is not None:
+            relay.close()
         with _LOCK:
             _RUNNING.discard(int(account_id))
         _QUEUE_SLOTS.release()

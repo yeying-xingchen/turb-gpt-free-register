@@ -12,7 +12,8 @@ from config import email as _email_cfg
 from config import twofa as _twofa_cfg
 from core import db
 from core.account_export import setup_2fa
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
+from core.proxy_utils import mask_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,19 @@ def _normalize_proxy(proxy: str | None) -> str | None:
     return None
 
 
+def _resolve_twofa_proxy(proxy: str | None):
+    """为 2FA 解析传输代理，显式目标代理也要套代理池上游。"""
+    target = _normalize_proxy(proxy)
+    if not target:
+        # 没有可复用的目标代理时交给 BrowserSession 从代理池选择；
+        # BrowserSession 会自行管理代理池链式中继生命周期。
+        return None, None, "pool"
+    from core.proxy_chain import open_proxy_pool_proxy
+
+    transport, relay = open_proxy_pool_proxy(target)
+    return transport, relay, "saved"
+
+
 def is_running(acc_id: int) -> bool:
     with _LOCK:
         return int(acc_id) in _RUNNING
@@ -75,6 +89,7 @@ def _run_twofa(
 ) -> dict:
     fh: logging.FileHandler | None = None
     session: BrowserSession | None = None
+    relay = None
     root_logger = logging.getLogger()
     thread_name = threading.current_thread().name
     try:
@@ -91,10 +106,16 @@ def _run_twofa(
         fh.addFilter(lambda record: record.threadName == thread_name)
         root_logger.addHandler(fh)
         logger.info("[2FA] 开始后台设置：email=%s trigger=%s", email, trigger)
-        real_proxy = _normalize_proxy(proxy)
+        real_proxy, relay, proxy_source = _resolve_twofa_proxy(proxy)
         identity = email.strip().lower()
         session = BrowserSession(proxy=real_proxy, fingerprint_seed=f"account:{identity}")
-        _append_log(email, f"[2FA] 会话创建完成：proxy={session.proxy or 'direct'} device_id={session.device_id}")
+        target_label = mask_proxy_url(getattr(session, "proxy_target", None) or session.proxy or "direct") or "direct"
+        transport_label = mask_proxy_url(session.proxy or "direct") or "direct"
+        _append_log(
+            email,
+            f"[2FA] 会话创建完成：target={target_label} transport={transport_label} "
+            f"source={proxy_source} device_id={session.device_id}",
+        )
         _append_log(email, f"[2FA] 指纹摘要：{session.fingerprint_summary_text()}")
         secret = setup_2fa(session, email, access_token=access_token)
         db.update_account_totp_secret(
@@ -119,7 +140,12 @@ def _run_twofa(
     finally:
         if session is not None:
             try:
-                session.session.close()
+                close_browser_session(session)
+            except Exception:
+                pass
+        if relay is not None:
+            try:
+                relay.close()
             except Exception:
                 pass
         if fh is not None:

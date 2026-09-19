@@ -24,9 +24,8 @@ from config import (
 
 
 logger = logging.getLogger(__name__)
-_GEO_CACHE: dict[str, tuple[float, dict]] = {}
+_GEO_CACHE: dict[str, dict] = {}
 _GEO_CACHE_LOCK = threading.Lock()
-_GEO_CACHE_TTL = 30.0
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
 _COUNTRY_NAME_TO_CODE = {
     "JAPAN": "JP", "CHINA": "CN", "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US",
@@ -36,6 +35,19 @@ _COUNTRY_NAME_TO_CODE = {
     "PHILIPPINES": "PH", "INDIA": "IN", "AUSTRALIA": "AU", "CANADA": "CA",
     "GERMANY": "DE", "FRANCE": "FR", "NETHERLANDS": "NL", "BRAZIL": "BR",
 }
+
+
+def close_browser_session(session) -> None:
+    """Close a BrowserSession while retaining compatibility with test doubles."""
+    if session is None:
+        return
+    close = getattr(type(session), "close", None)
+    if callable(close):
+        close(session)
+        return
+    raw_session = getattr(session, "session", None)
+    if raw_session is not None:
+        raw_session.close()
 
 
 def _seed_uuid(seed: str, salt: str) -> str:
@@ -89,13 +101,22 @@ class BrowserSession:
             detect_exit_geo: 是否探测出口 IP 并自动选择语言/时区画像。
                              套餐查询等短请求可关闭，避免额外网络等待。
         """
-        # proxy=None  → 从池里随机抽（默认行为）
+        # proxy=None  → 从池里随机抽（默认行为），并按代理池上游配置决定是否链式
         # proxy=""    → 禁用代理（直连）
-        # proxy="..." → 使用指定代理
+        # proxy="..." → 使用指定代理，不套用代理池上游
+        self._proxy_pool_relay = None
         if proxy is None:
             self.proxy = pick_proxy()
+            self.proxy_target = self.proxy
+            if self.proxy:
+                from core.proxy_chain import open_proxy_pool_proxy
+                transport_proxy, self._proxy_pool_relay = open_proxy_pool_proxy(self.proxy)
+            else:
+                transport_proxy = ""
         else:
             self.proxy = proxy
+            self.proxy_target = proxy
+            transport_proxy = proxy
 
         self.fingerprint_seed = str(fingerprint_seed or "").strip()
 
@@ -165,10 +186,10 @@ class BrowserSession:
         self.session = Session(impersonate=IMPERSONATE)
 
         # 设置代理
-        if self.proxy:
+        if transport_proxy:
             self.session.proxies = {
-                "http": self.proxy,
-                "https": self.proxy,
+                "http": transport_proxy,
+                "https": transport_proxy,
             }
 
         # 设置超时
@@ -218,6 +239,21 @@ class BrowserSession:
         except Exception:
             pass
         return out
+
+    def close(self) -> None:
+        """Close the HTTP session and any proxy-pool relay owned by this session."""
+        try:
+            self.session.close()
+        finally:
+            relay, self._proxy_pool_relay = self._proxy_pool_relay, None
+            if relay is not None:
+                relay.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     @staticmethod
     def _short_value(value: object, limit: int = 80) -> str:
@@ -351,15 +387,11 @@ class BrowserSession:
         except Exception:
             return {}
 
-        # 动态住宅代理经常使用同一个入口 URL 轮换不同出口 IP。
-        # 代理会话不能永久复用旧 Geo，否则会出现出口为 IN、画像仍是 JP 等错配。
-        # 直连可短暂缓存；代理每次新建会话都重新探测。
         cache_key = self.proxy or "__direct__"
-        if not self.proxy:
-            with _GEO_CACHE_LOCK:
-                cached = _GEO_CACHE.get(cache_key)
-                if cached and time.time() - cached[0] < _GEO_CACHE_TTL:
-                    return dict(cached[1])
+        with _GEO_CACHE_LOCK:
+            cached = _GEO_CACHE.get(cache_key)
+            if cached is not None:
+                return dict(cached)
 
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         for url in endpoints:
@@ -370,9 +402,8 @@ class BrowserSession:
                 data = resp.json()
                 geo = self._normalize_geo_response(data)
                 if geo.get("country") or geo.get("timezone"):
-                    if not self.proxy:
-                        with _GEO_CACHE_LOCK:
-                            _GEO_CACHE[cache_key] = (time.time(), dict(geo))
+                    with _GEO_CACHE_LOCK:
+                        _GEO_CACHE[cache_key] = dict(geo)
                     logger.info(
                         "[指纹] 出口IP地理信息: ip=%s country=%s city=%s timezone=%s",
                         geo.get("ip") or "?", geo.get("country") or "?",
@@ -382,9 +413,8 @@ class BrowserSession:
             except Exception as exc:
                 logger.debug(f"[指纹] 出口 IP 地理检测失败 endpoint={url}: {type(exc).__name__}: {exc}")
                 continue
-        if not self.proxy:
-            with _GEO_CACHE_LOCK:
-                _GEO_CACHE[cache_key] = (time.time(), {})
+        with _GEO_CACHE_LOCK:
+            _GEO_CACHE[cache_key] = {}
         return {}
 
     @staticmethod
@@ -732,18 +762,7 @@ class BrowserSession:
         status = int(getattr(resp, "status_code", 0) or 0)
         self._observe_cf_cookie_changes(url)
         if status not in (403, 429):
-            if 200 <= status < 400 and self.proxy:
-                try:
-                    from config.proxy import report_proxy_result
-                    report_proxy_result(self.proxy, status=status, ok=True)
-                except Exception:
-                    pass
             return resp
-        try:
-            from config.proxy import report_proxy_result
-            report_proxy_result(self.proxy, status=status, error=url)
-        except Exception:
-            pass
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
         cool_down = retry_after if retry_after > 0 else (300 if status == 429 else 900)
         self.blocked_until = max(self.blocked_until, time.time() + min(cool_down, 3600))
