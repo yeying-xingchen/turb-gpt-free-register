@@ -550,6 +550,22 @@ EDITABLE_FIELDS = [
         ],
     },
     {
+        "key": "PROXY_ADAPTIVE_ROUTING", "file": "proxy.py", "type": "bool", "group": "代理池",
+        "label": "启用自适应代理池", "help": "遇到 403/429/网络失败时临时冷却当前出口，自动从代理池切换其他出口；每个新出口会重新探测 Geo 并生成对应浏览器画像",
+    },
+    {
+        "key": "PROXY_COOLDOWN_403_SECONDS", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "403出口冷却(秒)", "help": "某个代理出口收到 403 后的冷却时间；建议 600-1800 秒",
+    },
+    {
+        "key": "PROXY_COOLDOWN_429_SECONDS", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "429出口冷却(秒)", "help": "某个代理出口收到 429 后的冷却时间；建议 180-600 秒",
+    },
+    {
+        "key": "PROXY_MAX_ROUTE_ATTEMPTS", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "单任务最大换路次数", "help": "邮箱换绑/Recent Login 遇到可重试网络错误时最多尝试多少个代理出口；建议 3-5",
+    },
+    {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",
         "label": "套餐/Agent网络模式", "help": "用于查套餐和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
     },

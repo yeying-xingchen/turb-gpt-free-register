@@ -24,8 +24,9 @@ from config import (
 
 
 logger = logging.getLogger(__name__)
-_GEO_CACHE: dict[str, dict] = {}
+_GEO_CACHE: dict[str, tuple[float, dict]] = {}
 _GEO_CACHE_LOCK = threading.Lock()
+_GEO_CACHE_TTL = 30.0
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
 _COUNTRY_NAME_TO_CODE = {
     "JAPAN": "JP", "CHINA": "CN", "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US",
@@ -350,11 +351,15 @@ class BrowserSession:
         except Exception:
             return {}
 
+        # 动态住宅代理经常使用同一个入口 URL 轮换不同出口 IP。
+        # 代理会话不能永久复用旧 Geo，否则会出现出口为 IN、画像仍是 JP 等错配。
+        # 直连可短暂缓存；代理每次新建会话都重新探测。
         cache_key = self.proxy or "__direct__"
-        with _GEO_CACHE_LOCK:
-            cached = _GEO_CACHE.get(cache_key)
-            if cached is not None:
-                return dict(cached)
+        if not self.proxy:
+            with _GEO_CACHE_LOCK:
+                cached = _GEO_CACHE.get(cache_key)
+                if cached and time.time() - cached[0] < _GEO_CACHE_TTL:
+                    return dict(cached[1])
 
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         for url in endpoints:
@@ -365,8 +370,9 @@ class BrowserSession:
                 data = resp.json()
                 geo = self._normalize_geo_response(data)
                 if geo.get("country") or geo.get("timezone"):
-                    with _GEO_CACHE_LOCK:
-                        _GEO_CACHE[cache_key] = dict(geo)
+                    if not self.proxy:
+                        with _GEO_CACHE_LOCK:
+                            _GEO_CACHE[cache_key] = (time.time(), dict(geo))
                     logger.info(
                         "[指纹] 出口IP地理信息: ip=%s country=%s city=%s timezone=%s",
                         geo.get("ip") or "?", geo.get("country") or "?",
@@ -376,8 +382,9 @@ class BrowserSession:
             except Exception as exc:
                 logger.debug(f"[指纹] 出口 IP 地理检测失败 endpoint={url}: {type(exc).__name__}: {exc}")
                 continue
-        with _GEO_CACHE_LOCK:
-            _GEO_CACHE[cache_key] = {}
+        if not self.proxy:
+            with _GEO_CACHE_LOCK:
+                _GEO_CACHE[cache_key] = (time.time(), {})
         return {}
 
     @staticmethod
@@ -725,7 +732,18 @@ class BrowserSession:
         status = int(getattr(resp, "status_code", 0) or 0)
         self._observe_cf_cookie_changes(url)
         if status not in (403, 429):
+            if 200 <= status < 400 and self.proxy:
+                try:
+                    from config.proxy import report_proxy_result
+                    report_proxy_result(self.proxy, status=status, ok=True)
+                except Exception:
+                    pass
             return resp
+        try:
+            from config.proxy import report_proxy_result
+            report_proxy_result(self.proxy, status=status, error=url)
+        except Exception:
+            pass
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
         cool_down = retry_after if retry_after > 0 else (300 if status == 429 else 900)
         self.blocked_until = max(self.blocked_until, time.time() + min(cool_down, 3600))

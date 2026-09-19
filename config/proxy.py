@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 """
 代理池配置
 
@@ -11,6 +13,8 @@
 """
 from config.env_loader import apply_env_overrides
 import random
+import threading
+import time
 
 
 # 本地代理入口；实际出口地区以代理/分流规则为准。
@@ -46,10 +50,74 @@ PLAN_CHECK_QUEUE_LIMIT = 500
 PLAN_CHECK_MIN_INTERVAL = 1.0
 PLAN_CHECK_JITTER = 0.8
 
+# 自适应代理池：
+#   True  = 403/429/网络失败时把当前出口临时降权，下一次从池中换新出口
+#   False = 保持单纯随机抽取，不记录出口健康状态
+PROXY_ADAPTIVE_ROUTING = True
+PROXY_COOLDOWN_403_SECONDS = 900
+PROXY_COOLDOWN_429_SECONDS = 300
+PROXY_MAX_ROUTE_ATTEMPTS = 4
 
-def pick_proxy() -> str:
-    """从代理池中随机抽取一个代理 URL；池为空时返回空串（即不使用代理）。"""
-    return random.choice(PROXY_POOL) if PROXY_POOL else ""
+_PROXY_HEALTH: dict[str, dict[str, float | int | str]] = {}
+_PROXY_HEALTH_LOCK = threading.Lock()
+
+
+def _proxy_key(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def report_proxy_result(
+    proxy: str | None,
+    *,
+    status: int | None = None,
+    ok: bool | None = None,
+    error: str = "",
+) -> None:
+    """记录代理出口健康状态，供后续自适应选路使用。"""
+    key = _proxy_key(proxy)
+    if not key or not PROXY_ADAPTIVE_ROUTING:
+        return
+    now = time.time()
+    status = int(status or 0)
+    with _PROXY_HEALTH_LOCK:
+        item = _PROXY_HEALTH.setdefault(key, {"failures": 0, "cooldown_until": 0.0})
+        if ok is True or status in range(200, 400):
+            item["failures"] = 0
+            item["cooldown_until"] = 0.0
+            item["last_ok"] = now
+            return
+
+        if status == 403:
+            cooldown = max(0, int(PROXY_COOLDOWN_403_SECONDS))
+        elif status == 429:
+            cooldown = max(0, int(PROXY_COOLDOWN_429_SECONDS))
+        else:
+            cooldown = 60
+        item["failures"] = int(item.get("failures", 0) or 0) + 1
+        item["cooldown_until"] = now + cooldown
+        item["last_error"] = str(error or f"HTTP {status}" if status else error)[:300]
+
+
+def proxy_is_cooling_down(proxy: str | None) -> bool:
+    key = _proxy_key(proxy)
+    if not key or not PROXY_ADAPTIVE_ROUTING:
+        return False
+    with _PROXY_HEALTH_LOCK:
+        item = _PROXY_HEALTH.get(key) or {}
+        return float(item.get("cooldown_until", 0.0) or 0.0) > time.time()
+
+
+def pick_proxy(exclude: set[str] | list[str] | tuple[str, ...] | None = None) -> str:
+    """从代理池随机抽取健康出口；可排除本次任务已经使用的代理。"""
+    excluded = {_proxy_key(item) for item in (exclude or ()) if _proxy_key(item)}
+    candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item) not in excluded]
+    if not candidates:
+        return ""
+    if PROXY_ADAPTIVE_ROUTING:
+        healthy = [item for item in candidates if not proxy_is_cooling_down(item)]
+        if healthy:
+            candidates = healthy
+    return random.choice(candidates)
 
 
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
@@ -64,6 +132,10 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_MAX_ATTEMPTS': 'int',
     'PLAN_CHECK_RETRY_DELAY': 'float',
     'PLAN_CHECK_REGISTRATION_RECHECK_DELAY': 'float',
+    'PROXY_ADAPTIVE_ROUTING': 'bool',
+    'PROXY_COOLDOWN_403_SECONDS': 'int',
+    'PROXY_COOLDOWN_429_SECONDS': 'int',
+    'PROXY_MAX_ROUTE_ATTEMPTS': 'int',
     'PLAN_CHECK_WORKERS': 'int',
     'PLAN_CHECK_QUEUE_LIMIT': 'int',
     'PLAN_CHECK_MIN_INTERVAL': 'float',
