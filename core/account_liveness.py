@@ -104,29 +104,48 @@ def _warm_login_fingerprint_context(session: BrowserSession) -> None:
     """复现 plus 纯协议注册成功样本的登录页初始化顺序。"""
     from core.chatgpt_bootstrap import anonymous_bootstrap
 
+    stage = "初始化"
     logger.info(
         "[查活] 登录链预热：/auth/login 顶层导航 → anonymous bootstrap → "
-        "providers → session → CSRF → session"
+        "providers → session → CSRF → session；指纹=%s",
+        session.fingerprint_summary_text(),
     )
-    nav = session.get(
-        "https://chatgpt.com/auth/login",
-        headers=session.get_chatgpt_navigate_headers(
-            # 地址栏级顶层导航：无 Referer，Sec-Fetch-Site=none。
-            referer="", user_initiated=True,
-        ),
-        allow_redirects=True,
-        # 代理端口可连接不代表其上游 TLS 可用，避免坏节点长期占住 worker。
-        timeout=12,
-    )
-    nav.raise_for_status()
-    observe = getattr(session, "observe_chatgpt_document", None)
-    if callable(observe):
-        observe(nav)
-    anonymous_bootstrap(session, strict=False)
-    # best-effort bootstrap 的非关键接口不能阻断正式认证链。
-    _clear_optional_bootstrap_circuit(session)
-    get_providers(session)
-    probe_auth_session(session)
+    try:
+        stage = "chatgpt.com /auth/login 顶层导航"
+        nav = session.get(
+            "https://chatgpt.com/auth/login",
+            headers=session.get_chatgpt_navigate_headers(
+                # 地址栏级顶层导航：无 Referer，Sec-Fetch-Site=none。
+                referer="", user_initiated=True,
+            ),
+            allow_redirects=True,
+            # 代理端口可连接不代表其上游 TLS 可用，避免坏节点长期占住 worker。
+            timeout=12,
+        )
+        nav.raise_for_status()
+        observe = getattr(session, "observe_chatgpt_document", None)
+        if callable(observe):
+            observe(nav)
+
+        stage = "anonymous bootstrap"
+        anonymous_bootstrap(session, strict=False)
+        # best-effort bootstrap 的非关键接口不能阻断正式认证链。
+        _clear_optional_bootstrap_circuit(session)
+
+        stage = "NextAuth providers"
+        get_providers(session)
+        stage = "NextAuth anonymous session"
+        probe_auth_session(session)
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        url = getattr(response, "url", None) or getattr(response, "request", None)
+        if url is not None and not isinstance(url, str):
+            url = getattr(url, "url", None)
+        detail = f"stage={stage} status={status or '?'} url={url or '?'}"
+        raise RuntimeError(
+            f"Recent Login 预热失败：{detail} error={type(exc).__name__}: {str(exc)[:240]}"
+        ) from exc
 
 
 def _network_preflight_with_retry(
@@ -161,9 +180,12 @@ def _network_preflight_with_retry(
         logger.info("[查活] 指纹摘要：%s", session.fingerprint_summary_text())
         try:
             _warm_login_fingerprint_context(session)
+            logger.info("[查活] 预检阶段：CSRF")
             csrf = get_csrf_token(session)
             # 成功 Web 样本在 signin 前会再次确认匿名 NextAuth session。
+            logger.info("[查活] 预检阶段：signin 前 anonymous session")
             probe_auth_session(session)
+            logger.info("[查活] 预检阶段：signin/openai")
             authorize_url = signin_openai(session, csrf, email)
             return session, authorize_url
         except Exception as exc:
