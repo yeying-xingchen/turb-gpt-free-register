@@ -155,10 +155,22 @@ def normalize_proxy_list(values, default_scheme: str = "http") -> list[str]:
     ]
 
 
-def pick_proxy(exclude: set[str] | list[str] | tuple[str, ...] | None = None) -> str:
-    """从代理池随机抽取健康出口；可排除本次任务已经使用的代理。"""
+def pick_proxy(
+    exclude: set[str] | list[str] | tuple[str, ...] | None = None,
+    *,
+    allow_excluded_fallback: bool = False,
+) -> str:
+    """从代理池随机抽取健康出口。
+
+    动态住宅代理只有一个入口 URL 时，即使该入口被排除，也允许复用，
+    因为每次新建连接可能轮换真实出口 IP。
+    """
     excluded = {_proxy_key(item) for item in (exclude or ()) if _proxy_key(item)}
     candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item) not in excluded]
+    if not candidates and allow_excluded_fallback:
+        all_candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item)]
+        if len(set(all_candidates)) == 1:
+            candidates = all_candidates
     if not candidates:
         return ""
     if PROXY_ADAPTIVE_ROUTING:

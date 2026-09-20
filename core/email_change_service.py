@@ -82,8 +82,13 @@ def _is_switchable_route_error(exc: BaseException) -> bool:
 
 
 def _pick_route_proxy(used: set[str]) -> str:
-    """从代理池选择未使用且未被冷却的出口；不主动退回直连。"""
-    return str(_proxy_cfg.pick_proxy(exclude=used) or "").strip()
+    """优先选择未使用 URL；动态住宅池耗尽时允许重新建立同入口会话。"""
+    return str(
+        _proxy_cfg.pick_proxy(
+            exclude=used,
+            allow_excluded_fallback=True,
+        ) or ""
+    ).strip()
 
 
 def _response_error(resp) -> str:
@@ -174,7 +179,7 @@ def _post_with_network_retry(
                 used_proxies.add(next_proxy)
                 current = _new_session(account_id, next_proxy, email=fingerprint_email)
             else:
-                # 代理池已耗尽时才允许最后一次直连，保持旧行为的最终兜底。
+                # 代理池为空时才允许最后一次直连。
                 current = _new_session(account_id, "", email=fingerprint_email)
     assert last_exc is not None
     raise last_exc
@@ -245,21 +250,18 @@ def _refresh_recent_login(
 
     login_started = time.monotonic()
     selected_proxy = getattr(session, "proxy", None)
-    # 自适应代理池：当前出口失败后，换未使用出口从 CSRF 开始完整重跑。
+    # 自适应代理池：当前出口失败后，动态选择下一个出口，从 CSRF 开始完整重跑。
+    # 不能在进入循环前一次性构造 routes：动态住宅池可能只有一个入口 URL，
+    # 但每次新建会话会轮换真实出口 IP。
     # 新路线不复用旧路线的 browser_profile，让 BrowserSession 按新出口 Geo 自动生成
     # navigator.language / Accept-Language / timezone 等画像；设备种子仍保持账号级稳定。
-    routes = [(selected_proxy, current_profile_state, "当前代理路线")]
     used_routes = {str(selected_proxy or "").strip()} if selected_proxy else set()
     max_routes = max(1, int(getattr(_proxy_cfg, "PROXY_MAX_ROUTE_ATTEMPTS", 4) or 4))
-    for route_index in range(1, max_routes):
-        next_proxy = _pick_route_proxy(used_routes)
-        if not next_proxy:
-            break
-        used_routes.add(next_proxy)
-        routes.append((next_proxy, dict(fingerprint_state), f"代理池自适应路线#{route_index}"))
-
     last_exc: BaseException | None = None
-    for route_index, (route_proxy, route_state, route_label) in enumerate(routes):
+    route_proxy = selected_proxy
+    route_state = current_profile_state
+    route_label = "当前代理路线"
+    for route_index in range(max_routes):
         login_session: BrowserSession | None = None
         try:
             _append_log(account_id, f"Recent Login 路线开始：{route_label}")
@@ -305,7 +307,7 @@ def _refresh_recent_login(
                     )
                 except Exception:
                     pass
-            if not _is_switchable_route_error(exc) or route_index >= len(routes) - 1:
+            if not _is_switchable_route_error(exc) or route_index >= max_routes - 1:
                 raise
             _append_log(
                 account_id,
@@ -317,6 +319,17 @@ def _refresh_recent_login(
                     login_session.session.close()
                 except Exception:
                     pass
+            next_proxy = _pick_route_proxy(used_routes)
+            if not next_proxy:
+                route_proxy = ""
+                route_label = "代理池为空/直连兜底"
+                route_state = {}
+            else:
+                used_routes.add(next_proxy)
+                route_proxy = next_proxy
+                route_label = f"代理池自适应路线#{route_index + 1}"
+                # 只保留账号级 seed 和设备标识，不复用上一条路线的 Geo 画像。
+                route_state = dict(fingerprint_state)
 
     assert last_exc is not None
     raise last_exc
