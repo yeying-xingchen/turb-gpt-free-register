@@ -560,8 +560,18 @@ def _outlook_line(row: dict) -> str:
 def _generic_api_email_line(row: dict) -> str:
     return "----".join([
         row.get("email") or "",
-        row.get("code_url") or "",
+        _normalize_generic_api_code_url(row.get("code_url")),
     ])
+
+
+def _normalize_generic_api_code_url(value: object) -> str:
+    """修复导入文本中误粘贴到 URL 前面的短横线。"""
+    url = str(value or "").strip()
+    if url.startswith("-"):
+        candidate = url.lstrip("-")
+        if candidate.lower().startswith(("http://", "https://")):
+            return candidate
+    return url
 
 
 def _imap_email_line(row: dict) -> str:
@@ -707,7 +717,17 @@ def _save_outlook(rows: list[dict]) -> None:
 
 
 def _load_generic_api_emails() -> list[dict]:
-    return _load_collection("generic_api")
+    rows = _load_collection("generic_api")
+    changed = False
+    for row in rows:
+        original = row.get("code_url")
+        normalized = _normalize_generic_api_code_url(original)
+        if normalized != original:
+            row["code_url"] = normalized
+            changed = True
+    if changed:
+        _save_generic_api_emails(rows)
+    return rows
 
 
 def _save_generic_api_emails(rows: list[dict]) -> None:
@@ -819,6 +839,7 @@ def _decorate_outlook(row: dict, account_by_email: dict[str, dict] | None = None
 
 def _decorate_generic_api_email(row: dict, account_by_email: dict[str, dict] | None = None) -> dict:
     out = dict(row)
+    out["code_url"] = _normalize_generic_api_code_url(out.get("code_url"))
     out["copy_line"] = _generic_api_email_line(out)
     out["password"] = out.get("password") or ""
     out["client_id"] = out.get("client_id") or ""
@@ -2292,7 +2313,7 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
                 pool_row["copy_line"] = _imap_email_line(pool_row)
                 original_line = _imap_email_line(pool_row)
             elif source == "generic_api":
-                code_url = (raw.get("code_url") or raw.get("url") or "").strip()
+                code_url = _normalize_generic_api_code_url(raw.get("code_url") or raw.get("url"))
                 if not code_url:
                     skipped += 1
                     continue
@@ -2514,7 +2535,7 @@ def import_generic_api_emails(records: list[dict]) -> tuple[int, int]:
         inserted = skipped = 0
         for raw in records:
             email = (raw.get("email") or "").strip()
-            code_url = (raw.get("code_url") or raw.get("url") or "").strip()
+            code_url = _normalize_generic_api_code_url(raw.get("code_url") or raw.get("url"))
             if not email or not code_url:
                 skipped += 1
                 continue

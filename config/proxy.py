@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-from __future__ import annotations
-
 """
 代理池配置
 
@@ -12,8 +10,6 @@ from __future__ import annotations
     - socks5h://           SOCKS5（DNS 在代理端解析，推荐，避免 DNS-IP 错配）
 """
 import random
-import threading
-import time
 from urllib.parse import quote, urlparse
 
 from config.env_loader import apply_env_overrides
@@ -25,16 +21,24 @@ PROXY_POOL = [
     "socks5://127.0.0.1:7897",
 ]
 
+# 代理池使用的本地上游代理。填写后形成：本地上游 -> 代理池目标代理 -> ChatGPT；
+# 留空则直接使用代理池中的目标代理，不启动链式中继。
+PROXY_POOL_UPSTREAM_PROXY = ""
+
 # 套餐/Plus 试用资格查询与 Codex Agent Token 生成共用这组独立网络策略，
 # 避免批量请求被注册代理池中的临时本地代理拖垮，也避免无条件直连造成出口策略失控。
-#   auto   = 优先使用 PLAN_CHECK_PROXY 或代理池；本地代理端口未监听时回退直连
+#   auto   = 优先使用 PLAN_CHECK_PROXY 或代理池；没有代理时才按 direct 运行
 #   proxy  = 强制使用 PLAN_CHECK_PROXY 或代理池，失败直接报错
 #   direct = 始终直连
 PLAN_CHECK_PROXY_MODE = "auto"
 
 # 套餐查询 / Codex Agent Token 生成专用代理。留空时 auto/proxy 模式从 PROXY_POOL 选择。
 # 代理可能包含账号密码，因此 WebUI 会把它保存到 .env。
-PLAN_CHECK_PROXY = ""
+PLAN_CHECK_PROXY = []
+
+# 套餐查询 / Codex Agent Token 生成的上游代理。填写后形成：本地代理 -> 动态代理 -> ChatGPT。
+# 例如 http://127.0.0.1:7897；留空则直接连接 PLAN_CHECK_PROXY。
+PLAN_CHECK_UPSTREAM_PROXY = ""
 
 # 查套餐 / 生成 Codex Agent Token 使用独立的短超时和有限重试，避免后台任务长时间卡住。
 PLAN_CHECK_TIMEOUT = 15.0
@@ -52,78 +56,16 @@ PLAN_CHECK_QUEUE_LIMIT = 500
 PLAN_CHECK_MIN_INTERVAL = 1.0
 PLAN_CHECK_JITTER = 0.8
 
-# 自适应代理池：
-#   True  = 403/429/网络失败时把当前出口临时降权，下一次从池中换新出口
-#   False = 保持单纯随机抽取，不记录出口健康状态
-PROXY_ADAPTIVE_ROUTING = True
-PROXY_COOLDOWN_403_SECONDS = 900
-PROXY_COOLDOWN_429_SECONDS = 300
-PROXY_MAX_ROUTE_ATTEMPTS = 4
-
-_PROXY_HEALTH: dict[str, dict[str, float | int | str]] = {}
-_PROXY_HEALTH_LOCK = threading.Lock()
-
-
-def _proxy_key(value: str | None) -> str:
-    return str(value or "").strip()
-
-
-def report_proxy_result(
-    proxy: str | None,
-    *,
-    status: int | None = None,
-    ok: bool | None = None,
-    error: str = "",
-) -> None:
-    """记录代理出口健康状态，供后续自适应选路使用。"""
-    key = _proxy_key(proxy)
-    if not key or not PROXY_ADAPTIVE_ROUTING:
-        return
-    now = time.time()
-    status = int(status or 0)
-    with _PROXY_HEALTH_LOCK:
-        item = _PROXY_HEALTH.setdefault(key, {"failures": 0, "cooldown_until": 0.0})
-        if ok is True or status in range(200, 400):
-            item["failures"] = 0
-            item["cooldown_until"] = 0.0
-            item["last_ok"] = now
-            return
-
-        if status == 403:
-            cooldown = max(0, int(PROXY_COOLDOWN_403_SECONDS))
-        elif status == 429:
-            cooldown = max(0, int(PROXY_COOLDOWN_429_SECONDS))
-        else:
-            cooldown = 60
-        item["failures"] = int(item.get("failures", 0) or 0) + 1
-        item["cooldown_until"] = now + cooldown
-        item["last_error"] = str(error or f"HTTP {status}" if status else error)[:300]
-
-
-def proxy_is_cooling_down(proxy: str | None) -> bool:
-    key = _proxy_key(proxy)
-    if not key or not PROXY_ADAPTIVE_ROUTING:
-        return False
-    with _PROXY_HEALTH_LOCK:
-        item = _PROXY_HEALTH.get(key) or {}
-        return float(item.get("cooldown_until", 0.0) or 0.0) > time.time()
-
 
 def _valid_port(value: str) -> bool:
     return value.isdigit() and 1 <= int(value) <= 65535
 
 
 def normalize_proxy_url(value: str, default_scheme: str = "http") -> str:
-    """Normalize common proxy notations without altering invalid input.
-
-    Accepted shorthand formats are ``host:port``, ``host:port:user:password``,
-    and ``user:password:host:port``.  Credentials are percent-encoded when a
-    shorthand is converted to a URL.
-    """
+    """Normalize common proxy shorthand while preserving explicit URLs."""
     text = str(value or "").strip()
     if not text or "://" in text:
         return text
-
     parts = text.split(":", 3)
     if len(parts) == 4 and parts[0] and _valid_port(parts[1]) and parts[2] and parts[3]:
         host, port, username, password = parts
@@ -131,7 +73,6 @@ def normalize_proxy_url(value: str, default_scheme: str = "http") -> str:
     if len(parts) == 4 and parts[0] and parts[1] and parts[2] and _valid_port(parts[3]):
         username, password, host, port = parts
         return f"{default_scheme}://{quote(username, safe='')}:{quote(password, safe='')}@{host}:{port}"
-
     parsed = urlparse(f"//{text}")
     try:
         port = parsed.port
@@ -155,51 +96,30 @@ def normalize_proxy_list(values, default_scheme: str = "http") -> list[str]:
     ]
 
 
-def pick_proxy(
-    exclude: set[str] | list[str] | tuple[str, ...] | None = None,
-    *,
-    allow_excluded_fallback: bool = False,
-) -> str:
-    """从代理池随机抽取健康出口。
+def pick_proxy() -> str:
+    """从代理池中随机抽取一个代理 URL；池为空时返回空串（即不使用代理）。"""
+    return random.choice(PROXY_POOL) if PROXY_POOL else ""
 
-    动态住宅代理只有一个入口 URL 时，即使该入口被排除，也允许复用，
-    因为每次新建连接可能轮换真实出口 IP。
-    """
-    excluded = {_proxy_key(item) for item in (exclude or ()) if _proxy_key(item)}
-    candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item) not in excluded]
-    if not candidates and allow_excluded_fallback:
-        all_candidates = [_proxy_key(item) for item in PROXY_POOL if _proxy_key(item)]
-        if len(set(all_candidates)) == 1:
-            candidates = all_candidates
-    if not candidates:
-        return ""
-    if PROXY_ADAPTIVE_ROUTING:
-        healthy = [item for item in candidates if not proxy_is_cooling_down(item)]
-        if healthy:
-            candidates = healthy
-    return random.choice(candidates)
 
+# 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
+PROXY = pick_proxy()
 
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'PROXY_POOL': 'list_str_multiline',
+    'PROXY_POOL_UPSTREAM_PROXY': 'str',
     'PLAN_CHECK_PROXY_MODE': 'str',
-    'PLAN_CHECK_PROXY': 'str',
+    'PLAN_CHECK_PROXY': 'list_str_multiline',
+    'PLAN_CHECK_UPSTREAM_PROXY': 'str',
     'PLAN_CHECK_TIMEOUT': 'float',
     'PLAN_CHECK_MAX_ATTEMPTS': 'int',
     'PLAN_CHECK_RETRY_DELAY': 'float',
     'PLAN_CHECK_REGISTRATION_RECHECK_DELAY': 'float',
-    'PROXY_ADAPTIVE_ROUTING': 'bool',
-    'PROXY_COOLDOWN_403_SECONDS': 'int',
-    'PROXY_COOLDOWN_429_SECONDS': 'int',
-    'PROXY_MAX_ROUTE_ATTEMPTS': 'int',
     'PLAN_CHECK_WORKERS': 'int',
     'PLAN_CHECK_QUEUE_LIMIT': 'int',
     'PLAN_CHECK_MIN_INTERVAL': 'float',
     'PLAN_CHECK_JITTER': 'float',
 })
 PROXY_POOL = normalize_proxy_list(PROXY_POOL)
-PLAN_CHECK_PROXY = normalize_proxy_url(PLAN_CHECK_PROXY)
-
-# 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
+PLAN_CHECK_PROXY = normalize_proxy_list(PLAN_CHECK_PROXY)
 PROXY = pick_proxy()
