@@ -221,6 +221,10 @@ EDITABLE_FIELDS = [
         "label": "打开接口路径", "help": "默认 /browser/open；如 Roxy 版本不同可在此调整",
     },
     {
+        "key": "ROXY_CREATE_INTERVAL", "file": "roxybrowser.py", "type": "float", "group": "RoxyBrowser",
+        "label": "创建环境间隔", "help": "多线程时相邻 /browser/create 请求的最小间隔，默认 1.5 秒；设为 0 可关闭",
+    },
+    {
         "key": "ROXY_OPEN_HEADLESS", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
         "label": "无头启动窗口", "help": "打开 Roxy 环境时向 /browser/open 传 headless；False=显示窗口，True=无头启动",
     },
