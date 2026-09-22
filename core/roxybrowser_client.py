@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # 为所有客户端实例共享创建时隙，确保进程内请求起始时间至少错开配置的间隔。
 _CREATE_SLOT_LOCK = threading.Lock()
 _NEXT_CREATE_SLOT = 0.0
+# 创建 Profile 到拿到调试地址期间串行化，避免 Roxy 内核/端口竞争。
+_ROXY_WINDOW_CREATE_LOCK = threading.Lock()
 
 
 def _wait_for_create_slot() -> None:
@@ -236,10 +238,13 @@ class RoxyBrowserClient:
     def request(self, method: str, path: str, *, params: dict | None = None, json_body: dict | None = None) -> dict:
         url = _join_url(self.api_base, path)
         method_u = method.upper()
-        # create 超时后服务端可能已创建环境，直接重试可能产生孤儿环境；默认不重试 create。
         is_create = str(path or "").rstrip("/").endswith("/create") or "browser/create" in str(path or "")
-        max_attempts = 1 if is_create else max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
-        base_delay = max(0.5, float(getattr(_cfg, "ROXY_API_RETRY_DELAY", 2) or 2))
+        if is_create:
+            max_attempts = max(1, int(getattr(_cfg, "ROXY_CREATE_RETRIES", 3) or 3))
+            base_delay = max(0.5, float(getattr(_cfg, "ROXY_CREATE_RETRY_DELAY", 3) or 3))
+        else:
+            max_attempts = max(1, int(getattr(_cfg, "ROXY_API_RETRIES", 3) or 3))
+            base_delay = max(0.5, float(getattr(_cfg, "ROXY_API_RETRY_DELAY", 2) or 2))
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -278,8 +283,10 @@ class RoxyBrowserClient:
                     raise
                 delay = base_delay * attempt
                 logger.warning(
-                    "[Roxy] API 请求失败，将在 %.1fs 后重试：%s %s attempt=%s/%s error=%s",
-                    delay, method_u, path, attempt, max_attempts, exc,
+                    "[Roxy] API 请求失败，将在 %.1fs 后使用相同%s重试：%s %s attempt=%s/%s error=%s",
+                    delay,
+                    " create payload/name " if is_create else "请求参数",
+                    method_u, path, attempt, max_attempts, exc,
                 )
                 time.sleep(delay)
         raise last_exc or RuntimeError(f"Roxy API 请求失败 {method_u} {path}")
@@ -519,6 +526,10 @@ class RoxyBrowserClient:
         return text
 
     def open_profile(self, profile_id: str | None = None) -> RoxyOpenResult:
+        with _ROXY_WINDOW_CREATE_LOCK:
+            return self._open_profile_locked(profile_id)
+
+    def _open_profile_locked(self, profile_id: str | None = None) -> RoxyOpenResult:
         one_profile = bool(getattr(_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
         configured_pid = self._normalize_profile_id(profile_id if profile_id is not None else getattr(_cfg, "ROXY_PROFILE_ID", ""))
         if one_profile and configured_pid:

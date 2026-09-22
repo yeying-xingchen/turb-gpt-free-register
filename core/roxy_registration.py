@@ -15,6 +15,7 @@ from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import SeleniumTrafficTracker
+from core.roxy_asset_cache import RoxyLocalAssetCache
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
@@ -2209,6 +2210,8 @@ def run_roxy_registration(
     openai_password: str | None = None
     traffic_tracker: SeleniumTrafficTracker | None = None
     data_saver: BrowserDataSaver | None = None
+    asset_cache: RoxyLocalAssetCache | None = None
+    asset_cache_snapshot: dict | None = None
     network_traffic: dict | None = None
 
     def _traffic_checkpoint() -> None:
@@ -2221,6 +2224,10 @@ def run_roxy_registration(
     try:
         driver = _build_driver(opened)
         try:
+            asset_cache = RoxyLocalAssetCache(opened.debugger_address, label="Roxy").start()
+        except Exception as exc:
+            logger.warning("[Roxy注册] 初始化本地静态资源缓存失败，继续联网加载：%s: %s", type(exc).__name__, str(exc)[:180])
+        try:
             traffic_tracker = SeleniumTrafficTracker(driver, label="Roxy")
         except Exception as exc:
             # 统计失败不应影响注册主流程。
@@ -2228,6 +2235,7 @@ def run_roxy_registration(
         data_saver = BrowserDataSaver(label="Roxy")
         if traffic_tracker is not None:
             traffic_tracker.attach_data_saver(data_saver)
+            traffic_tracker.attach_local_asset_cache(asset_cache)
         data_saver.install_selenium(driver)
         _center_browser_window(driver)
         driver.set_page_load_timeout(int(_cfg.ROXY_SELENIUM_TIMEOUT))
@@ -2392,8 +2400,14 @@ def run_roxy_registration(
         # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
         post_register_dwell(email, label="Roxy注册")
         _traffic_checkpoint()
+        if asset_cache is not None:
+            asset_cache_snapshot = asset_cache.stop()
         if traffic_tracker is not None:
             network_traffic = traffic_tracker.stop()
+        if asset_cache_snapshot is not None:
+            if not isinstance(network_traffic, dict):
+                network_traffic = {}
+            network_traffic["local_asset_cache"] = asset_cache_snapshot
         if data_saver is not None:
             data_saver.stop()
         account_id = save_account_data(
@@ -2425,6 +2439,11 @@ def run_roxy_registration(
             "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
         }
     except Exception as exc:
+        if asset_cache is not None and asset_cache_snapshot is None:
+            try:
+                asset_cache_snapshot = asset_cache.stop()
+            except Exception:
+                pass
         if traffic_tracker is not None:
             try:
                 network_traffic = traffic_tracker.stop()
@@ -2448,6 +2467,11 @@ def run_roxy_registration(
             "error": f"{type(exc).__name__}: {str(exc)[:300]}",
         }
     finally:
+        if asset_cache is not None:
+            try:
+                asset_cache.stop()
+            except Exception:
+                pass
         if traffic_tracker is not None:
             try:
                 traffic_tracker.stop()

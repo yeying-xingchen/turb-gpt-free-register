@@ -119,7 +119,7 @@ EMAIL_SOURCE = "outlook,generic_api,imap"
 BROWSER_DATA_SAVER_MODE=True
 BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES=["image", "media"]
 # URL glob 列表；WebUI 中则是一行一条
-BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS='["**://auth.openai.com/awe/api/v2/rum**", "**://chatgpt.com/ces/statsc/flush**", "**://connect.facebook.net/**", "**://analytics.tiktok.com/**", "**://snap.licdn.com/**", "**://bat.bing.com/**", "**://accounts.google.com/gsi/client**"]'
+BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS='["**://auth.openai.com/awe/api/v2/rum**", "**://chatgpt.com/awe/api/v2/rum**", "**://chatgpt.com/ces/statsc/flush**", "**://connect.facebook.net/**", "**://analytics.tiktok.com/**", "**://snap.licdn.com/**", "**://bat.bing.com/**", "**://accounts.google.com/gsi/client**"]'
 ```
 
 Roxy/Selenium 会在启动参数中关闭图片加载，并使用 Chrome CDP 拦截常见图片、媒体等 URL 后缀及配置的 URL glob（因此也能覆盖无扩展名资源）；Cloak 使用 Playwright 按资源类型和 URL glob 拦截。Browser Use/Skyvern 是云端浏览器，不安装本地省流量拦截器，始终保留完整页面资源。默认只拦截 `image`、`media`，以及配置中列出的 RUM/广告统计 URL，不会按类型拦截登录所需的核心脚本、接口和 WebSocket。Playwright 会放行带验证码/challenge 关键词的 URL；Roxy 的 Chromium 图片开关和 CDP URL 黑名单无法提供 URL 例外规则，若页面出现验证码或布局异常，关闭该模式后重试。

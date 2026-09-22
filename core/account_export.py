@@ -180,13 +180,16 @@ def _warm_auth_document_for_reauth(session: BrowserSession) -> None:
     logger.info("[2FA] Auth document 预热未通过，继续正式 authorize 重试链")
 
 
-def _post_register_dwell_seconds() -> float:
-    try:
-        from config import register as _register_cfg
+def _post_register_dwell_seconds(seconds_range: str | None = None) -> float:
+    if seconds_range is None:
+        try:
+            from config import register as _register_cfg
 
-        raw = str(getattr(_register_cfg, "POST_REGISTER_DWELL_SECONDS_RANGE", "18,45") or "0,0").strip()
-    except Exception:
-        raw = "0,0"
+            raw = str(getattr(_register_cfg, "POST_REGISTER_DWELL_SECONDS_RANGE", "5,15") or "0,0").strip()
+        except Exception:
+            raw = "0,0"
+    else:
+        raw = str(seconds_range or "0,0").strip()
     try:
         parts = [float(x.strip()) for x in raw.replace(";", ",").replace("|", ",").split(",") if x.strip()]
         if not parts:
@@ -204,9 +207,14 @@ def _post_register_dwell_seconds() -> float:
     return max(0.0, min(300.0, seconds))
 
 
-def post_register_dwell(email: str, *, label: str = "注册后") -> None:
+def post_register_dwell(
+    email: str,
+    *,
+    label: str = "注册后",
+    seconds_range: str | None = None,
+) -> None:
     """注册成功后随机停留一段时间；供不同浏览器驱动复用。"""
-    seconds = _post_register_dwell_seconds()
+    seconds = _post_register_dwell_seconds(seconds_range)
     if seconds <= 0:
         return
     logger.info("[%s] 注册成功后随机停留 %.1fs：%s", label, seconds, email)
@@ -319,6 +327,9 @@ def follow_oauth_callback(session: BrowserSession, continue_url: str, referer: s
     observe = getattr(session, "observe_chatgpt_document", None)
     if callable(observe):
         observe(resp)
+    log_cookies = getattr(session, "log_cookie_names", None)
+    if callable(log_cookies):
+        log_cookies("oauth_callback_complete")
     logger.info(f"[OAuth回调] 完成, 最终落点: {resp.url}")
     return resp.url
 

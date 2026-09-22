@@ -100,6 +100,7 @@ BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES: list[str] = ["image", "media"]
 # `**` 用于匹配 URL 中的任意路径；Roxy/Cloak 的 Playwright/Selenium 会读取这组规则。
 BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS: list[str] = [
     "**://auth.openai.com/awe/api/v2/rum**",
+    "**://chatgpt.com/awe/api/v2/rum**",
     "**://chatgpt.com/ces/statsc/flush**",
     "**://connect.facebook.net/**",
     "**://analytics.tiktok.com/**",
