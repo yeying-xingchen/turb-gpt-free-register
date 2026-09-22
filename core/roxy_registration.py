@@ -2392,6 +2392,20 @@ def run_roxy_registration(
         access_token = session_info["accessToken"]
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
+        # 已拿到 accessToken 后不再需要 ChatGPT 应用壳；Codex 复用当前窗口时保留完整页面。
+        try:
+            from config import codex as _codex_deep_cfg
+            if not bool(getattr(_codex_deep_cfg, "ENABLE_CODEX_AUTO", False)) and data_saver is not None:
+                data_saver.enable_post_auth_deep_mode(driver)
+                # 不需要 Codex 时切到本地空白页，停止 ChatGPT SPA 的轮询、遥测
+                # 和懒加载资源；accessToken 已经在上一步落盘所需数据中取得。
+                try:
+                    driver.get("about:blank")
+                    logger.info("[Roxy注册] 已切换 about:blank，停止注册后的页面后台流量")
+                except Exception as blank_exc:
+                    logger.debug("[Roxy注册] 切换空白页失败，保留深度拦截：%s", blank_exc)
+        except Exception as exc:
+            logger.debug("[Roxy注册] 深度省流量阶段跳过：%s", exc)
 
         if _twofa_cfg.ENABLE_2FA:
             logger.warning("[Roxy注册] 当前 Roxy 自动化路径暂不执行 2FA 设置，已跳过")
