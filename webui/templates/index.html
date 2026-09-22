@@ -2284,6 +2284,7 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedFullExportV2" disabled title="把选中账号按“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式导出为 TXT 文件">完整导出</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedFullExportV2" disabled title="把选中账号的“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式复制到剪贴板">复制完整导出</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLoginCredentialsV2" disabled title="把选中账号按“邮箱---密码---2FA密钥”格式复制到剪贴板">复制登录凭据</button>
           <button type="button" class="jobs-tb-btn" id="btnArchiveSelectedAccountsV2" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档选中</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedAccountsV2" disabled title="删除选中的本地账号/token记录">删除</button>
         </div>
@@ -3676,7 +3677,7 @@ function updateAccountSelectionUi(pageRows = null) {
     'btnCheckSelectedPlansV2', 'btnExtractSelectedLinksV2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
     'btnSetupSelectedTotpV2', 'btnChangeSelectedEmailsV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
-    'btnDownloadSelectedTxtV2', 'btnDownloadSelectedFullExportV2', 'btnCopySelectedFullExportV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
+    'btnDownloadSelectedTxtV2', 'btnDownloadSelectedFullExportV2', 'btnCopySelectedFullExportV2', 'btnCopySelectedLoginCredentialsV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
   ];
   v2Ids.forEach(id => {
     const el = document.getElementById(id);
@@ -4512,6 +4513,18 @@ async function copySelectedAccountFullExport() {
   showToast(`已复制 ${lines.length} 个账号完整导出`);
 }
 
+async function copySelectedAccountLoginCredentials() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  let lines = [];
+  try {
+    lines = await fetchAccountSecrets(ids, 'login_credentials');
+  } catch(err) { showToast('复制登录凭据失败: ' + err.message); return; }
+  if (!lines.length) { showToast('选中账号没有可复制的登录凭据'); return; }
+  copyText(lines.join('\n'));
+  showToast(`已复制 ${lines.length} 个账号登录凭据`);
+}
+
 async function downloadSelectedCpa() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
@@ -5126,6 +5139,7 @@ $('#emailChangeModalV2').addEventListener('click', e => { if (e.target.id === 'e
   bind('btnDownloadSelectedTxtV2', downloadSelectedAccountTxt);
   bind('btnDownloadSelectedFullExportV2', downloadSelectedAccountFullExport);
   bind('btnCopySelectedFullExportV2', copySelectedAccountFullExport);
+  bind('btnCopySelectedLoginCredentialsV2', copySelectedAccountLoginCredentials);
   bind('btnArchiveSelectedAccountsV2', archiveSelectedAccounts);
   bind('btnDeleteSelectedAccountsV2', deleteSelectedAccounts);
 })();

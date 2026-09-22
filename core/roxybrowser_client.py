@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import unquote, urljoin, urlparse
@@ -14,6 +15,28 @@ import requests
 from config import roxybrowser as _cfg
 
 logger = logging.getLogger(__name__)
+
+# Roxy 的 /browser/create 在多 worker 同时到达时可能返回“正在创建中”。
+# 为所有客户端实例共享创建时隙，确保进程内请求起始时间至少错开配置的间隔。
+_CREATE_SLOT_LOCK = threading.Lock()
+_NEXT_CREATE_SLOT = 0.0
+
+
+def _wait_for_create_slot() -> None:
+    global _NEXT_CREATE_SLOT
+
+    interval = max(0.0, float(getattr(_cfg, "ROXY_CREATE_INTERVAL", 1.5) or 0.0))
+    if interval <= 0:
+        return
+
+    with _CREATE_SLOT_LOCK:
+        now = time.monotonic()
+        wait_for = max(0.0, _NEXT_CREATE_SLOT - now)
+        _NEXT_CREATE_SLOT = max(now, _NEXT_CREATE_SLOT) + interval
+
+    if wait_for > 0:
+        logger.info("[Roxy] /browser/create 请求错峰，等待 %.2fs", wait_for)
+        time.sleep(wait_for)
 
 
 @dataclass
@@ -476,6 +499,7 @@ class RoxyBrowserClient:
             body.get("osVersion") or "-",
             random_os_enabled,
         )
+        _wait_for_create_slot()
         result = self.request(_cfg.ROXY_CREATE_METHOD, _cfg.ROXY_CREATE_PATH, json_body=body)
         profile_id = _first(result, [
             ("id",), ("dirId",), ("dir_id",), ("profile_id",), ("profileId",), ("browser_id",),
