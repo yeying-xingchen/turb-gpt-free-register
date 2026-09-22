@@ -66,6 +66,9 @@ class ProxyChainRelay:
         self._connections: set[socket.socket] = set()
         self._connections_lock = threading.Lock()
         self._last_error = ""
+        self._traffic_lock = threading.Lock()
+        self._upload_bytes = 0
+        self._download_bytes = 0
 
     @property
     def last_error(self) -> str:
@@ -76,6 +79,18 @@ class ProxyChainRelay:
         if self._listener is None:
             raise RuntimeError("代理链尚未启动")
         return f"http://127.0.0.1:{self._listener.getsockname()[1]}"
+
+    def traffic_snapshot(self) -> dict[str, int | bool]:
+        """返回整个代理链隧道的实际传输字节数。"""
+        with self._traffic_lock:
+            upload = int(self._upload_bytes)
+            download = int(self._download_bytes)
+        return {
+            "available": True,
+            "upload_bytes": upload,
+            "download_bytes": download,
+            "total_bytes": upload + download,
+        }
 
     def start(self) -> "ProxyChainRelay":
         if self._listener is not None:
@@ -332,6 +347,11 @@ class ProxyChainRelay:
                     return
                 destination = remote if source is client else client
                 destination.sendall(data)
+                with self._traffic_lock:
+                    if source is client:
+                        self._upload_bytes += len(data)
+                    else:
+                        self._download_bytes += len(data)
 
 
 def open_proxy_pool_proxy(

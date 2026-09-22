@@ -664,6 +664,16 @@ class RoxyBrowserClient:
                 )
             relay.close()
 
+    def proxy_transport_snapshot(self) -> dict | None:
+        """返回本轮 Roxy 经本地代理链传输的全浏览器流量。"""
+        relay = self._proxy_pool_relay
+        if relay is None:
+            return None
+        try:
+            return relay.traffic_snapshot()
+        except Exception:
+            return None
+
     @staticmethod
     def _extract_debugger_address(payload: dict) -> str | None:
         value = _first(payload, [
