@@ -261,6 +261,14 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
     is_free = str(plan_type).lower() == "free" or str(subscription_plan).lower() == "chatgptfreeplan"
     plus_trial_eligible = bool(is_free and plus_campaign)
 
+    # 保留 Free 账号返回的全部促销活动，供前端查看详情；Plus 资格判定仍然
+    # 只使用上面的 eligible_promo_campaigns.plus，保持原有语义不变。
+    promo_campaigns = {}
+    if is_free and isinstance(eligible_promo_campaigns, dict):
+        for campaign_key, campaign in eligible_promo_campaigns.items():
+            if isinstance(campaign, dict):
+                promo_campaigns[str(campaign_key)] = campaign
+
     offers = ((item.get("eligible_offers") or {}).get("offers") or [])
     eligible_offer_ids = [o.get("id") for o in offers if isinstance(o, dict) and o.get("id")]
 
@@ -295,6 +303,7 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
         "plus_trial_duration_num_periods": duration.get("num_periods"),
         "plus_trial_duration_period": duration.get("period"),
         "plus_trial_promotion_type_label": plus_meta.get("promotion_type_label"),
+        "eligible_promo_campaigns": promo_campaigns,
         "eligible_offer_ids": eligible_offer_ids,
         "features_count": len(item.get("features") or []),
         "can_access_with_session": bool(item.get("can_access_with_session")),

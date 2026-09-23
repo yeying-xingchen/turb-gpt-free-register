@@ -1344,6 +1344,7 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
             row["plus_trial_duration_num_periods"] = result.get("plus_trial_duration_num_periods")
             row["plus_trial_duration_period"] = result.get("plus_trial_duration_period")
             row["eligible_offer_ids"] = result.get("eligible_offer_ids") or []
+            row["eligible_promo_campaigns"] = result.get("eligible_promo_campaigns") or {}
             row["plan_last_success_at"] = result.get("checked_at") or _now()
             row["plan_last_success_result_json"] = json.dumps(result, ensure_ascii=False)
         row["plan_check_proxy_mode"] = result.get("proxy_mode")
@@ -1583,6 +1584,7 @@ def list_account_plan_check_statuses(
     fields = (
         "id", "email", "archived",
         "plan_type", "current_plan_type", "plus_trial_eligible",
+        "eligible_promo_campaigns", "plus_trial_discount_percentage",
         "plan_check_status", "plan_check_ok", "plan_check_error",
         "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
         "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
@@ -1657,6 +1659,7 @@ def list_account_plan_check_statuses(
                     "current_plan_type": row.get("current_plan_type"),
                     "plan_type": row.get("plan_type"),
                     "plus_trial_eligible": row.get("plus_trial_eligible"),
+                    "eligible_promo_campaigns": row.get("eligible_promo_campaigns"),
                     "extract_link_status": row.get("extract_link_status"),
                     "codex_status": row.get("codex_status"),
                     "codex_agent_status": row.get("codex_agent_status"),
