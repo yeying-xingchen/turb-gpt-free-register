@@ -273,6 +273,10 @@ EDITABLE_FIELDS = [
         "label": "打开接口路径", "help": "默认 /browser/open；如 Roxy 版本不同可在此调整",
     },
     {
+        "key": "ROXY_CREATE_INTERVAL", "file": "roxybrowser.py", "type": "float", "group": "RoxyBrowser",
+        "label": "创建环境间隔", "help": "多线程时相邻 /browser/create 请求的最小间隔，默认 1.5 秒；设为 0 可关闭",
+    },
+    {
         "key": "ROXY_OPEN_HEADLESS", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
         "label": "无头启动窗口", "help": "打开 Roxy 环境时向 /browser/open 传 headless；False=显示窗口，True=无头启动",
     },
@@ -376,6 +380,11 @@ EDITABLE_FIELDS = [
     {
         "key": "OTP_POLL_INTERVAL", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
         "label": "OTP 轮询间隔(秒)", "help": "每隔多少秒查一次新邮件",
+    },
+    {
+        "key": "GENERIC_API_PROXY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "通用 API 取码代理", "help": "仅用于 generic_api 接口取码；默认直接走本地 HTTP 代理 http://127.0.0.1:7897，不读取代理池，也不套用代理池上游链式；留空则直连",
+        "storage": "env",
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -602,13 +611,23 @@ EDITABLE_FIELDS = [
         ],
     },
     {
+        "key": "PROXY_POOL_UPSTREAM_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "代理池上游代理", "help": "可选；代理池每个目标代理通过此本地上游连接。留空则不链式。地址明文显示，仅保存到 .env",
+        "storage": "env",
+    },
+    {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",
         "label": "套餐/Agent网络模式", "help": "用于查套餐和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
     },
     {
-        "key": "PLAN_CHECK_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/Agent专用代理", "help": "用于查套餐和生成 Agent Token；留空时 auto/proxy 从代理池选择。可能包含认证信息，仅保存到 .env",
+        "key": "PLAN_CHECK_PROXY", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "套餐/Agent专用代理(每行一个)", "help": "用于查套餐、查活和生成 Agent Token；支持动态代理 URL，每行一条。仅保存到 .env",
         "storage": "env", "secret": True,
+    },
+    {
+        "key": "PLAN_CHECK_UPSTREAM_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "套餐/Agent本地上游代理", "help": "可选；仅用于套餐/Agent专用代理，形成“本地代理 -> 动态代理 -> ChatGPT”的代理链。留空则不链式。地址明文显示。仅保存到 .env",
+        "storage": "env",
     },
     {
         "key": "PLAN_CHECK_TIMEOUT", "file": "proxy.py", "type": "float", "group": "代理池",
@@ -916,15 +935,19 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "接码通道", "help": "grizzly / l / h；l 使用 L_API.md，h 使用 H_API.md 定义的本地取号服务",
+        "label": "接码通道", "help": "grizzly / smsbower / l / h；smsbower 使用 SMSBower handler_api，l/h 使用本地取号服务",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "国家代码", "help": "传给接码平台的 country；GrizzlySMS 常用：美国=187；H 通道作为 H_API.md 的 country",
+        "label": "国家代码", "help": "传给接码平台的 country；SMSBower 按其国家表填写，GrizzlySMS 常用美国=187；H 通道作为 H_API.md 的 country",
     },
     {
         "key": "SMS_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "服务/项目代码", "help": "GrizzlySMS/L 作为 service；H 通道作为 H_API.md 的 projectId",
+        "label": "服务/项目代码", "help": "GrizzlySMS/L/SMSBower 作为 service；SMSBower 的 OpenAI (ChatGPT) 推荐填 dr，填 openai/chatgpt 时程序会自动转换；H 通道作为 projectId",
+    },
+    {
+        "key": "SMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "最高号码价格", "help": "透传给接码平台的 maxPrice；留空不限。SMSBower 可用它筛选价格/号码等级",
     },
     {
         "key": "SMS_MAX_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",
@@ -938,6 +961,35 @@ EDITABLE_FIELDS = [
         "key": "SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "GrizzlySMS API密钥", "help": "GrizzlySMS 平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
         "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMSBOWER_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API 地址", "help": "默认 https://smsbower.page/stubs/handler_api.php",
+    },
+    {
+        "key": "SMSBOWER_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API密钥", "help": "SMSBower 控制台 API Key，保存在 .env，不写回 config/*.py",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMSBOWER_USE_V2", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "SMSBower 使用V2取号", "help": "官方客户端文档使用 getNumber；通常保持关闭。仅在确认账号支持 getNumberV2 时开启",
+    },
+    {
+        "key": "SMSBOWER_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 供应商筛选", "help": "可选，供应商 ID 用逗号分隔；留空由平台自动选择",
+    },
+    {
+        "key": "SMSBOWER_EXCEPT_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 排除供应商", "help": "可选，排除的供应商 ID 用逗号分隔",
+    },
+    {
+        "key": "SMSBOWER_PHONE_EXCEPTION", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 排除号码前缀", "help": "可选，号码前缀用逗号分隔；用于避开已知不可用号段",
+    },
+    {
+        "key": "SMSBOWER_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 最低价格", "help": "可选，透传 minPrice；与最高价格一起限定号码价格区间",
     },
     {
         "key": "H_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -1256,20 +1308,21 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def _format_env_value(value, vtype: str) -> str:
+def _format_env_value(value, vtype: str, fallback=None) -> str:
     """把前端值格式化成适合写入 .env 的字符串。
 
     数字输入框在用户清空、编辑中间态（例如 ``1.``）或浏览器把 ``NaN``
-    序列化为 JSON ``null`` 时，可能把 ``None`` 传到这里。空数字应表示
-    “清除 .env 覆盖并恢复源码默认值”，不能直接调用 ``int(None)``。
+    序列化为 JSON ``null`` 时，空数字应清除 .env 覆盖并恢复源码默认值。
+    ``fallback`` 仅供旧调用方兼容，默认不替换显式空值。
     """
+    if value is None and fallback is not None:
+        value = fallback
     if vtype == "bool":
         if isinstance(value, str):
             value = value.strip().lower() in ("true", "1", "yes", "on", "y")
         return "True" if value else "False"
     if vtype in ("int", "float"):
         # `.env` 的空值由 env_loader 解释为“使用 config/*.py 默认值”。
-        # 这同时兼容前端 number input 的空值和 JSON.stringify(NaN) -> null。
         if value is None or (isinstance(value, str) and not value.strip()):
             return ""
         number_label = "整数" if vtype == "int" else "数字"
@@ -1277,7 +1330,6 @@ def _format_env_value(value, vtype: str) -> str:
             raise ValueError(f"配置值必须是有效的{number_label}，收到: {value!r}")
         try:
             if vtype == "int":
-                # 不允许 int(1.5) 静默截断，也不接受“1.0”这种非整数文本。
                 if isinstance(value, float):
                     if not math.isfinite(value) or not value.is_integer():
                         raise ValueError
@@ -1292,7 +1344,6 @@ def _format_env_value(value, vtype: str) -> str:
                 if not math.isfinite(number):
                     raise ValueError
         except (TypeError, ValueError, OverflowError) as exc:
-            number_label = "整数" if vtype == "int" else "数字"
             raise ValueError(f"配置值必须是有效的{number_label}，收到: {value!r}") from exc
         return str(number) if vtype == "int" else repr(number)
     if vtype == "list_str_multiline":
@@ -1315,6 +1366,8 @@ def update_config(updates: dict) -> dict:
         if field is None:
             ignored.append(key)
             continue
+        # Explicit null/empty numeric values clear the .env override; they
+        # must not silently fall back to the currently loaded default.
         env_updates[key] = _format_env_value(value, field["type"])
         updated.append(key)
 

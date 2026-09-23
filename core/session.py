@@ -5,7 +5,6 @@ curl_cffi Session 封装
 """
 import hashlib
 import logging
-import hashlib
 import random
 import re
 import threading
@@ -37,6 +36,19 @@ _COUNTRY_NAME_TO_CODE = {
     "PHILIPPINES": "PH", "INDIA": "IN", "AUSTRALIA": "AU", "CANADA": "CA",
     "GERMANY": "DE", "FRANCE": "FR", "NETHERLANDS": "NL", "BRAZIL": "BR",
 }
+
+
+def close_browser_session(session) -> None:
+    """Close a BrowserSession while retaining compatibility with test doubles."""
+    if session is None:
+        return
+    close = getattr(type(session), "close", None)
+    if callable(close):
+        close(session)
+        return
+    raw_session = getattr(session, "session", None)
+    if raw_session is not None:
+        raw_session.close()
 
 
 def _seed_uuid(seed: str, salt: str) -> str:
@@ -90,13 +102,22 @@ class BrowserSession:
             detect_exit_geo: 是否探测出口 IP 并自动选择语言/时区画像。
                              套餐查询等短请求可关闭，避免额外网络等待。
         """
-        # proxy=None  → 从池里随机抽（默认行为）
+        # proxy=None  → 从池里随机抽（默认行为），并按代理池上游配置决定是否链式
         # proxy=""    → 禁用代理（直连）
-        # proxy="..." → 使用指定代理
+        # proxy="..." → 使用指定代理，不套用代理池上游
+        self._proxy_pool_relay = None
         if proxy is None:
             self.proxy = pick_proxy()
+            self.proxy_target = self.proxy
+            if self.proxy:
+                from core.proxy_chain import open_proxy_pool_proxy
+                transport_proxy, self._proxy_pool_relay = open_proxy_pool_proxy(self.proxy)
+            else:
+                transport_proxy = ""
         else:
             self.proxy = normalize_proxy_url(proxy)
+            self.proxy_target = self.proxy
+            transport_proxy = self.proxy
 
         self.fingerprint_seed = str(fingerprint_seed or "").strip()
 
@@ -166,10 +187,10 @@ class BrowserSession:
         self.session = Session(impersonate=IMPERSONATE)
 
         # 设置代理
-        if self.proxy:
+        if transport_proxy:
             self.session.proxies = {
-                "http": self.proxy,
-                "https": self.proxy,
+                "http": transport_proxy,
+                "https": transport_proxy,
             }
 
         # 设置超时
@@ -219,6 +240,21 @@ class BrowserSession:
         except Exception:
             pass
         return out
+
+    def close(self) -> None:
+        """Close the HTTP session and any proxy-pool relay owned by this session."""
+        try:
+            self.session.close()
+        finally:
+            relay, self._proxy_pool_relay = self._proxy_pool_relay, None
+            if relay is not None:
+                relay.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     @staticmethod
     def _short_value(value: object, limit: int = 80) -> str:

@@ -17,7 +17,7 @@ from core.email_provider import (
     acquire_email_from_source, email_material_line,
     release_email_if_unconsumed, wait_for_otp,
 )
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 
 logger = logging.getLogger(__name__)
 _EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="email-change")
@@ -269,7 +269,7 @@ def _refresh_recent_login(
             )
             if login_session is not None:
                 try:
-                    login_session.session.close()
+                    close_browser_session(login_session)
                 except Exception:
                     pass
 

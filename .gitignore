@@ -46,6 +46,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+cache/roxy-assets/
 
 # 历史调试输出（_xxx.out / _xxx_dump.html）
 tools/_*.out
@@ -84,6 +85,10 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local verification/backup artifacts (may contain account data, tokens, or .git snapshots)
+artifacts/
+压缩文件*.zip
 webui.log
 webui.pid
 logs/

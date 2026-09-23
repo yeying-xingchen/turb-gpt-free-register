@@ -12,7 +12,7 @@ from pathlib import Path
 
 from core import db
 from core.account_liveness import check_account_liveness, log_path
-from core.chatgpt_plan import resolve_plan_check_route
+from core.chatgpt_plan import _mask_proxy, open_plan_check_proxy, resolve_plan_check_route
 from core.openai_auth import detect_account_unusable_text
 
 
@@ -85,6 +85,7 @@ def _run_playwright_live_check(email: str, proxy: str | None, email_source: str 
     from core.playwright_auth import check_playwright_liveness
     return check_playwright_liveness(email, proxy=proxy, email_source=email_source)
 
+
 logger = logging.getLogger(__name__)
 
 _WORKERS = 3
@@ -135,6 +136,7 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
 
 
 def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: str) -> dict:
+    relay = None
     try:
         with _LOCK:
             _RUNNING.add(int(account_id))
@@ -143,6 +145,11 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             return {"ok": False, "status": "failed", "error": "账号已删除或查活状态已被重置"}
         route = resolve_plan_check_route(explicit_proxy=proxy)
         selected_proxy = route.get("proxy")
+        from config import proxy as proxy_cfg
+        timeout = float(getattr(proxy_cfg, "PLAN_CHECK_TIMEOUT", 15.0) or 15.0)
+        effective_proxy, relay = open_plan_check_proxy(
+            route, selected_proxy, timeout=timeout,
+        )
         # 查活必须沿用账号注册时记录的邮箱来源。不能只调用
         # resolve_email_source(email)：Remail 等临时邮箱的上下文只在领取进程
         # 内存中存在，服务重启后按当前 EMAIL_SOURCE 推断会把来源判错。
@@ -164,27 +171,25 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         _append_log(email, f"[查活] driver={driver}")
         if driver == "playwright":
             _append_log(email, "[查活] 直接使用本地 Playwright 浏览器登录（独立 context）")
-            result = _run_playwright_live_check(email, selected_proxy, email_source)
+            result = _run_playwright_live_check(email, effective_proxy, email_source)
         else:
             # 每个网络路由尝试拥有自己的任务级身份状态；同一路由的完整认证链及
             # 内部重试复用同一组 device/session 标识，不同账号绝不共享。
             fingerprint_state: dict = {}
             result = check_account_liveness(
                 email,
-                proxy=selected_proxy,
+                proxy=effective_proxy,
                 clear_log=False,
                 email_source=email_source,
                 fingerprint_state=fingerprint_state,
             )
-            # 认证链早期 403 通常是该出口被 CF 拦截，不代表账号死亡。
-            # 先换成真正独立的直连协议会话；若直连仍是边缘/传输失败，auto
-            # 再启动一次全新 Chromium context。这样不会在同一个 poisoned Cookie
-            # Jar / OAuth state 上循环。
+            # 认证链早期边缘/传输错误通常不是账号死亡。auto 模式下先用独立
+            # 直连协议会话，再在仍为网络错误时切换全新 Chromium context。
             if (
                 driver == "auto"
                 and _is_network_failure(result)
                 and selected_proxy
-                and str(route.get("network_route") or "") == "proxy"
+                and str(route.get("network_route") or "") in {"proxy", "proxy_chain"}
             ):
                 _append_log(
                     email,
@@ -203,11 +208,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                     email,
                     "[查活] 协议路线仍失败，切换独立 Playwright context（不复用 Cookie、画像、session ID）",
                 )
-                # 代理路线已经收到 edge/network 失败后，直连协议也失败时不要再次
-                # 复用同一坏出口；浏览器 fallback 使用明确直连，或由调用方另行
-                # 传入一个新代理，而不是旧的 selected_proxy。
-                browser_proxy = ""
-                browser_result = _run_playwright_live_check(email, browser_proxy, email_source)
+                browser_result = _run_playwright_live_check(email, "", email_source)
                 if browser_result.get("ok") or browser_result.get("status") == "deactivated":
                     result = browser_result
                 else:
@@ -215,6 +216,15 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                     result = dict(browser_result)
                     if protocol_error:
                         result["protocol_error"] = _safe_live_error(protocol_error)
+
+        # 路由元数据要在写库前补齐，失败/成功结果都可供审计和前端轮询使用。
+        result.update({
+            "network_route": route.get("network_route"),
+            "proxy_used": _mask_proxy(selected_proxy) or None,
+            "upstream_proxy_used": route.get("upstream_proxy_used"),
+            "proxy_mode": route.get("proxy_mode"),
+            "proxy_fallback_reason": route.get("proxy_fallback_reason"),
+        })
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
             _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")
@@ -241,6 +251,8 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             pass
         return result
     finally:
+        if relay is not None:
+            relay.close()
         with _LOCK:
             _RUNNING.discard(int(account_id))
         _QUEUE_SLOTS.release()

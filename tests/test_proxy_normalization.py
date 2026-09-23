@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from config.proxy import normalize_proxy_url, redact_proxy_url
+from config.proxy import normalize_proxy_list, normalize_proxy_url, redact_proxy_url
 from core.session import BrowserSession
 
 
@@ -49,6 +49,24 @@ class ProxyNormalizationTests(unittest.TestCase):
             "http://user:pass@[fe80::1%25eth0]:8080",
         )
 
+    def test_host_port_gets_default_scheme(self):
+        self.assertEqual(
+            normalize_proxy_url("127.0.0.1:7897"),
+            "http://127.0.0.1:7897",
+        )
+
+    def test_username_password_host_port_format_encodes_credentials(self):
+        self.assertEqual(
+            normalize_proxy_url("user:p@ ss:proxy.example.test:8080"),
+            "http://user:p%40%20ss@proxy.example.test:8080",
+        )
+
+    def test_existing_scheme_is_preserved(self):
+        self.assertEqual(
+            normalize_proxy_url("socks5h://127.0.0.1:7897"),
+            "socks5h://127.0.0.1:7897",
+        )
+
     def test_direct_and_invalid_values(self):
         self.assertEqual(normalize_proxy_url(None), "")
         self.assertEqual(normalize_proxy_url(""), "")
@@ -70,6 +88,12 @@ class ProxyNormalizationTests(unittest.TestCase):
         self.assertEqual(redacted, "http://***:***@host.example:8080")
         self.assertNotIn("my-user", redacted)
         self.assertNotIn("my-secret", redacted)
+
+    def test_normalize_proxy_list_filters_blank_entries(self):
+        self.assertEqual(
+            normalize_proxy_list(["", "  ", "127.0.0.1:7897"]),
+            ["http://127.0.0.1:7897"],
+        )
 
     def test_browser_session_passes_normalized_proxy_to_curl(self):
         fake_http_session = MagicMock()
@@ -93,6 +117,7 @@ class ProxyNormalizationTests(unittest.TestCase):
             session.fingerprint_summary()["proxy"],
             "http://***:***@host.example:8080",
         )
+        session.close()
 
 
 if __name__ == "__main__":

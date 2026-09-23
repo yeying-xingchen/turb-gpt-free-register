@@ -124,7 +124,7 @@ cmd_start() {
   local old_pid py pid
   old_pid="$(read_pid)"
   if is_running "$old_pid"; then
-    echo "WebUI 已在运行：PID=$old_pid，地址：http://${HOST}:${PORT}"
+    echo "WebUI 已在运行：PID=${old_pid}，地址：http://${HOST}:${PORT}"
     return 0
   fi
   rm -f "$PID_FILE"

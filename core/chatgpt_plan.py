@@ -14,7 +14,7 @@ from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
 from config.proxy import normalize_proxy_url, redact_proxy_url
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,15 @@ def normalize_token(token: str) -> str:
 def _mask_proxy(proxy: str) -> str:
     """返回可用于日志/API 结果的代理摘要，不泄露用户名和密码。"""
     return redact_proxy_url(proxy) or "***"
+
+
+def _proxy_lines(value: Any) -> list[str]:
+    """兼容 .env 多行代理和旧的单行代理值。"""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [line.strip() for line in str(value).splitlines() if line.strip()]
 
 
 def _local_proxy_status(proxy: str) -> tuple[bool, bool, str | None]:
@@ -67,6 +76,18 @@ def _local_proxy_status(proxy: str) -> tuple[bool, bool, str | None]:
         return False, False, f"代理地址解析失败（{type(exc).__name__}）"
 
 
+def open_plan_check_proxy(route: dict, selected_proxy: str, *, timeout: float):
+    """返回实际请求代理；配置了上游时启动本地 HTTP CONNECT 中继。"""
+    selected_proxy = str(selected_proxy or "").strip()
+    upstream = str(route.get("upstream_proxy") or "").strip()
+    if selected_proxy and upstream:
+        from core.proxy_chain import ProxyChainRelay
+
+        relay = ProxyChainRelay(selected_proxy, upstream, timeout=timeout).start()
+        return relay.proxy_url, relay
+    return selected_proxy, None
+
+
 def resolve_plan_check_route(explicit_proxy: Optional[str] = None) -> dict:
     """解析套餐查询的实际网络路径。
 
@@ -80,6 +101,8 @@ def resolve_plan_check_route(explicit_proxy: Optional[str] = None) -> dict:
             "proxy_mode": "request",
             "network_route": "proxy" if selected else "direct",
             "proxy_used": _mask_proxy(selected) or None,
+            "upstream_proxy": "",
+            "upstream_proxy_used": None,
             "proxy_fallback_reason": None,
         }
 
@@ -94,14 +117,13 @@ def resolve_plan_check_route(explicit_proxy: Optional[str] = None) -> dict:
             "proxy_mode": mode,
             "network_route": "direct",
             "proxy_used": None,
+            "upstream_proxy": "",
+            "upstream_proxy_used": None,
             "proxy_fallback_reason": None,
         }
 
-    raw_selected = str(getattr(proxy_cfg, "PLAN_CHECK_PROXY", "") or "").strip()
-    if raw_selected:
-        selected = normalize_proxy_url(raw_selected)
-    else:
-        selected = str(proxy_cfg.pick_proxy() or "").strip()
+    candidates = _proxy_lines(getattr(proxy_cfg, "PLAN_CHECK_PROXY", ""))
+    selected = normalize_proxy_url(candidates[0]) if candidates else normalize_proxy_url(proxy_cfg.pick_proxy() or "")
     if not selected:
         if mode == "proxy":
             raise ValueError("套餐查询网络模式为 proxy，但未配置 PLAN_CHECK_PROXY 或 PROXY_POOL")
@@ -110,6 +132,8 @@ def resolve_plan_check_route(explicit_proxy: Optional[str] = None) -> dict:
             "proxy_mode": mode,
             "network_route": "direct",
             "proxy_used": None,
+            "upstream_proxy": "",
+            "upstream_proxy_used": None,
             "proxy_fallback_reason": "未配置套餐查询代理或代理池",
         }
 
@@ -120,12 +144,17 @@ def resolve_plan_check_route(explicit_proxy: Optional[str] = None) -> dict:
             "proxy_mode": mode,
             "network_route": "direct_fallback",
             "proxy_used": _mask_proxy(selected),
+            "upstream_proxy": "",
+            "upstream_proxy_used": None,
             "proxy_fallback_reason": reason,
         }
+    upstream = str(getattr(proxy_cfg, "PLAN_CHECK_UPSTREAM_PROXY", "") or "").strip()
     return {
         "proxy": selected,
+        "upstream_proxy": upstream,
+        "upstream_proxy_used": _mask_proxy(upstream) or None,
         "proxy_mode": mode,
-        "network_route": "proxy",
+        "network_route": "proxy_chain" if upstream else "proxy",
         "proxy_used": _mask_proxy(selected),
         "proxy_fallback_reason": None,
     }
@@ -224,6 +253,14 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
     is_free = str(plan_type).lower() == "free" or str(subscription_plan).lower() == "chatgptfreeplan"
     plus_trial_eligible = bool(is_free and plus_campaign)
 
+    # 保留 Free 账号返回的全部促销活动，供前端查看详情；Plus 资格判定仍然
+    # 只使用上面的 eligible_promo_campaigns.plus，保持原有语义不变。
+    promo_campaigns = {}
+    if is_free and isinstance(eligible_promo_campaigns, dict):
+        for campaign_key, campaign in eligible_promo_campaigns.items():
+            if isinstance(campaign, dict):
+                promo_campaigns[str(campaign_key)] = campaign
+
     offers = ((item.get("eligible_offers") or {}).get("offers") or [])
     eligible_offer_ids = [o.get("id") for o in offers if isinstance(o, dict) and o.get("id")]
 
@@ -258,6 +295,7 @@ def parse_accounts_check(data: dict, *, token: str = "") -> dict:
         "plus_trial_duration_num_periods": duration.get("num_periods"),
         "plus_trial_duration_period": duration.get("period"),
         "plus_trial_promotion_type_label": plus_meta.get("promotion_type_label"),
+        "eligible_promo_campaigns": promo_campaigns,
         "eligible_offer_ids": eligible_offer_ids,
         "features_count": len(item.get("features") or []),
         "can_access_with_session": bool(item.get("can_access_with_session")),
@@ -361,7 +399,7 @@ def check_account_plan(
             "error": f"套餐查询网络配置错误: {exc}",
             **{k: v for k, v in claims.items() if k != "payload"},
         }
-    route_meta = {k: v for k, v in route.items() if k != "proxy"}
+    route_meta = {k: v for k, v in route.items() if k not in {"proxy", "upstream_proxy"}}
     try:
         timeout_seconds, attempts, base_delay = _plan_check_settings(timeout, max_attempts, retry_delay)
     except Exception as exc:
@@ -383,10 +421,14 @@ def check_account_plan(
     # 或下一次查询不会复用旧浏览器身份。
     task_seed = f"plan-check:{identity}:{uuid.uuid4()}"
     env: BrowserSession | None = None
+    relay = None
     try:
         # 首次按代理真实出口自动生成语言/时区画像，随后整条查询链固定不漂移。
+        effective_proxy, relay = open_plan_check_proxy(
+            route, route["proxy"], timeout=timeout_seconds,
+        )
         env = BrowserSession(
-            proxy=route["proxy"], detect_exit_geo=True, fingerprint_seed=task_seed,
+            proxy=effective_proxy, detect_exit_geo=True, fingerprint_seed=task_seed,
         )
         effective_tz = str(timezone_offset_min or "").strip()
         if not effective_tz or effective_tz == "-":
@@ -503,9 +545,11 @@ def check_account_plan(
     finally:
         if env is not None:
             try:
-                env.session.close()
+                close_browser_session(env)
             except Exception:
                 pass
+        if relay is not None:
+            relay.close()
 
     return last_result or {
         "ok": False,

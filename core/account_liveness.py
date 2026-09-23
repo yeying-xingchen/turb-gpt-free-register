@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from config.proxy import redact_proxy_url
 from core import db
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 from core.codex_oauth import _account_registration_password, _account_totp_secret, _account_totp_code
 from core.humanize import delay as human_delay
 from core.chatgpt_auth import get_csrf_token, get_providers, probe_auth_session, signin_openai
@@ -272,7 +272,7 @@ def _network_preflight_with_retry(
             last_exc = exc
             if attempt >= max_attempts or not _is_retryable_network_error(exc):
                 try:
-                    session.session.close()
+                    close_browser_session(session)
                 except Exception:
                     pass
                 raise
@@ -970,7 +970,7 @@ def check_account_liveness(
                     _safe_error_text(reauth_exc, max_length=240),
                 )
                 try:
-                    session.session.close()
+                    close_browser_session(session)
                 except Exception:
                     pass
                 session, session_info = _login_via_full_web_flow(
@@ -1035,7 +1035,7 @@ def check_account_liveness(
             logger.info("[查活] 结束：%s", email)
             if session is not None:
                 try:
-                    session.session.close()
+                    close_browser_session(session)
                 except Exception:
                     pass
             if fh is not None:

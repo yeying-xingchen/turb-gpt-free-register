@@ -2835,7 +2835,10 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedTokensV2" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedEmailsV2" disabled title="仅复制选中账号的邮箱地址，不包含 AT/access_token">仅复制邮箱</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnExportAccountsV2" title="批量导出选中账号、当前页或当前筛选结果，并自定义字段">批量导出</button>
-           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载整行TXT</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载整行TXT</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedFullExportV2" disabled title="把选中账号按“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式导出为 TXT 文件">完整导出</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedFullExportV2" disabled title="把选中账号的“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式复制到剪贴板">复制完整导出</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLoginCredentialsV2" disabled title="把选中账号按“邮箱---密码---2FA密钥”格式复制到剪贴板">复制登录凭据</button>
           <button type="button" class="jobs-tb-btn" id="btnArchiveSelectedAccountsV2" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档选中</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedAccountsV2" disabled title="删除选中的本地账号/token记录">删除</button>
         </div>
@@ -4284,10 +4287,14 @@ function _planCell(r) {
     if (!checkedOk) {
       return `<span class="pill status-running" title="${title}">${esc(plan)}（待查资格）</span>`;
     }
-    const text = r.plus_trial_eligible ? 'free(可Plus试用)' : 'free';
+    const trialDiscount = r.plus_trial_discount_percentage != null && r.plus_trial_discount_percentage !== '' ? ` ${r.plus_trial_discount_percentage}%折扣` : '';
+    const text = r.plus_trial_eligible ? `free(可Plus试用${trialDiscount})` : 'free';
     const cls = r.plus_trial_eligible ? 'status-success' : 'status-used';
     const t = r.plus_trial_eligible ? `${title}；Plus 试用资格可用` : title;
-    return `<span class="pill ${cls}" title="${t}">${esc(text)}</span>`;
+    const campaigns = (r.eligible_promo_campaigns && typeof r.eligible_promo_campaigns === 'object') ? r.eligible_promo_campaigns : {};
+    const keys = Object.keys(campaigns);
+    const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
+    return `<span class="pill ${cls}" title="${t}">${esc(text)}</span>${detailBtn}`;
   }
 
   const cls = 'status-success';
@@ -4410,6 +4417,7 @@ function _accountsV2MoreMenu(r) {
   const parts = [
     `<button type="button" data-account-copy-secret="email" data-account-id="${esc(r.id)}" title="只复制邮箱地址，不包含 AT/access_token">仅复制邮箱</button>`,
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
+    `<button type="button" data-account-copy-secret="login_credentials" data-account-id="${esc(r.id)}" title="复制邮箱、注册密码和 2FA 密钥">复制登录凭据</button>`,
     `<button type="button" data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button>`,
     `<button type="button" data-account-change-email="${esc(r.id)}" title="从指定邮箱来源领取新邮箱并换绑">换绑邮箱</button>`,
     `<button type="button" data-account-change-email-log="${esc(r.id)}" title="查看最近一次邮箱换绑日志">换绑日志</button>`,
@@ -4502,7 +4510,7 @@ function updateAccountSelectionUi(pageRows = null) {
      'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
     'btnSetupSelectedTotpV2', 'btnChangeSelectedEmailsV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
-    'btnDownloadSelectedTxtV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
+    'btnDownloadSelectedTxtV2', 'btnDownloadSelectedFullExportV2', 'btnCopySelectedFullExportV2', 'btnCopySelectedLoginCredentialsV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
   ];
   v2Ids.forEach(id => {
     const el = document.getElementById(id);
@@ -4686,6 +4694,7 @@ async function onAccountsBodyClick(e) {
       showToast(
         field === 'access_token' ? 'Token 已复制' :
         field === 'codex_agent_token' ? 'Agent Token 已复制' :
+        field === 'login_credentials' ? '邮箱、注册密码和 2FA 密钥已复制' :
         field === 'totp_secret' ? '2FA 密钥已复制' :
         field === 'totp_code' ? `验证码已复制：${value}` :
          field === 'email' ? '邮箱已复制（不含 AT）' :
@@ -5575,6 +5584,52 @@ async function downloadSelectedAccountTxt() {
   showToast(`已下载 ${lines.length} 个账号 TXT`);
 }
 
+async function downloadSelectedAccountFullExport() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  let lines = [];
+  try {
+    lines = await fetchAccountSecrets(ids, 'full_export');
+  } catch(err) { showToast('生成完整导出失败: ' + err.message); return; }
+  if (!lines.length) { showToast('选中账号没有可导出内容'); return; }
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const filename = `accounts-full-export-${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
+  const blob = new Blob(['\ufeff' + lines.join('\n') + '\n'], {type: 'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+  showToast(`已导出 ${lines.length} 个账号`);
+}
+
+async function copySelectedAccountFullExport() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  let lines = [];
+  try {
+    lines = await fetchAccountSecrets(ids, 'full_export');
+  } catch(err) { showToast('复制完整导出失败: ' + err.message); return; }
+  if (!lines.length) { showToast('选中账号没有可复制内容'); return; }
+  copyText(lines.join('\n'));
+  showToast(`已复制 ${lines.length} 个账号完整导出`);
+}
+
+async function copySelectedAccountLoginCredentials() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  let lines = [];
+  try {
+    lines = await fetchAccountSecrets(ids, 'login_credentials');
+  } catch(err) { showToast('复制登录凭据失败: ' + err.message); return; }
+  if (!lines.length) { showToast('选中账号没有可复制的登录凭据'); return; }
+  copyText(lines.join('\n'));
+  showToast(`已复制 ${lines.length} 个账号登录凭据`);
+}
+
 async function downloadSelectedCpa() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
@@ -6286,6 +6341,9 @@ $('#emailChangeModalV2').addEventListener('click', e => { if (e.target.id === 'e
   bind('btnCopyAllTokensV2', copyCurrentPageTokens);
   bind('btnCopyAllLinesV2', copyCurrentPageLines);
   bind('btnDownloadSelectedTxtV2', downloadSelectedAccountTxt);
+  bind('btnDownloadSelectedFullExportV2', downloadSelectedAccountFullExport);
+  bind('btnCopySelectedFullExportV2', copySelectedAccountFullExport);
+  bind('btnCopySelectedLoginCredentialsV2', copySelectedAccountLoginCredentials);
   bind('btnArchiveSelectedAccountsV2', archiveSelectedAccounts);
   bind('btnDeleteSelectedAccountsV2', deleteSelectedAccounts);
 })();
@@ -7155,10 +7213,11 @@ function emailConfigSectionForKey(key) {
 }
 
 function smsConfigSectionForKey(key) {
-  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
-    return ['通用接码', '接码通道选择、国家/服务代码、等待和重试参数；H 通道可复用 SMS_SERVICE/SMS_COUNTRY 作为 projectId/country'];
+  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_PRICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
+    return ['通用接码', '接码通道选择、国家/服务代码、价格、等待和重试参数；SMSBower 的 OpenAI 服务代码为 dr，openai/chatgpt 会自动转换'];
   }
   if (key === 'SMS_API_KEY') return ['GrizzlySMS', 'GrizzlySMS 平台 API Key 配置'];
+  if (key.startsWith('SMSBOWER_')) return ['SMSBower', 'SMSBower handler_api、V2取号和供应商/价格筛选配置'];
   if (key.startsWith('H_')) return ['H 接码', 'H_API.md 本地 H 取号服务配置；项目ID/国家留空时复用通用字段'];
   if (key.startsWith('L_')) return ['L 接码', 'L_API.md 本地 L 取号服务配置'];
   return ['其他接码配置', ''];
@@ -7787,7 +7846,7 @@ function renderConfigSectionV2(name, fields) {
       name,
       fields,
       smsConfigSectionForKey,
-      ['通用接码', 'GrizzlySMS', 'H 接码', 'L 接码', '其他接码配置'],
+      ['通用接码', 'GrizzlySMS', 'SMSBower', 'H 接码', 'L 接码', '其他接码配置'],
       { get: () => CONFIG_SMS_ACTIVE_SECTION_V2, set: v => { CONFIG_SMS_ACTIVE_SECTION_V2 = v; } },
       'sms-section-v2'
     );
@@ -8067,5 +8126,6 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 </script>
+{% include 'promo_details.html' %}
 </body>
 </html>

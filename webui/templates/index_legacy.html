@@ -1685,10 +1685,14 @@ function _planCell(r) {
     if (!checkedOk) {
       return `<span class="pill status-running" title="${title}">${esc(plan)}（待查资格）</span>`;
     }
-    const text = r.plus_trial_eligible ? 'free(可Plus试用)' : 'free';
+    const trialDiscount = r.plus_trial_discount_percentage != null && r.plus_trial_discount_percentage !== '' ? ` ${r.plus_trial_discount_percentage}%折扣` : '';
+    const text = r.plus_trial_eligible ? `free(可Plus试用${trialDiscount})` : 'free';
     const cls = r.plus_trial_eligible ? 'status-success' : 'status-used';
     const t = r.plus_trial_eligible ? `${title}；Plus 试用资格可用` : title;
-    return `<span class="pill ${cls}" title="${t}">${esc(text)}</span>`;
+    const campaigns = (r.eligible_promo_campaigns && typeof r.eligible_promo_campaigns === 'object') ? r.eligible_promo_campaigns : {};
+    const keys = Object.keys(campaigns);
+    const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
+    return `<span class="pill ${cls}" title="${t}">${esc(text)}</span>${detailBtn}`;
   }
 
   const isPaid = lower.includes('plus') || lower.includes('pro') || lower.includes('team') || lower.includes('go');
@@ -3787,10 +3791,11 @@ function emailConfigSectionForKey(key) {
 
 
 function smsConfigSectionForKey(key) {
-  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
-    return ['通用接码', '接码通道选择、国家/服务代码、等待和重试参数；H 通道可复用 SMS_SERVICE/SMS_COUNTRY 作为 projectId/country'];
+  if (['SMS_PROVIDER','SMS_COUNTRY','SMS_SERVICE','SMS_MAX_PRICE','SMS_MAX_RETRIES','SMS_CODE_WAIT'].includes(key)) {
+    return ['通用接码', '接码通道选择、国家/服务代码、价格、等待和重试参数；SMSBower 的 OpenAI 服务代码为 dr，openai/chatgpt 会自动转换'];
   }
   if (key === 'SMS_API_KEY') return ['GrizzlySMS', 'GrizzlySMS 平台 API Key 配置'];
+  if (key.startsWith('SMSBOWER_')) return ['SMSBower', 'SMSBower handler_api、V2取号和供应商/价格筛选配置'];
   if (key.startsWith('H_')) return ['H 接码', 'H_API.md 本地 H 取号服务配置；项目ID/国家留空时复用通用字段'];
   if (key.startsWith('L_')) return ['L 接码', 'L_API.md 本地 L 取号服务配置'];
   return ['其他接码配置', ''];
@@ -3860,7 +3865,7 @@ function renderConfigFields(fields) {
       CONFIG_SMS_ACTIVE_SECTION,
       v => { CONFIG_SMS_ACTIVE_SECTION = v; },
       smsConfigSectionForKey,
-      ['通用接码', 'GrizzlySMS', 'H 接码', 'L 接码', '其他接码配置'],
+      ['通用接码', 'GrizzlySMS', 'SMSBower', 'H 接码', 'L 接码', '其他接码配置'],
       'sms-config-section'
     );
   }
@@ -4192,5 +4197,6 @@ jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidd
 setInterval(loadSummary, 30000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 10000);
 </script>
+{% include 'promo_details.html' %}
 </body>
 </html>
