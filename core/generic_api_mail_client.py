@@ -23,6 +23,7 @@ import requests
 
 from config import email as _email_cfg
 from config import proxy as _proxy_cfg
+from config.proxy import normalize_proxy_url, redact_proxy_url
 from core.otp_utils import extract_otp
 
 logger = logging.getLogger(__name__)
@@ -55,28 +56,15 @@ class GenericApiMailError(RuntimeError):
 
 def _redact_proxy_url(proxy_url: str) -> str:
     """日志中保留代理地址和协议，但隐藏认证信息。"""
-    raw = str(proxy_url or "").strip()
-    if not raw:
-        return "direct"
-    try:
-        parsed = urlparse(raw)
-        if not parsed.hostname:
-            return "configured-proxy"
-        host = parsed.hostname
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        port = f":{parsed.port}" if parsed.port else ""
-        auth = "***@" if parsed.username or parsed.password else ""
-        return f"{parsed.scheme}://{auth}{host}{port}"
-    except Exception:
-        return "configured-proxy"
+    return redact_proxy_url(proxy_url) or "direct"
 
 
 def _new_http_session(proxy_url: str = "") -> requests.Session:
     """创建不继承系统代理的取码会话；传入代理时 HTTP/HTTPS 均走该代理。"""
     session = requests.Session()
     session.trust_env = False
-    proxy_url = str(proxy_url or "").strip()
+    raw_proxy_url = str(proxy_url or "").strip()
+    proxy_url = normalize_proxy_url(raw_proxy_url) if raw_proxy_url else ""
     if proxy_url:
         session.proxies.update({"http": proxy_url, "https": proxy_url})
     return session
@@ -771,7 +759,8 @@ def fetch_latest_otp(
             email,
         )
 
-    selected_proxy = str(_proxy_cfg.pick_proxy() or "").strip()
+    raw_selected_proxy = str(_proxy_cfg.pick_proxy() or "").strip()
+    selected_proxy = normalize_proxy_url(raw_selected_proxy) if raw_selected_proxy else ""
     routes: list[tuple[str, str]] = []
     if selected_proxy:
         routes.append(("proxy", selected_proxy))

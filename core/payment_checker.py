@@ -16,11 +16,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 import base64
 
 from curl_cffi import requests
 
+from config.proxy import normalize_proxy_url
 from core.payment_sentinel_token import SentinelTokenProvider
 
 OPENAI_CHECKOUT_URL = "https://chatgpt.com/backend-api/payments/checkout"
@@ -149,33 +149,48 @@ def extract_access_token(value: str) -> str:
 
 
 def _proxy(value: str) -> str:
-    value = str(value or "").strip()
-    if not value:
+    """解析代理 URL、host:port:user:password 或 curl 代理命令。"""
+    raw = str(value or "").strip()
+    if not raw:
         raise GCashCheckerError("必须提供目标国家出口代理")
     try:
-        parts = shlex.split(value)
+        parts = shlex.split(raw)
     except ValueError as exc:
         raise GCashCheckerError(f"代理命令格式无效：{exc}") from exc
-    if parts and parts[0].lower() == "curl":
-        proxy = next((parts[i + 1] for i, p in enumerate(parts[:-1]) if p in {"-x", "--proxy"}), "")
-        auth = next((parts[i + 1] for i, p in enumerate(parts[:-1]) if p in {"-u", "-U", "--proxy-user"}), "")
+
+    if parts and parts[0].lower().rsplit("/", 1)[-1] in {"curl", "curl.exe"}:
+        proxy = ""
+        auth = ""
+        i = 1
+        while i < len(parts):
+            part = parts[i]
+            if part in {"-x", "--proxy"}:
+                i += 1
+                proxy = parts[i] if i < len(parts) else ""
+            elif part.startswith("--proxy="):
+                proxy = part.split("=", 1)[1]
+            elif part.startswith("-x") and len(part) > 2:
+                proxy = part[2:]
+            elif part in {"-u", "-U", "--proxy-user"}:
+                i += 1
+                auth = parts[i] if i < len(parts) else ""
+            elif part.startswith("--proxy-user="):
+                auth = part.split("=", 1)[1]
+            elif part.startswith("-U") and len(part) > 2:
+                auth = part[2:]
+            i += 1
         if not proxy:
             raise GCashCheckerError("curl 格式缺少 -x/--proxy")
-        value = proxy
-        if auth and "@" not in value:
-            scheme = value.split("://", 1)[0] if "://" in value else "http"
-            host = value.split("://", 1)[-1]
-            value = f"{scheme}://{auth}@{host}"
-    if "://" not in value:
-        fields = value.split(":")
-        if len(fields) == 4:
-            host, port, user, password = fields
-            value = f"http://{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}"
-        else:
-            value = "http://" + value
-    if not re.match(r"^(https?|socks5h?)://[^\s]+$", value, re.I):
-        raise GCashCheckerError("代理格式无效")
-    return value
+        raw = proxy
+        if auth and "@" not in raw:
+            scheme = raw.split("://", 1)[0] if "://" in raw else "http"
+            endpoint = raw.split("://", 1)[-1]
+            raw = f"{scheme}://{auth}@{endpoint}"
+
+    try:
+        return normalize_proxy_url(raw)
+    except ValueError as exc:
+        raise GCashCheckerError(str(exc)) from exc
 
 
 normalize_proxy = _proxy

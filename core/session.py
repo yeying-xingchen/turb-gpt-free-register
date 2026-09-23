@@ -19,7 +19,8 @@ from config import (
     SEC_CH_UA_FULL_VERSION_LIST, SEC_CH_UA_PLATFORM_VERSION, SEC_CH_UA_ARCH,
     SEC_CH_UA_BITNESS, SEC_CH_UA_MODEL, SEND_HIGH_ENTROPY_CLIENT_HINTS,
     ACCEPT_LANGUAGE, IMPERSONATE, OAI_CLIENT_BUILD_NUMBER, OAI_CLIENT_VERSION,
-    REQUEST_TIMEOUT, pick_proxy, pick_browser_profile, validate_browser_profile,
+    REQUEST_TIMEOUT, pick_proxy, normalize_proxy_url, redact_proxy_url,
+    pick_browser_profile, validate_browser_profile,
     BROWSER_PROFILE_POOL, build_browser_environment,
 )
 
@@ -95,7 +96,7 @@ class BrowserSession:
         if proxy is None:
             self.proxy = pick_proxy()
         else:
-            self.proxy = proxy
+            self.proxy = normalize_proxy_url(proxy)
 
         self.fingerprint_seed = str(fingerprint_seed or "").strip()
 
@@ -232,7 +233,7 @@ class BrowserSession:
         geo = profile.get("geo") or self.exit_geo or {}
         summary = {
             "device_id": self.device_id,
-            "proxy": self.proxy or "",
+            "proxy": redact_proxy_url(self.proxy) if self.proxy else "",
             "proxy_mode": "direct" if not self.proxy else "proxy",
             "browser_family": profile.get("browser_family") or "chrome",
             "browser_os": profile.get("browser_os") or "macOS",

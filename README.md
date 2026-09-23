@@ -301,10 +301,11 @@ email----password----clientId----refreshToken
 
 ```text
 email----access_token[----totp_secret]
+email----ChatGPT_password----2OTP_secret----access_token
 email----ChatGPT_password----2OTP_secret----取码地址----access_token
 ```
 
-其中第二种五段格式依次为 ChatGPT 账号密码、2OTP/TOTP 密钥、取码地址和最后的 ChatGPT `access_token`（AT）。取码地址会保存到通用 API 邮箱池，后续查活时可继续自动收取 OTP；2OTP 密钥保存为账号的 TOTP/2FA 凭证。Outlook 素材整行也兼容 `email----password----clientId----refreshToken----access_token`。
+无取码地址的四段格式适合只持有账号密码、TOTP 和现有 AT 的账号；系统不会为它创建虚假的邮箱池记录，但会保存密码/TOTP，查活时优先尝试密码/TOTP。由于没有收件地址，无法自动轮询邮箱 OTP，需要手动验证码或之后补充邮箱接码地址。五段格式依次为 ChatGPT 账号密码、2OTP/TOTP 密钥、取码地址和最后的 ChatGPT `access_token`（AT）。取码地址会保存到通用 API 邮箱池，后续查活时可继续自动收取 OTP；2OTP 密钥保存为账号的 TOTP/2FA 凭证。Outlook 素材整行也兼容 `email----password----clientId----refreshToken----access_token`。
 
 #### 通用 API 邮箱
 
@@ -792,6 +793,20 @@ REGISTER_PASSWORD = "你的固定密码"
 4. 已有 access token 且未启用 TOTP 的账号，会先复用登录态预热，再走 reauth + 邮箱 OTP 刷新 token。
 
 导入通用 API 五段账号行时，第二段会保存为 `registration_password`；Outlook 四段素材中的邮箱密码不会误提交到 OpenAI。
+
+### 查活时的边缘 403 / 挑战页处理
+
+`LIVE_CHECK_DRIVER=auto` 会按固定上限执行三段路线：协议当前出口 → 明确直连协议 → 独立 Chromium 查活。协议结果只有结构化边缘/网络错误才进入下一段，账号停用、删除、封禁和 MFA/OTP 等业务状态保持原分类，不会被当作网络失败。
+
+Playwright 路线遇到 HTTP 403/408/425/429、5xx 或 `cf-mitigated: challenge` 时，会在同一个 BrowserContext 中让真实 Chromium 页面脚本运行一轮，再重新导航/读取 session；默认每轮等待 5 秒，最多 3 次尝试。代码只观察页面状态并重试正常的一方页面导航，不生成或注入挑战凭据；交互式挑战最终会记录为 `challenge_required`，方便人工处理或更换出口。
+
+可在 `.env` 或 WebUI「查活/Playwright」中调整：
+
+```dotenv
+LIVE_CHECK_DRIVER=auto
+PLAYWRIGHT_EDGE_CHALLENGE_WAIT=5
+PLAYWRIGHT_EDGE_RETRY_ATTEMPTS=3
+```
 
 ---
 

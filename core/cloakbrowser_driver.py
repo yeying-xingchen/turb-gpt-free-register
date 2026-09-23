@@ -317,10 +317,14 @@ class CloakSeleniumDriver:
 
 
 def _normalize_proxy(proxy: str | None) -> str | None:
-    proxy = str(proxy or "").strip()
-    if not proxy:
+    from config.proxy import normalize_proxy_url
+
+    raw_proxy = str(proxy or "").strip()
+    if not raw_proxy:
         return None
-    return proxy.replace("socks5h://", "socks5://")
+    normalized = normalize_proxy_url(raw_proxy)
+    # CloakBrowser expects SOCKS5 rather than curl's DNS-at-proxy alias.
+    return normalized.replace("socks5h://", "socks5://", 1)
 
 
 def _detect_cloak_exit_geo(proxy_url: str | None = None) -> dict:

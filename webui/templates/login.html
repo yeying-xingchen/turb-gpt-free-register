@@ -255,6 +255,178 @@
     .submit:active {
       transform: scale(0.99);
     }
+    /* polished sign-in surface */
+    :root {
+      --login-primary: #5968f2;
+      --login-primary-dark: #4654df;
+      --login-ink: #1b2540;
+      --login-muted: #73809a;
+      --login-line: #e2e6f1;
+    }
+    body {
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 90% 8%, rgba(122, 110, 248, .18), transparent 26rem),
+        radial-gradient(circle at 4% 96%, rgba(74, 144, 255, .13), transparent 25rem),
+        linear-gradient(135deg, #f8f9ff 0%, #f2f5fb 52%, #f8f8ff 100%);
+      color: var(--login-ink);
+      -webkit-font-smoothing: antialiased;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: -1;
+      opacity: .42;
+      background-image: linear-gradient(rgba(89,104,242,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(89,104,242,.035) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: linear-gradient(to bottom, #000, transparent 88%);
+    }
+    .bg-circle { filter: blur(2px); animation: loginFloat 12s ease-in-out infinite alternate; }
+    .bg-circle--br { animation-delay: -5s; }
+    .bg-quarter-bl {
+      background: linear-gradient(135deg, rgba(227,232,244,.92), rgba(239,242,250,.25));
+      opacity: .9;
+    }
+    .bg-dots span {
+      background: linear-gradient(135deg, #7180f5, #9b8cf7);
+      box-shadow: 0 0 10px rgba(89,104,242,.18);
+    }
+    .page {
+      width: min(460px, calc(100vw - 32px));
+      gap: 30px;
+      animation: loginEnter .55s cubic-bezier(.2,.8,.2,1) both;
+    }
+    .brand {
+      gap: 13px;
+      filter: drop-shadow(0 8px 18px rgba(89,104,242,.12));
+    }
+    .brand-icon { width: 44px; height: 48px; }
+    .brand-title {
+      color: #18223d;
+      font-size: 23px;
+      letter-spacing: -.035em;
+    }
+    .card {
+      position: relative;
+      overflow: hidden;
+      padding: 42px 36px 36px;
+      border: 1px solid rgba(222,227,241,.92);
+      border-radius: 22px;
+      background: rgba(255,255,255,.88);
+      box-shadow: 0 28px 70px rgba(34,46,85,.12), 0 2px 8px rgba(34,46,85,.04);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 12%;
+      right: 12%;
+      height: 3px;
+      border-radius: 0 0 99px 99px;
+      background: linear-gradient(90deg, #5968f2, #8d70ee, #5c9af7);
+      box-shadow: 0 4px 16px rgba(89,104,242,.3);
+    }
+    .card::after {
+      content: "";
+      position: absolute;
+      width: 190px;
+      height: 190px;
+      right: -120px;
+      bottom: -120px;
+      border-radius: 50%;
+      background: rgba(89,104,242,.08);
+      pointer-events: none;
+    }
+    .card h1 {
+      color: var(--login-ink);
+      font-size: 26px;
+      letter-spacing: -.04em;
+    }
+    .desc { color: var(--login-muted); }
+    .err {
+      border-color: #f3c7cc;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #fff7f7, #fff0f1);
+      color: #c33f4c;
+      box-shadow: inset 3px 0 0 #e0525c;
+    }
+    .field { margin-top: 28px; }
+    .input-icon { left: 16px; color: #9aa5bb; }
+    .input-wrap input {
+      min-height: 54px;
+      border-color: var(--login-line);
+      border-radius: 13px;
+      padding-left: 46px;
+      padding-right: 48px;
+      background: rgba(249,250,255,.8);
+      color: var(--login-ink);
+      box-shadow: inset 0 1px 2px rgba(30,42,80,.02);
+    }
+    .input-wrap input:hover { border-color: #c8cff0; background: #fff; }
+    .input-wrap input:focus {
+      border-color: #8390f5;
+      background: #fff;
+      box-shadow: 0 0 0 4px rgba(89,104,242,.12), 0 8px 18px rgba(89,104,242,.07);
+    }
+    .toggle-password {
+      width: 38px;
+      height: 38px;
+      right: 8px;
+      border-radius: 10px;
+      transition: color .16s ease, background .16s ease, transform .16s ease;
+    }
+    .toggle-password:hover { color: var(--login-primary); background: #eef0ff; }
+    .toggle-password:active { transform: translateY(-50%) scale(.94); }
+    .remember {
+      margin-top: 16px;
+      color: var(--login-muted);
+      font-size: 13px;
+    }
+    .remember input { accent-color: var(--login-primary); }
+    .submit {
+      min-height: 54px;
+      margin-top: 24px;
+      border-radius: 13px;
+      background: linear-gradient(135deg, #6875f5, var(--login-primary-dark));
+      box-shadow: 0 12px 22px rgba(89,104,242,.23);
+      transition: background .18s ease, transform .12s ease, box-shadow .18s ease;
+    }
+    .submit:hover {
+      background: linear-gradient(135deg, #7480ff, #3f4dd7);
+      box-shadow: 0 16px 28px rgba(89,104,242,.28);
+      transform: translateY(-1px);
+    }
+    .submit:active { transform: translateY(1px) scale(.995); box-shadow: 0 8px 16px rgba(89,104,242,.2); }
+    .submit:focus-visible, .toggle-password:focus-visible {
+      outline: 3px solid rgba(89,104,242,.28);
+      outline-offset: 2px;
+    }
+    @keyframes loginEnter {
+      from { opacity: 0; transform: translateY(14px) scale(.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes loginFloat {
+      from { transform: translate3d(0, 0, 0) scale(1); }
+      to { transform: translate3d(0, -12px, 0) scale(1.035); }
+    }
+    @media (max-width: 520px) {
+      body { overflow: auto; padding: 28px 0; }
+      .page { width: min(100% - 28px, 440px); gap: 24px; }
+      .card { padding: 34px 22px 24px; border-radius: 18px; }
+      .brand-title { font-size: 21px; }
+      .bg-dots--tl { top: 22px; left: 18px; transform: scale(.7); transform-origin: top left; }
+      .bg-dots--br { bottom: 18px; right: 18px; transform: scale(.7); transform-origin: bottom right; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+    }
   </style>
 </head>
 <body>

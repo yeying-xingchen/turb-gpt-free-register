@@ -12,6 +12,20 @@ from core.payment_checker import QualificationResult
 
 
 class PaymentCheckerTests(unittest.TestCase):
+    def test_proxy_normalization_accepts_legacy_and_curl_forms(self):
+        self.assertEqual(
+            payment_checker._proxy("host.example:8080:user:pa:ss"),
+            "http://user:pa%3Ass@host.example:8080",
+        )
+        self.assertEqual(
+            payment_checker._proxy("curl --proxy host.example:8080 --proxy-user 'u:p@ss'"),
+            "http://u:p%40ss@host.example:8080",
+        )
+
+    def test_proxy_normalization_rejects_invalid_port(self):
+        with self.assertRaises(payment_checker.GCashCheckerError):
+            payment_checker._proxy("host.example:65536:user:pass")
+
     def test_qualification_result_uses_explicit_field_contract(self):
         result = QualificationResult(
             qualified=True,

@@ -26,6 +26,7 @@ from urllib.parse import quote, urljoin, urlsplit
 import requests
 
 from config import extract_link as cfg
+from config.proxy import normalize_proxy_url, redact_proxy_url
 
 
 DJB_MODES = {"paypal", "gopay", "gcash", "momo", "upi", "card", "pix", "ideal"}
@@ -308,7 +309,15 @@ def _proxy_text(value: list[str] | str | None, setting_name: str) -> str:
         values = [str(item).strip() for item in value if str(item).strip()]
     if len(values) > 1000:
         raise DjbApiError(f"{setting_name} 最多支持 1000 条代理")
-    return "\n".join(values)
+    normalized: list[str] = []
+    for value in values:
+        try:
+            normalized.append(normalize_proxy_url(value))
+        except ValueError as exc:
+            raise DjbApiError(
+                f"{setting_name} 包含无效代理 {redact_proxy_url(value)}"
+            ) from exc
+    return "\n".join(normalized)
 
 
 def capture_config(*, card_code: str | None = None) -> DjbTaskConfig:

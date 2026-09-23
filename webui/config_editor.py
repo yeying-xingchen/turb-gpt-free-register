@@ -10,6 +10,7 @@
     4. 读取时优先 `.env`，缺失时回退解析 `config/*.py` 默认值。
 """
 import ast
+import math
 import os
 import re
 from pathlib import Path
@@ -20,6 +21,7 @@ EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL",
     "DJB_PROXIES",
     "DJB_EXIT_PROXIES",
+    "MOMO_ACTIVATION_ENTRY_PROXIES",
 }
 
 
@@ -56,6 +58,54 @@ EDITABLE_FIELDS = [
     {
         "key": "AUTO_PLAN_CHECK_AFTER_REGISTER", "file": "register.py", "type": "bool", "group": "注册方式",
         "label": "注册后自动查套餐", "help": "注册成功后自动入队查询套餐/Plus 资格；关闭后仅保存账号，不自动查套餐",
+    },
+    {
+        "key": "LIVE_CHECK_DRIVER", "file": "playwright.py", "type": "str", "group": "查活/Playwright",
+        "label": "查活驱动", "help": "auto=协议遇到边缘错误后自动切本地 Playwright；protocol=仅协议；playwright/cf/cloudflare=直接浏览器查活并尝试 CF challenge",
+    },
+    {
+        "key": "PLAYWRIGHT_HEADLESS", "file": "playwright.py", "type": "bool", "group": "查活/Playwright",
+        "label": "Playwright无头", "help": "True=后台无头 Chromium；False=显示浏览器窗口，便于调试",
+    },
+    {
+        "key": "PLAYWRIGHT_EXECUTABLE_PATH", "file": "playwright.py", "type": "str", "group": "查活/Playwright",
+        "label": "Chromium路径", "help": "可选。留空使用 Playwright 自带 Chromium；部署后请先执行 playwright install chromium",
+    },
+    {
+        "key": "PLAYWRIGHT_LOCALE", "file": "playwright.py", "type": "str", "group": "查活/Playwright",
+        "label": "浏览器语言", "help": "默认 en-US；应与出口地区保持一致",
+    },
+    {
+        "key": "PLAYWRIGHT_TIMEZONE_ID", "file": "playwright.py", "type": "str", "group": "查活/Playwright",
+        "label": "浏览器时区", "help": "可选，例如 Asia/Tokyo；留空使用系统时区",
+    },
+    {
+        "key": "PLAYWRIGHT_TIMEOUT", "file": "playwright.py", "type": "int", "group": "查活/Playwright",
+        "label": "页面操作超时(秒)", "help": "Playwright 元素操作默认超时",
+    },
+    {
+        "key": "PLAYWRIGHT_NAVIGATION_TIMEOUT", "file": "playwright.py", "type": "int", "group": "查活/Playwright",
+        "label": "导航超时(秒)", "help": "登录页/authorize 页面导航超时",
+    },
+    {
+        "key": "PLAYWRIGHT_OTP_TIMEOUT", "file": "playwright.py", "type": "int", "group": "查活/Playwright",
+        "label": "Playwright OTP等待(秒)", "help": "浏览器注册/查活等待邮箱验证码的上限",
+    },
+    {
+        "key": "PLAYWRIGHT_LIVE_CHECK_TIMEOUT", "file": "playwright.py", "type": "int", "group": "查活/Playwright",
+        "label": "Playwright查活超时(秒)", "help": "等待浏览器登录态 /api/auth/session 的上限",
+    },
+    {
+        "key": "PLAYWRIGHT_EDGE_CHALLENGE_WAIT", "file": "playwright.py", "type": "float", "group": "查活/Playwright",
+        "label": "边缘挑战等待(秒)", "help": "403/挑战页出现后让真实 Chromium 执行页面脚本的等待时间，默认 5 秒，程序会限制上限",
+    },
+    {
+        "key": "PLAYWRIGHT_EDGE_RETRY_ATTEMPTS", "file": "playwright.py", "type": "int", "group": "查活/Playwright",
+        "label": "边缘重试次数", "help": "首页、登录页和 session 边缘响应的最大尝试次数，程序限制为 1-4",
+    },
+    {
+        "key": "PLAYWRIGHT_KEEP_BROWSER_OPEN", "file": "playwright.py", "type": "bool", "group": "查活/Playwright",
+        "label": "保留Playwright浏览器", "help": "调试时开启；任务结束后不自动关闭浏览器",
     },
 
     # ---- CloakBrowser ----
@@ -766,6 +816,51 @@ EDITABLE_FIELDS = [
         "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",
         "label": "提链并发数", "help": "批量提链后台线程数，建议 1-4",
     },
+    # ---- MoMo 一键开通 ----
+    {
+        "key": "MOMO_ACTIVATION_ENABLED", "file": "momo_activation.py", "type": "bool", "group": "MoMo一键开通",
+        "label": "启用一键开通", "help": "启用账号列表中的 MoMo 一键开通入口；关闭后不会向远端提交任务",
+    },
+    {
+        "key": "MOMO_ACTIVATION_API_BASE", "file": "momo_activation.py", "type": "str", "group": "MoMo一键开通",
+        "label": "MoMo API 地址", "help": "默认 https://hahz7zf.ink；后端只调用公开 v1 API，不把任务密钥返回前端", "external_url": "https://hahz7zf.ink/api-docs", "external_label": "打开 API 文档",
+    },
+    {
+        "key": "MOMO_ACTIVATION_AUTO_PAY", "file": "momo_activation.py", "type": "bool", "group": "MoMo一键开通",
+        "label": "自动支付", "help": "提交任务时自动发起 MoMo 支付；开启后必须填写 payment CDK。此操作可能消耗试用/支付权益",
+    },
+    {
+        "key": "MOMO_ACTIVATION_PAYMENT_CDK", "file": "momo_activation.py", "type": "str", "group": "MoMo一键开通",
+        "label": "自动支付 CDK", "help": "仅保存在 .env；服务端只在远端创建任务时临时使用，不会写入账号记录或返回浏览器", "storage": "env", "secret": True,
+    },
+    {
+        "key": "MOMO_ACTIVATION_ENTRY_PROXIES", "file": "momo_activation.py", "type": "list_str_multiline", "group": "MoMo一键开通",
+        "label": "MoMo 入口代理池", "help": "每行一个代理 URL；为空时回退通用 PROXY_POOL。代理凭据仅发送给 MoMo 服务，不写入任务结果", "storage": "env", "secret": True,
+    },
+    {
+        "key": "MOMO_ACTIVATION_TIMEOUT", "file": "momo_activation.py", "type": "int", "group": "MoMo一键开通",
+        "label": "创建任务超时(秒)", "help": "创建 MoMo 任务的 HTTP 超时，范围 8-120",
+    },
+    {
+        "key": "MOMO_ACTIVATION_TRIAL_DAYS", "file": "momo_activation.py", "type": "int", "group": "MoMo一键开通",
+        "label": "试用天数", "help": "发送给 MoMo API 的 trial_days，范围 1-90，默认 30",
+    },
+    {
+        "key": "MOMO_ACTIVATION_POLL_INTERVAL", "file": "momo_activation.py", "type": "float", "group": "MoMo一键开通",
+        "label": "轮询间隔(秒)", "help": "查询远端任务状态的间隔，建议 1-5 秒",
+    },
+    {
+        "key": "MOMO_ACTIVATION_MAX_WAIT", "file": "momo_activation.py", "type": "int", "group": "MoMo一键开通",
+        "label": "任务最长等待(秒)", "help": "单个远端任务的最大等待时间；超时会尝试取消远端任务",
+    },
+    {
+        "key": "MOMO_ACTIVATION_WORKERS", "file": "momo_activation.py", "type": "int", "group": "MoMo一键开通",
+        "label": "后台线程数", "help": "一键开通本地后台线程数，建议 1-3",
+    },
+    {
+        "key": "MOMO_ACTIVATION_QUEUE_LIMIT", "file": "momo_activation.py", "type": "int", "group": "MoMo一键开通",
+        "label": "队列上限", "help": "本地一键开通队列可接受的最大任务数",
+    },
     # ---- Codex 配置 ----
     {
         "key": "SUB2API_AUTO_EXPORT", "file": "sub2api.py", "type": "bool", "group": "Codex",
@@ -1162,15 +1257,44 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def _format_env_value(value, vtype: str) -> str:
-    """把前端值格式化成适合写入 .env 的字符串。"""
+    """把前端值格式化成适合写入 .env 的字符串。
+
+    数字输入框在用户清空、编辑中间态（例如 ``1.``）或浏览器把 ``NaN``
+    序列化为 JSON ``null`` 时，可能把 ``None`` 传到这里。空数字应表示
+    “清除 .env 覆盖并恢复源码默认值”，不能直接调用 ``int(None)``。
+    """
     if vtype == "bool":
         if isinstance(value, str):
             value = value.strip().lower() in ("true", "1", "yes", "on", "y")
         return "True" if value else "False"
-    if vtype == "int":
-        return str(int(value))
-    if vtype == "float":
-        return repr(float(value))
+    if vtype in ("int", "float"):
+        # `.env` 的空值由 env_loader 解释为“使用 config/*.py 默认值”。
+        # 这同时兼容前端 number input 的空值和 JSON.stringify(NaN) -> null。
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return ""
+        number_label = "整数" if vtype == "int" else "数字"
+        if isinstance(value, bool):
+            raise ValueError(f"配置值必须是有效的{number_label}，收到: {value!r}")
+        try:
+            if vtype == "int":
+                # 不允许 int(1.5) 静默截断，也不接受“1.0”这种非整数文本。
+                if isinstance(value, float):
+                    if not math.isfinite(value) or not value.is_integer():
+                        raise ValueError
+                    number = int(value)
+                else:
+                    raw = str(value).strip()
+                    if not re.fullmatch(r"[+-]?\d+", raw):
+                        raise ValueError
+                    number = int(raw)
+            else:
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError
+        except (TypeError, ValueError, OverflowError) as exc:
+            number_label = "整数" if vtype == "int" else "数字"
+            raise ValueError(f"配置值必须是有效的{number_label}，收到: {value!r}") from exc
+        return str(number) if vtype == "int" else repr(number)
     if vtype == "list_str_multiline":
         lines = _normalize_config_value(value, vtype)
         return "\n".join(lines) if lines else "[]"

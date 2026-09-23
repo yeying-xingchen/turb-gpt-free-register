@@ -17,12 +17,13 @@ import math
 import threading
 import time
 import uuid
+from datetime import datetime as _datetime, timezone as _timezone
 from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, Response, jsonify, make_response, render_template, request
 import pyotp
 
-from core import codex_retry_service, db, plan_check_service, payment_method_service, extract_link_service, codex_agent_service, live_check_service
+from core import codex_retry_service, db, plan_check_service, payment_method_service, extract_link_service, codex_agent_service, live_check_service, momo_activation_service
 from webui.auth import init_auth, register_auth_routes
 from core import registration_service as svc
 from core import account_import
@@ -126,7 +127,7 @@ def _compact_account_for_list(row: dict) -> dict:
         "user_name", "email_source", "original_email", "note", "archived", "created_at",
         "plan_type", "current_plan_type", "plus_trial_eligible",
         "plan_check_status", "payment_method_check_status", "codex_status", "codex_agent_status",
-        "totp_setup_status",
+        "totp_setup_status", "momo_activation_status",
     ):
         if key in row:
             out[key] = row.get(key)
@@ -160,6 +161,10 @@ def _compact_account_for_list(row: dict) -> dict:
         "totp_setup_error", "totp_setup_message", "totp_setup_started_at", "totp_setup_completed_at",
         "email_change_status", "email_change_error", "email_change_new_email",
         "email_change_started_at", "email_change_completed_at",
+        "momo_activation_ok", "momo_activation_trigger", "momo_activation_queued_at",
+        "momo_activation_started_at", "momo_activation_completed_at", "momo_activation_checked_at",
+        "momo_activation_error", "momo_activation_message", "momo_activation_job_id",
+        "momo_activation_remote_status", "momo_activation_result_summary",
     )
     for key in optional_keys:
         value = row.get(key)
@@ -173,10 +178,223 @@ def _compact_account_for_list(row: dict) -> dict:
     return out
 
 
-def _account_secret_value(row: dict, field: str) -> str:
-    field = (field or "").strip()
+ACCOUNT_EXPORT_FIELDS = (
+    "email", "email_password", "password", "totp_secret", "totp_code",
+    "id", "email_source", "user_name", "note", "plan_type", "current_plan_type",
+    "live_check_status", "codex_status", "created_at", "updated_at",
+    "access_token", "codex_agent_token", "copy_line",
+)
+_ACCOUNT_EXPORT_FIELD_LABELS = {
+    "email": "邮箱",
+    "email_password": "邮箱密码",
+    "password": "密码（账号登录）",
+    "totp_secret": "2FA 密钥",
+    "totp_code": "当前 2FA 验证码",
+    "id": "账号 ID",
+    "email_source": "邮箱来源",
+    "user_name": "用户名",
+    "note": "备注",
+    "plan_type": "套餐",
+    "current_plan_type": "当前套餐",
+    "live_check_status": "查活状态",
+    "codex_status": "Codex 状态",
+    "created_at": "创建时间",
+    "updated_at": "更新时间",
+    "access_token": "access_token（AT）",
+    "codex_agent_token": "Codex Agent Token",
+    "copy_line": "完整整行（含 AT）",
+}
+_ACCOUNT_EXPORT_SENSITIVE_FIELDS = frozenset({
+    "password", "totp_secret", "totp_code", "email_password", "access_token",
+    "codex_agent_token", "copy_line",
+})
+
+
+def _coerce_export_account_id(raw: object) -> int:
+    """Accept only integer IDs, rejecting bools, floats and non-positive values."""
+    if isinstance(raw, bool):
+        raise ValueError("ID 非法")
+    if isinstance(raw, int):
+        acc_id = raw
+    elif isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        if text.startswith(("+", "-")):
+            digits = text[1:]
+        else:
+            digits = text
+        if not digits.isdigit():
+            raise ValueError("ID 非法")
+        acc_id = int(text, 10)
+    else:
+        raise ValueError("ID 非法")
+    if acc_id <= 0:
+        raise ValueError("ID 必须是正整数")
+    return acc_id
+
+
+def _parse_export_filter_date(value: object, *, end: bool = False) -> tuple[str | None, _datetime | None]:
+    """Validate an ISO date/date-time filter and return its DB value and UTC-naive value."""
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    try:
+        if len(text) == 10:
+            parsed = _datetime.strptime(text, "%Y-%m-%d")
+            if end:
+                parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+            return text, parsed
+        parsed = _datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("日期必须是 YYYY-MM-DD 或 ISO 日期时间") from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(_timezone.utc).replace(tzinfo=None)
+    return parsed.isoformat(timespec="microseconds"), parsed
+
+
+def _normalise_account_export_filters(raw: object) -> dict:
+    """Normalize account-list filters before using them for an export scope."""
+    filters = raw if isinstance(raw, dict) else {}
+    archived = str(filters.get("archived", "0") or "0").strip().lower()
+    if archived not in {"0", "1", "true", "false", "yes", "no", "only", "all", "include"}:
+        raise ValueError("archived 仅支持 0/1/only/all")
+    status_filter = str(filters.get("status", "") or "").strip().lower()
+    allowed_status_filters = {
+        "", "all", "plus", "live", "alive", "failed", "live_failed",
+        "liveness_failed", "trial", "free_trial", "plus_trial",
+        "deactivated", "dead", "invalid",
+    }
+    if status_filter not in allowed_status_filters:
+        raise ValueError("status 仅支持 all/plus/live/failed/trial/deactivated")
+    date_from, parsed_from = _parse_export_filter_date(filters.get("date_from"), end=False)
+    date_to, parsed_to = _parse_export_filter_date(filters.get("date_to"), end=True)
+    if parsed_from is not None and parsed_to is not None and parsed_from > parsed_to:
+        raise ValueError("date_from 不能晚于 date_to")
+    return {
+        "archived": archived,
+        "plan_filter": str(filters.get("plan", "") or "").strip().lower(),
+        "codex_filter": str(filters.get("codex_status", "") or "").strip().lower(),
+        "totp_filter": str(
+            filters.get("totp_status") or filters.get("totp_filter")
+            or filters.get("twofa_status") or ""
+        ).strip().lower(),
+        "status_filter": status_filter,
+        "q": str(filters.get("q", "") or "").strip(),
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+
+def _csv_safe_cell(value: object) -> str:
+    """Prevent spreadsheet formula execution for user-controlled CSV values."""
+    text = str(value or "")
+    return "'" + text if text[:1] in {"=", "+", "-", "@"} else text
+
+
+def _txt_safe_cell(value: object, delimiter: str) -> str:
+    """Quote TXT cells that contain separators/newlines while keeping simple lines readable."""
+    text = str(value or "")
+    if delimiter in text or "\n" in text or "\r" in text or '"' in text:
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def _account_login_password(row: dict) -> str:
+    """返回 ChatGPT 登录密码，不把邮箱素材密码误当成登录密码。"""
+    extra_raw = row.get("extra_json")
+    extra = {}
+    if isinstance(extra_raw, str) and extra_raw.strip():
+        try:
+            parsed = json.loads(extra_raw)
+            extra = parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+    elif isinstance(extra_raw, dict):
+        extra = extra_raw
+    explicit = extra.get("registration_password") or row.get("registration_password")
+    if explicit:
+        return str(explicit).strip()
+    line_format = str(row.get("account_line_format") or "").strip().lower().replace("-", "_")
+    email_source = str(row.get("email_source") or "").strip().lower()
+    is_chatgpt_material = line_format in {"chatgpt_api", "chatgpt_api_no_code_url", "chatgpt_no_code_url"} or (
+        email_source == "generic_api" and bool(str(row.get("code_url") or "").strip())
+    )
+    return str(row.get("password") or "").strip() if is_chatgpt_material else ""
+
+
+def _account_email_password(row: dict) -> str:
+    """返回邮箱素材密码；generic_api 的 password 是 ChatGPT 密码，不能回退使用。"""
+    explicit = str(row.get("email_password") or "").strip()
+    if explicit:
+        return explicit
+    source = str(row.get("email_source") or "").strip().lower()
+    if source == "imap":
+        value = str(row.get("imap_password") or row.get("password") or "").strip()
+        if value:
+            return value
+        try:
+            from core import db as _db
+            pool_row = _db.get_imap_email_by_email(str(row.get("email") or ""))
+            return str((pool_row or {}).get("imap_password") or (pool_row or {}).get("password") or "").strip()
+        except Exception:
+            return ""
+    if source == "outlook":
+        return str(row.get("password") or "").strip()
+    return ""
+
+
+def _account_totp_code(row: dict) -> str:
+    secret = str(row.get("totp_secret") or "").strip()
+    if not secret:
+        return ""
+    try:
+        return pyotp.TOTP(secret).now()
+    except Exception:
+        return ""
+
+
+def _account_export_password(row: dict) -> str:
+    return _account_login_password(row)
+
+
+def _account_export_field_value(row: dict, field: str) -> str:
+    if field == "password":
+        return _account_export_password(row)
+    if field == "email_password":
+        return _account_email_password(row)
+    if field == "totp_secret":
+        return str(row.get("totp_secret") or "").strip()
+    if field == "totp_code":
+        return _account_totp_code(row)
+    if field == "copy_line":
+        try:
+            from core.db import _account_line
+            return str(_account_line(row) or "")
+        except Exception:
+            return str(row.get("copy_line") or "")
     if field == "access_token":
         return str(row.get("access_token") or "")
+    if field == "codex_agent_token":
+        return str(row.get("codex_agent_token") or "")
+    if field == "id":
+        return str(row.get("id") or "")
+    if field == "email":
+        return str(row.get("email") or "")
+    value = row.get(field)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value or "")
+
+
+def _account_secret_value(row: dict, field: str) -> str:
+    field = (field or "").strip()
+    if field == "email":
+        # 邮箱是非敏感元数据，但通过统一 secret-bulk 返回可以保证跨页复制时
+        # 不依赖当前页列表，也不会把 access_token/整行凭证一起带出。
+        return str(row.get("email") or "")
+    if field == "access_token":
+        return str(row.get("access_token") or "")
+    if field == "email_password":
+        return _account_email_password(row)
     if field == "copy_line":
         try:
             from core.db import _account_line
@@ -187,30 +405,12 @@ def _account_secret_value(row: dict, field: str) -> str:
     if field == "codex_agent_token":
         return str(row.get("codex_agent_token") or "")
     if field == "totp_secret":
-        return str(row.get("totp_secret") or "")
+        return str(row.get("totp_secret") or "").strip()
     if field == "totp_code":
-        secret = str(row.get("totp_secret") or "").strip()
-        return pyotp.TOTP(secret).now() if secret else ""
+        return _account_totp_code(row)
     if field == "password":
-        extra_raw = row.get("extra_json")
-        extra = {}
-        if isinstance(extra_raw, str) and extra_raw.strip():
-            try:
-                extra = json.loads(extra_raw)
-            except Exception:
-                extra = {}
-        elif isinstance(extra_raw, dict):
-            extra = extra_raw
-        explicit = extra.get("registration_password") or row.get("registration_password")
-        if explicit:
-            return str(explicit)
-        line_format = str(row.get("account_line_format") or "").strip().lower().replace("-", "_")
-        email_source = str(row.get("email_source") or "").strip().lower()
-        is_chatgpt_material = line_format == "chatgpt_api" or (
-            email_source == "generic_api" and bool(str(row.get("code_url") or "").strip())
-        )
-        return str(row.get("password") or "未设置") if is_chatgpt_material else "未设置"
-    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/totp_code/password")
+        return _account_login_password(row)
+    raise ValueError("field 仅支持 email/access_token/copy_line/codex_agent_token/totp_secret/totp_code/password/email_password")
 
 
 def _compact_job_for_list(row: dict) -> dict:
@@ -386,6 +586,11 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_email_changes = db.recover_interrupted_email_changes()
     if recovered_email_changes:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
+    recover_activations = getattr(db, "recover_interrupted_activations", None)
+    if callable(recover_activations):
+        recovered_momo = recover_activations()
+        if recovered_momo:
+            logger.warning("已恢复 %s 个因 WebUI 重启中断的 MoMo 开通状态", recovered_momo)
 
     # ----------------------------------------------------------
     # 页面
@@ -589,9 +794,14 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.post("/api/accounts/secret-bulk")
     def api_accounts_secret_bulk():
         """按需批量读取账号敏感值。Body {account_ids:[...], field}."""
-        data = request.get_json(silent=True) or {}
-        ids = data.get("account_ids") or data.get("ids") or []
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        ids = data.get("account_ids") if "account_ids" in data else data.get("ids")
         field = str(data.get("field") or "").strip()
+        allowed_fields = {"email", "access_token", "copy_line", "codex_agent_token", "totp_secret", "totp_code", "password", "email_password"}
+        if field not in allowed_fields:
+            return jsonify({"ok": False, "error": "field 仅支持 email/access_token/copy_line/codex_agent_token/totp_secret/totp_code/password/email_password"}), 400
         if not isinstance(ids, list) or not ids:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
         if len(ids) > 5000:
@@ -601,26 +811,212 @@ def create_app(auth_code: str | None = None) -> Flask:
         seen = set()
         for raw in ids:
             try:
-                acc_id = int(raw)
-            except (TypeError, ValueError):
-                skipped.append({"id": raw, "reason": "ID 非法"})
+                acc_id = _coerce_export_account_id(raw)
+            except ValueError as exc:
+                skipped.append({"id": raw, "reason": str(exc)})
                 continue
             if acc_id in seen:
+                skipped.append({"id": acc_id, "reason": "ID 重复"})
                 continue
             seen.add(acc_id)
             acc = db.get_account(acc_id)
             if not acc:
                 skipped.append({"id": acc_id, "reason": "账号不存在"})
                 continue
-            try:
-                value = _account_secret_value(acc, field)
-            except ValueError as exc:
-                return jsonify({"ok": False, "error": str(exc)}), 400
+            value = _account_secret_value(acc, field)
             if value:
                 values.append({"id": acc_id, "email": acc.get("email"), "value": value})
             else:
                 skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "值为空"})
         return jsonify({"ok": True, "field": field, "values": values, "count": len(values), "skipped": skipped})
+
+    @app.get("/api/accounts/export-fields")
+    def api_accounts_export_fields():
+        """返回账号批量导出的字段清单，供前端展示自定义导出选项。"""
+        return jsonify({
+            "ok": True,
+            "fields": [
+                {"key": field, "label": _ACCOUNT_EXPORT_FIELD_LABELS[field], "sensitive": field in _ACCOUNT_EXPORT_SENSITIVE_FIELDS}
+                for field in ACCOUNT_EXPORT_FIELDS
+            ],
+        })
+
+    @app.post("/api/accounts/export")
+    def api_accounts_export():
+        """批量导出账号；支持选中账号/当前页/当前筛选结果与自定义字段。"""
+        import csv
+        import io
+        from datetime import datetime as _dt
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+
+        # fields 缺省时保持便捷的邮箱导出默认值；显式空数组/空字符串必须拒绝，
+        # 不能静默扩大为 email 导出。
+        raw_fields = data["fields"] if "fields" in data else ["email"]
+        if isinstance(raw_fields, str):
+            raw_fields = [part.strip() for part in raw_fields.split(",") if part.strip()]
+        if not isinstance(raw_fields, list) or not raw_fields:
+            return jsonify({"ok": False, "error": "fields 必须是非空数组"}), 400
+        aliases = {
+            "mail": "email", "mail_password": "email_password", "2fa": "totp_secret",
+            "totp": "totp_secret", "at": "access_token", "token": "access_token",
+            "line": "copy_line",
+        }
+        fields = []
+        for raw in raw_fields:
+            field = aliases.get(str(raw or "").strip().lower(), str(raw or "").strip().lower())
+            if field not in ACCOUNT_EXPORT_FIELDS:
+                return jsonify({"ok": False, "error": f"不支持的导出字段：{raw}"}), 400
+            if field not in fields:
+                fields.append(field)
+        if not fields:
+            return jsonify({"ok": False, "error": "fields 必须包含至少一个有效字段"}), 400
+
+        output_format = str(data.get("format") or "txt").strip().lower()
+        if output_format == "text":
+            output_format = "txt"
+        if output_format not in {"txt", "csv", "json"}:
+            return jsonify({"ok": False, "error": "format 仅支持 txt/csv/json"}), 400
+        sensitive = [field for field in fields if field in _ACCOUNT_EXPORT_SENSITIVE_FIELDS]
+        if sensitive and data.get("confirm_sensitive") is not True:
+            labels = "、".join(_ACCOUNT_EXPORT_FIELD_LABELS[field] for field in sensitive)
+            return jsonify({"ok": False, "error": f"导出包含敏感字段（{labels}），请确认后重试", "sensitive_fields": sensitive}), 400
+
+        scope = str(data.get("scope") or "selected").strip().lower()
+        if scope in {"filter", "all_filtered", "all"}:
+            scope = "filtered"
+        if scope not in {"selected", "current_page", "filtered"}:
+            return jsonify({"ok": False, "error": "scope 仅支持 selected/current_page/filtered"}), 400
+
+        raw_ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(raw_ids, list):
+            return jsonify({"ok": False, "error": "account_ids 必须是数组"}), 400
+        if len(raw_ids) > 5000:
+            return jsonify({"ok": False, "error": "单次最多导出 5000 个账号"}), 400
+
+        skipped = []
+        ids = []
+        seen = set()
+        if scope == "selected":
+            if not raw_ids:
+                return jsonify({"ok": False, "error": "selected 导出需要提供 account_ids"}), 400
+            for raw in raw_ids:
+                try:
+                    acc_id = _coerce_export_account_id(raw)
+                except ValueError as exc:
+                    skipped.append({"id": raw, "reason": str(exc)})
+                    continue
+                if acc_id in seen:
+                    skipped.append({"id": acc_id, "reason": "ID 重复"})
+                    continue
+                seen.add(acc_id)
+                ids.append(acc_id)
+            rows = db.get_accounts_by_ids(ids)
+            found = {int(row.get("id") or 0) for row in rows}
+            skipped.extend({"id": acc_id, "reason": "账号不存在"} for acc_id in ids if acc_id not in found)
+        else:
+            filters = data.get("filters") if isinstance(data.get("filters"), dict) else data
+            try:
+                parsed_filters = _normalise_account_export_filters(filters)
+            except ValueError as exc:
+                return jsonify({"ok": False, "error": str(exc)}), 400
+            page = data.get("page", 1)
+            page_size = data.get("page_size", 50)
+            try:
+                page = int(page)
+                page_size = int(page_size)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "page/page_size 必须是整数"}), 400
+            if page < 1 or page_size < 1 or page_size > 500:
+                return jsonify({"ok": False, "error": "page 必须 >=1，page_size 必须为 1-500"}), 400
+            result = db.list_accounts_page(
+                limit=5001 if scope == "filtered" else page_size,
+                offset=0 if scope == "filtered" else (page - 1) * page_size,
+                archived=parsed_filters["archived"], plan_filter=parsed_filters["plan_filter"],
+                codex_filter=parsed_filters["codex_filter"], q=parsed_filters["q"],
+                date_from=parsed_filters["date_from"], date_to=parsed_filters["date_to"],
+                totp_filter=parsed_filters["totp_filter"], status_filter=parsed_filters["status_filter"],
+            )
+            if scope == "filtered" and int(result.get("total") or 0) > 5000:
+                return jsonify({"ok": False, "error": "当前筛选结果超过 5000 个账号，请缩小范围后导出"}), 400
+            rows = result.get("items") or []
+            if scope == "current_page":
+                raw_page_ids = data.get("account_ids") if "account_ids" in data else data.get("ids")
+                if raw_page_ids is not None:
+                    requested = []
+                    for raw in raw_page_ids if isinstance(raw_page_ids, list) else []:
+                        try:
+                            requested.append(_coerce_export_account_id(raw))
+                        except ValueError:
+                            skipped.append({"id": raw, "reason": "ID 非法"})
+                    actual = {int(row.get("id") or 0) for row in rows}
+                    if requested and set(requested) != actual:
+                        return jsonify({"ok": False, "error": "current_page 不接受与服务端页码不一致的 account_ids"}), 400
+
+        if not rows:
+            return jsonify({"ok": False, "error": "没有可导出的账号", "skipped": skipped}), 404
+
+        include_header = data.get("include_header") if "include_header" in data else output_format == "csv"
+        include_header = bool(include_header)
+        delimiter = data.get("delimiter", "----")
+        if delimiter == "\\t":
+            delimiter = "\t"
+        if not isinstance(delimiter, str) or not delimiter or len(delimiter) > 8:
+            return jsonify({"ok": False, "error": "delimiter 必须是 1-8 个字符"}), 400
+        if any(ord(char) < 32 and char != "\t" for char in delimiter) or "\n" in delimiter or "\r" in delimiter:
+            return jsonify({"ok": False, "error": "delimiter 不能包含控制字符或换行"}), 400
+        if output_format == "csv" and (len(delimiter) != 1 or delimiter in {'"', "\x00"}):
+            return jsonify({"ok": False, "error": "CSV 分隔符必须是单个字符且不能是引号/NUL"}), 400
+
+        matrix = [[_account_export_field_value(row, field) for field in fields] for row in rows]
+        if output_format == "json":
+            payload = [dict(zip(fields, values)) for values in matrix]
+            text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            mimetype = "application/json"
+            extension = "json"
+            encoded = text.encode("utf-8")
+        elif output_format == "csv":
+            out = io.StringIO(newline="")
+            writer = csv.writer(out, delimiter=delimiter, lineterminator="\n")
+            if include_header:
+                writer.writerow([_csv_safe_cell(_ACCOUNT_EXPORT_FIELD_LABELS[field]) for field in fields])
+            writer.writerows([[_csv_safe_cell(value) for value in values] for values in matrix])
+            encoded = out.getvalue().encode("utf-8-sig")
+            mimetype = "text/csv"
+            extension = "csv"
+        else:
+            lines = []
+            if include_header:
+                lines.append(delimiter.join(_txt_safe_cell(_ACCOUNT_EXPORT_FIELD_LABELS[field], delimiter) for field in fields))
+            lines.extend(delimiter.join(_txt_safe_cell(value, delimiter) for value in values) for values in matrix)
+            encoded = ("\ufeff" + "\n".join(lines) + "\n").encode("utf-8")
+            mimetype = "text/plain"
+            extension = "txt"
+
+        filename = f"accounts-export-{_dt.now().strftime('%Y%m%d-%H%M%S')}.{extension}"
+        response_meta = {
+            "ok": True, "scope": scope, "fields": fields, "count": len(rows),
+            "skipped": skipped, "skipped_count": len(skipped), "filename": filename,
+        }
+        if data.get("prepare"):
+            download_id = _put_prepared_download(encoded, filename, mimetype)
+            response_meta.update({"prepared": True, "download_id": download_id, "download_url": f"/api/downloads/{download_id}"})
+            return jsonify(response_meta)
+        response = Response(
+            encoded,
+            mimetype=mimetype,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(encoded)),
+                "Cache-Control": "no-store, max-age=0",
+                "X-Content-Type-Options": "nosniff",
+                "X-Export-Count": str(len(rows)),
+                "X-Export-Skipped": str(len(skipped)),
+            },
+        )
+        return response
 
     @app.post("/api/accounts/<int:acc_id>/archive")
     def api_account_archive(acc_id: int):
@@ -1259,6 +1655,28 @@ def create_app(auth_code: str | None = None) -> Flask:
         plan = str(acc.get("current_plan_type") or acc.get("plan_type") or "").lower()
         return plan == "free" and bool(acc.get("plus_trial_eligible"))
 
+    def _is_activation_eligible(acc: dict) -> bool:
+        """Require a known free/trial-eligible account before auto-pay."""
+        if not isinstance(acc, dict):
+            return False
+        plan = str(acc.get("current_plan_type") or acc.get("plan_type") or "").strip().lower()
+        if plan != "free" or not bool(acc.get("plus_trial_eligible")):
+            return False
+        if str(acc.get("live_check_status") or "").strip().lower() == "deactivated":
+            return False
+        return bool(str(acc.get("access_token") or "").strip())
+
+    def _activation_account_id(raw: object) -> int:
+        if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+            raise ValueError("ID 非法")
+        text = str(raw).strip()
+        if not text or not text.isdigit():
+            raise ValueError("ID 非法")
+        value = int(text, 10)
+        if value <= 0:
+            raise ValueError("ID 必须是正整数")
+        return value
+
     @app.post("/api/accounts/extract-link")
     def api_account_extract_link():
         """单账号提链。Body {account_id|id, link_type?, cdk?}。"""
@@ -1357,6 +1775,99 @@ def create_app(auth_code: str | None = None) -> Flask:
             "failed_count": len(failed),
             "skipped": skipped,
             "skipped_count": len(skipped),
+        }), 202
+
+    def _activation_response_item(queued: dict, acc: dict) -> dict:
+        safe = {k: v for k, v in (queued or {}).items() if k not in {"future", "job_secret", "access_token", "session"}}
+        safe.setdefault("id", int(acc.get("id") or 0))
+        safe.setdefault("email", acc.get("email") or "")
+        return safe
+
+    @app.post("/api/accounts/activate")
+    def api_account_activate():
+        """通过公开 MoMo v1 API 自动提交并等待 Plus 开通任务。"""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        try:
+            acc_id = _activation_account_id(data.get("account_id") if "account_id" in data else data.get("id"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "account_id 必须是正整数"}), 400
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if not _is_activation_eligible(acc):
+            return jsonify({"ok": False, "error": "仅支持 free 且可免费试用 Plus、未废号且有 access_token 的账号"}), 400
+        try:
+            queued = momo_activation_service.enqueue_account_activation(
+                account_id=acc_id,
+                email=acc.get("email") or "",
+                access_token=str(acc.get("access_token") or "").strip(),
+                trigger="manual",
+                trial_days=data.get("trial_days"),
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:240]}"}), 400
+        if queued.get("busy"):
+            return jsonify({"ok": False, **_activation_response_item(queued, acc)}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **_activation_response_item(queued, acc)}), 503
+        return jsonify({"ok": True, "started": True, **_activation_response_item(queued, acc)}), 202
+
+    @app.post("/api/accounts/activate-bulk")
+    def api_accounts_activate_bulk():
+        """批量提交 MoMo 自动开通任务；仅接受账号 ID，Token 由服务端读取。"""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        ids = data.get("account_ids") if "account_ids" in data else data.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 100:
+            return jsonify({"ok": False, "error": "单次最多开通 100 个账号"}), 400
+        started, busy, failed, skipped = [], [], [], []
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = _activation_account_id(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            if not _is_activation_eligible(acc):
+                skipped.append({"id": acc_id, "email": acc.get("email") or "", "reason": "不是 free 可试用、已废号或缺少 access_token"})
+                continue
+            try:
+                queued = momo_activation_service.enqueue_account_activation(
+                    account_id=acc_id,
+                    email=acc.get("email") or "",
+                    access_token=str(acc.get("access_token") or "").strip(),
+                    trigger="manual_bulk",
+                    trial_days=data.get("trial_days"),
+                )
+            except Exception as exc:
+                failed.append({"id": acc_id, "email": acc.get("email") or "", "error": f"{type(exc).__name__}: {str(exc)[:200]}"})
+                continue
+            item = _activation_response_item(queued, acc)
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "started": started, "started_count": len(started),
+            "busy": busy, "busy_count": len(busy),
+            "failed": failed, "failed_count": len(failed),
+            "skipped": skipped, "skipped_count": len(skipped),
+            "queue": momo_activation_service.queue_settings(),
         }), 202
 
     @app.post("/api/accounts/codex-agent")
@@ -3214,6 +3725,12 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "无更新内容"}), 400
         try:
             result = config_editor.update_config(updates)
+        except ValueError as exc:
+            # 表单数字为空/非法时返回可读的 400，而不是把底层 TypeError
+            # 或 ValueError 当成服务器故障；空数字由 config_editor 写空 .env，
+            # 这里主要处理非数字文本、NaN 等非法输入。
+            logger.warning("配置值无效: %s", exc)
+            return jsonify({"ok": False, "error": f"ValueError: {exc}"}), 400
         except Exception as exc:
             logger.exception("配置写入失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500

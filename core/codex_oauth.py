@@ -191,7 +191,7 @@ def _account_registration_password(email: str) -> str:
         is_chatgpt_material = line_format == "chatgpt_api" or (
             email_source == "generic_api" and bool(str(account.get("code_url") or "").strip())
         )
-        if is_chatgpt_material:
+        if is_chatgpt_material or line_format in {"chatgpt_api_no_code_url", "chatgpt_no_code_url"}:
             return str(account.get("password") or "").strip()
         return ""
     except Exception:

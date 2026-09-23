@@ -57,6 +57,18 @@ class AccountCredentialHelperTests(unittest.TestCase):
             "",
         )
 
+    @patch("core.codex_oauth.db.get_account_by_email")
+    def test_no_code_url_import_uses_chatgpt_password(self, get_account):
+        get_account.return_value = {
+            "password": "chatgpt-password",
+            "account_line_format": "chatgpt_api_no_code_url",
+            "totp_secret": "JBSWY3DPEHPK3PXP",
+        }
+        self.assertEqual(
+            codex_oauth._account_registration_password("user@example.com"),
+            "chatgpt-password",
+        )
+
 
 class PasswordMfaFlowTests(unittest.TestCase):
     def test_password_flow_issues_and_verifies_totp(self):

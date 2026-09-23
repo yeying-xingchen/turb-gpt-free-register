@@ -49,6 +49,41 @@ class AccountImportParserTests(unittest.TestCase):
         self.assertEqual(records[0]["refresh_token"], "refresh-token")
         self.assertEqual(records[0]["access_token"], "access-token")
 
+    def test_parses_chatgpt_account_without_code_url(self):
+        text = "user@example.com----chatgpt-password----JBSWY3DPEHPK3PXP----access-token"
+
+        records, errors = account_import.parse_account_text(text)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["access_token"], "access-token")
+        self.assertEqual(records[0]["password"], "chatgpt-password")
+        self.assertEqual(records[0]["registration_password"], "chatgpt-password")
+        self.assertEqual(records[0]["totp_secret"], "JBSWY3DPEHPK3PXP")
+        self.assertEqual(records[0]["account_line_format"], "chatgpt_api_no_code_url")
+        self.assertNotIn("code_url", records[0])
+        self.assertNotIn("email_source", records[0])
+        self.assertEqual(records[0]["material_line"], "user@example.com----chatgpt-password----JBSWY3DPEHPK3PXP")
+
+    def test_parses_chatgpt_account_with_empty_code_url_slot(self):
+        text = "user@example.com----chatgpt-password----JBSWY3DPEHPK3PXP--------access-token"
+
+        records, errors = account_import.parse_account_text(text)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(records[0]["access_token"], "access-token")
+        self.assertEqual(records[0]["account_line_format"], "chatgpt_api_no_code_url")
+        self.assertNotIn("code_url", records[0])
+
+    def test_rejects_url_in_last_slot_without_access_token(self):
+        records, errors = account_import.parse_account_text(
+            "user@example.com----chatgpt-password----JBSWY3DPEHPK3PXP----https://mail.example.test/pick"
+        )
+
+        self.assertEqual(records, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("URL 放在第二段", errors[0]["reason"])
+
     def test_promotes_generic_password_to_registration_password(self):
         records, errors = account_import.parse_account_text(
             "user@example.com----chatgpt-password----JBSWY3DPEHPK3PXP----"
@@ -87,6 +122,34 @@ class AccountImportParserTests(unittest.TestCase):
 
 
 class AccountImportStorageTests(unittest.TestCase):
+    def test_import_without_code_url_keeps_login_credentials_without_pool_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            accounts_path = root / "accounts.json"
+            generic_path = root / "generic.json"
+            with patch.object(db, "_ACCOUNTS_JSON", accounts_path), \
+                 patch.object(db, "_LEGACY_ACCOUNTS_JSON", root / "legacy-accounts.json"), \
+                 patch.object(db, "_ACCOUNTS_TXT", root / "accounts.txt"), \
+                 patch.object(db, "_TOKENS_TXT", root / "tokens.txt"), \
+                 patch.object(db, "_VIEWER_HTML", root / "viewer.html"), \
+                 patch.object(db, "_GENERIC_API_EMAIL_JSON", generic_path), \
+                 patch.object(db, "_GENERIC_API_EMAIL_TXT", root / "generic.txt"):
+                result = db.import_registered_accounts([{
+                    "email": "manual@example.com",
+                    "access_token": "access-token",
+                    "password": "chatgpt-password",
+                    "registration_password": "chatgpt-password",
+                    "totp_secret": "JBSWY3DPEHPK3PXP",
+                    "account_line_format": "chatgpt_api_no_code_url",
+                    "material_line": "manual@example.com----chatgpt-password----JBSWY3DPEHPK3PXP",
+                }])
+
+                self.assertEqual(result["inserted_count"], 1)
+                account = db.get_account_by_email("manual@example.com")
+                self.assertEqual(account["account_line_format"], "chatgpt_api_no_code_url")
+                self.assertEqual(account["copy_line"], "manual@example.com----chatgpt-password----JBSWY3DPEHPK3PXP----access-token")
+                self.assertIsNone(db.get_generic_api_email_by_email("manual@example.com"))
+
     def test_import_with_code_url_links_generic_api_pool(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

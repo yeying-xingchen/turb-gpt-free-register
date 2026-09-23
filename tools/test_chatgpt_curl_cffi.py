@@ -39,6 +39,7 @@ from urllib.parse import quote
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from config.proxy import redact_proxy_url  # noqa: E402
 from core.session import BrowserSession  # noqa: E402
 
 logger = logging.getLogger("chatgpt_curl_cffi_test")
@@ -166,7 +167,7 @@ def _try_json(text: str) -> Any:
 
 def _print_profile(env: BrowserSession) -> None:
     p = env.browser_profile or {}
-    logger.info("[指纹] proxy=%s", env.proxy if env.proxy else "<direct>")
+    logger.info("[指纹] proxy=%s", redact_proxy_url(env.proxy) if env.proxy else "<direct>")
     logger.info("[指纹] device_id=%s", env.device_id)
     logger.info("[指纹] ua=%s", p.get("user_agent"))
     logger.info("[指纹] accept_language=%s", p.get("accept_language"))

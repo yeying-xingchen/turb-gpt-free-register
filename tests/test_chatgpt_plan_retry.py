@@ -74,6 +74,15 @@ class ChatgptPlanRetryTests(unittest.TestCase):
     def setUp(self):
         _PlanSession.created = []
 
+    def test_route_normalizes_explicit_legacy_proxy_and_masks_credentials(self):
+        route = plan.resolve_plan_check_route(
+            explicit_proxy="proxy.example:8080:route-user:route-secret",
+        )
+        self.assertEqual(route["proxy"], "http://route-user:route-secret@proxy.example:8080")
+        self.assertEqual(route["proxy_used"], "http://***:***@proxy.example:8080")
+        self.assertNotIn("route-user", route["proxy_used"])
+        self.assertNotIn("route-secret", route["proxy_used"])
+
     def test_403_retries_in_same_session_with_complete_frontend_headers(self):
         claims = {
             "payload": {}, "email": "one@example.com", "account_id": "acc-1",

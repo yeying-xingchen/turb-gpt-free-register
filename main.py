@@ -16,6 +16,7 @@ from config import twofa as _twofa_cfg
 from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
+from config.proxy import redact_proxy_url
 from core.session import BrowserSession
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
@@ -229,9 +230,20 @@ def run_registration(
             batch_dir=batch_dir,
             on_email_acquired=on_email_acquired,
         )
+    if driver_mode in ("playwright", "pw", "local_playwright", "local-playwright"):
+        from core.playwright_auth import run_playwright_registration
+        return run_playwright_registration(
+            email=email,
+            name=name,
+            birthday=birthday or generate_random_birthday(),
+            proxy=proxy,
+            otp_code=otp_code,
+            batch_dir=batch_dir,
+            on_email_acquired=on_email_acquired,
+        )
     if driver_mode not in ("protocol", "api", "http"):
         raise RuntimeError(
-            f"不支持的 REGISTRATION_DRIVER={driver_mode!r}，可选 protocol / roxy / cloak / browser_use / skyvern"
+            f"不支持的 REGISTRATION_DRIVER={driver_mode!r}，可选 protocol / roxy / cloak / browser_use / skyvern / playwright"
         )
 
     # 纯协议驱动没有“邮箱输入框”可等待，因此在创建 BrowserSession 前领取。
@@ -248,18 +260,8 @@ def run_registration(
     # 创建浏览器会话（proxy=None 时自动从 config.PROXY_POOL 随机抽一个）
     session = BrowserSession(proxy=proxy)
 
-    # 从代理 URL 中抽取 sid 段做日志，避免把账号密码完整打印
-    proxy_label = "无"
-    if session.proxy:
-        # 形如 socks5h://user-region-JP-sid-XXXX-t-5:pass@host:port
-        try:
-            sid_part = next(
-                (seg for seg in session.proxy.split("@")[0].split("-") if len(seg) == 8),
-                "***",
-            )
-            proxy_label = f"{session.proxy.split('://')[0]}://...sid-{sid_part}...@{session.proxy.split('@')[-1]}"
-        except Exception:
-            proxy_label = "已配置"
+    # 统一使用安全摘要记录代理，避免用户名/密码进入日志。
+    proxy_label = redact_proxy_url(session.proxy) if session.proxy else "无"
 
     if not birthday:
         birthday = generate_random_birthday()

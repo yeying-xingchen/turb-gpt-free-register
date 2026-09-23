@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
+from config.proxy import normalize_proxy_url, redact_proxy_url
 from core.session import BrowserSession
 
 logger = logging.getLogger(__name__)
@@ -35,18 +36,7 @@ def normalize_token(token: str) -> str:
 
 def _mask_proxy(proxy: str) -> str:
     """返回可用于日志/API 结果的代理摘要，不泄露用户名和密码。"""
-    value = str(proxy or "").strip()
-    if not value:
-        return ""
-    try:
-        parsed = urlparse(value if "://" in value else f"//{value}")
-        host = parsed.hostname or ""
-        port = f":{parsed.port}" if parsed.port else ""
-        scheme = f"{parsed.scheme}://" if parsed.scheme else ""
-        auth = "***:***@" if parsed.username or parsed.password else ""
-        return f"{scheme}{auth}{host}{port}" or "***"
-    except Exception:
-        return "***"
+    return redact_proxy_url(proxy) or "***"
 
 
 def _local_proxy_status(proxy: str) -> tuple[bool, bool, str | None]:
@@ -55,7 +45,8 @@ def _local_proxy_status(proxy: str) -> tuple[bool, bool, str | None]:
     if not value:
         return False, False, None
     try:
-        parsed = urlparse(value if "://" in value else f"//{value}")
+        value = normalize_proxy_url(value)
+        parsed = urlparse(value)
         host = parsed.hostname or ""
         is_loopback = host.lower() == "localhost"
         if not is_loopback:
@@ -82,7 +73,8 @@ def resolve_plan_check_route(explicit_proxy: Optional[str] = None) -> dict:
     explicit_proxy 不是 None 时表示 API 调用方明确覆盖配置；空字符串代表直连。
     """
     if explicit_proxy is not None:
-        selected = str(explicit_proxy or "").strip()
+        raw_selected = str(explicit_proxy or "").strip()
+        selected = normalize_proxy_url(raw_selected) if raw_selected else ""
         return {
             "proxy": selected,
             "proxy_mode": "request",
@@ -105,8 +97,10 @@ def resolve_plan_check_route(explicit_proxy: Optional[str] = None) -> dict:
             "proxy_fallback_reason": None,
         }
 
-    selected = str(getattr(proxy_cfg, "PLAN_CHECK_PROXY", "") or "").strip()
-    if not selected:
+    raw_selected = str(getattr(proxy_cfg, "PLAN_CHECK_PROXY", "") or "").strip()
+    if raw_selected:
+        selected = normalize_proxy_url(raw_selected)
+    else:
         selected = str(proxy_cfg.pick_proxy() or "").strip()
     if not selected:
         if mode == "proxy":

@@ -113,6 +113,8 @@ from config.proxy import (
     PLAN_CHECK_MIN_INTERVAL,
     PLAN_CHECK_JITTER,
     pick_proxy,
+    normalize_proxy_url,
+    redact_proxy_url,
     PROXY,
 )
 
@@ -163,6 +165,21 @@ from config.extract_link import (
     EXTRACT_LINK_QUEUE_LIMIT,
     EXTRACT_LINK_REQUEST_TIMEOUT,
     EXTRACT_LINK_EVENT_TIMEOUT,
+)
+
+# ---------- MoMo 一键开通 ----------
+from config.momo_activation import (
+    MOMO_ACTIVATION_ENABLED,
+    MOMO_ACTIVATION_API_BASE,
+    MOMO_ACTIVATION_AUTO_PAY,
+    MOMO_ACTIVATION_PAYMENT_CDK,
+    MOMO_ACTIVATION_ENTRY_PROXIES,
+    MOMO_ACTIVATION_TIMEOUT,
+    MOMO_ACTIVATION_TRIAL_DAYS,
+    MOMO_ACTIVATION_POLL_INTERVAL,
+    MOMO_ACTIVATION_MAX_WAIT,
+    MOMO_ACTIVATION_WORKERS,
+    MOMO_ACTIVATION_QUEUE_LIMIT,
 )
 
 # ---------- 注册默认信息 ----------
@@ -248,9 +265,11 @@ _RELOADABLE_SUBMODULES = (
     "config.cloakbrowser",
     "config.browser_use",
     "config.skyvern",
+    "config.playwright",
     "config.flow_trigger",
     "config.codex",
     "config.extract_link",
+    "config.momo_activation",
     "config.payment",
     "config.sub2api",
     "config.humanize",
@@ -283,9 +302,9 @@ def reload_all() -> list[str]:
 def _refresh_top_level_constants() -> None:
     """把刚 reload 的子模块的常量重新拷一份到 config 包顶层。"""
     import config as _self
-    from config import browser, openai_protocol, proxy as _proxy, register, payment, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger
+    from config import browser, openai_protocol, proxy as _proxy, register, payment, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, playwright, codex, extract_link, sub2api, humanize, flow_trigger
     # 简单粗暴：枚举一遍重要常量，覆盖到 _self
-    for src in (browser, openai_protocol, _proxy, register, payment, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger):
+    for src in (browser, openai_protocol, _proxy, register, payment, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, playwright, codex, extract_link, sub2api, humanize, flow_trigger):
         for k in dir(src):
             if k.isupper() or k in ("pick_proxy", "pick_browser_profile", "build_browser_environment", "validate_browser_profile"):
                 setattr(_self, k, getattr(src, k))
@@ -317,7 +336,7 @@ __all__ = [
     "PROXY_POOL", "PLAN_CHECK_PROXY_MODE", "PLAN_CHECK_PROXY",
     "PLAN_CHECK_TIMEOUT", "PLAN_CHECK_MAX_ATTEMPTS", "PLAN_CHECK_RETRY_DELAY",
     "PLAN_CHECK_REGISTRATION_RECHECK_DELAY", "PLAN_CHECK_WORKERS", "PLAN_CHECK_QUEUE_LIMIT",
-    "PLAN_CHECK_MIN_INTERVAL", "PLAN_CHECK_JITTER", "pick_proxy", "PROXY",
+    "PLAN_CHECK_MIN_INTERVAL", "PLAN_CHECK_JITTER", "pick_proxy", "normalize_proxy_url", "redact_proxy_url", "PROXY",
     # DJB / extract link
     "EXTRACT_LINK_BACKEND", "EXTRACT_LINK_API_BASE", "EXTRACT_LINK_CDK",
     "DJB_API_BASE", "DJB_CARD_CODE", "DJB_PROXIES", "DJB_EXIT_PROXIES",
@@ -328,6 +347,12 @@ __all__ = [
     "PAY153_POLL_INTERVAL_MS", "PAY153_POLL_TIMEOUT", "EXTRACT_LINK_TYPE",
     "EXTRACT_LINK_WORKERS", "EXTRACT_LINK_QUEUE_LIMIT",
     "EXTRACT_LINK_REQUEST_TIMEOUT", "EXTRACT_LINK_EVENT_TIMEOUT",
+    # MoMo 一键开通
+    "MOMO_ACTIVATION_ENABLED", "MOMO_ACTIVATION_API_BASE", "MOMO_ACTIVATION_AUTO_PAY",
+    "MOMO_ACTIVATION_PAYMENT_CDK", "MOMO_ACTIVATION_ENTRY_PROXIES",
+    "MOMO_ACTIVATION_TIMEOUT", "MOMO_ACTIVATION_TRIAL_DAYS",
+    "MOMO_ACTIVATION_POLL_INTERVAL", "MOMO_ACTIVATION_MAX_WAIT",
+    "MOMO_ACTIVATION_WORKERS", "MOMO_ACTIVATION_QUEUE_LIMIT",
     # payment method qualification
     "PAYMENT_QUALIFICATION_PATH", "PAYMENT_QUALIFICATION_API_BASE",
     "PAYMENT_QUALIFICATION_API_PATH", "PAYMENT_QUALIFICATION_API_KEY",

@@ -65,7 +65,12 @@ def _is_retryable_reauth_error(exc: BaseException) -> bool:
     return any(hint in text for hint in _RETRYABLE_REAUTH_HINTS)
 
 
-def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
+def _trigger_reauth_with_retry(
+    session: BrowserSession,
+    email: str,
+    *,
+    callback_url: str | None = None,
+) -> str:
     """对 CSRF + signin 阶段的临时故障执行有限指数退避重试。"""
     from config import twofa as _twofa_cfg
 
@@ -79,7 +84,17 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
 
     for attempt in range(1, max_attempts + 1):
         try:
-            auth_url = _trigger_reauth(session, email)
+            if callback_url is None:
+                # Keep the legacy setup_2fa call shape compatible with older
+                # test doubles/integrations; its default target remains the
+                # TOTP enrollment route.
+                auth_url = _trigger_reauth(session, email)
+            else:
+                auth_url = _trigger_reauth(
+                    session,
+                    email,
+                    callback_url=callback_url,
+                )
             if attempt > 1:
                 logger.info("[2FA] 重认证发起重试成功：attempt=%s/%s", attempt, max_attempts)
             return auth_url
@@ -107,7 +122,12 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
     raise last_exc
 
 
-def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
+def _follow_reauth_with_retry(
+    session: BrowserSession,
+    auth_url: str,
+    *,
+    warm_auth_document: bool = True,
+) -> str:
     """重试跨站 authorize 导航；首个 403 下发的 CF Cookie 可供下一轮复用。"""
     from config import twofa as _twofa_cfg
 
@@ -121,7 +141,8 @@ def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
     # 新建协议会话此前会从 ChatGPT 直接命中复杂 authorize URL，auth 域没有
     # document/locale/CF Cookie 上下文。先用简单页面做 best-effort 预热；预热
     # 和正式 authorize 仍严格复用同一个 BrowserSession/deviceId/Cookie Jar。
-    _warm_auth_document_for_reauth(session)
+    if warm_auth_document:
+        _warm_auth_document_for_reauth(session)
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -356,7 +377,12 @@ def fetch_session(session: BrowserSession) -> dict:
     return data
 
 
-def _trigger_reauth(session: BrowserSession, email: str) -> str:
+def _trigger_reauth(
+    session: BrowserSession,
+    email: str,
+    *,
+    callback_url: str | None = None,
+) -> str:
     """
     步骤2-3: 发起密码重认证，返回 OpenAI authorize URL。
     重定向链会自动触发邮箱发送一份新的 OTP（用于 2FA 重认证）。
@@ -368,13 +394,20 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     csrf_token = csrf_resp.json()["csrfToken"]
     logger.info(f"[2FA] 重认证 CSRF: {csrf_token[:20]}...")
 
-    # POST /api/auth/signin/openai 带 reauth 参数
+    # POST /api/auth/signin/openai 带 reauth 参数。除 reauth 专用字段外，
+    # 其余上下文与当前 ChatGPT 登录链保持一致；旧的 passkey capabilities
+    # 和短 ccaps 值会让 authorize 链更容易落入边缘错误。
     query = {
         "connection": "password",
         "login_hint": email,
         "reauth": "password",
         "max_age": "0",
+        "prompt": "login",
         "ext-oai-did": session.device_id,
+        "auth_session_logging_id": session.auth_session_logging_id,
+        "screen_hint": "login_or_signup",
+        "ccaps": "login_methods chatgpt_login_finalizer_v1",
+        "auth_return_target_category": "chatgpt_home",
     }
     signin_url = "https://chatgpt.com/api/auth/signin/openai?" + urlencode(query)
 
@@ -383,7 +416,9 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     headers["origin"] = "https://chatgpt.com"
 
     body = urlencode({
-        "callbackUrl": "https://chatgpt.com/?action=enable&factor=totp",
+        # 2FA setup needs the enable/factor target; liveness only refreshes the
+        # ChatGPT session and must return to the normal home route.
+        "callbackUrl": str(callback_url or "https://chatgpt.com/?action=enable&factor=totp"),
         "csrfToken": csrf_token,
         "json": "true",
     })
@@ -394,6 +429,14 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     auth_url = resp.json().get("url")
     if not auth_url:
         raise RuntimeError(f"未拿到 reauth authorize URL: {resp.text}")
+    # Reauth shares the same login_or_signup context as the normal Web signin
+    # route.  Normalize the returned URL too, because older NextAuth responses
+    # may still carry the obsolete passkey/caps parameters.
+    try:
+        from core.chatgpt_auth import _ensure_authorize_context
+        auth_url = _ensure_authorize_context(str(auth_url), session, email)
+    except Exception:
+        auth_url = str(auth_url)
     return auth_url
 
 
@@ -406,8 +449,17 @@ def _follow_reauth(session: BrowserSession, auth_url: str) -> str:
     logger.info("[2FA] 跟随 authorize URL，触发 OTP 发送...")
     resp = session.get(auth_url, headers=headers, allow_redirects=True)
     resp.raise_for_status()
-    logger.info(f"[2FA] 落点 URL: {resp.url}")
-    return str(getattr(resp, "url", "") or "")
+    # The auth document navigation establishes a fresh browser navigation
+    # context.  Rotate it before the OTP API call, matching the normal
+    # authorize/email-verification flow and avoiding a stale document id.
+    try:
+        from core.openai_auth import _rotate_document_navigation_id
+        _rotate_document_navigation_id(session)
+    except Exception:
+        pass
+    final_url = str(getattr(resp, "url", "") or "")
+    logger.info(f"[2FA] 落点 URL: {final_url}")
+    return final_url
 
 
 def _validate_reauth_otp(session: BrowserSession, code: str) -> str:

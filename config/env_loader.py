@@ -23,6 +23,7 @@ EXPLICIT_EMPTY_LIST_ENV_KEYS = {
     "PAYMENT_METHOD_CHECK_PROXIES",
     "DJB_PROXIES",
     "DJB_EXIT_PROXIES",
+    "MOMO_ACTIVATION_ENTRY_PROXIES",
 }
 
 # 统一管理：env key -> 说明（.env.example 用）

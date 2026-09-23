@@ -10,6 +10,7 @@ from pathlib import Path
 
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
+from config.proxy import normalize_proxy_url
 from core import db
 from core.account_export import setup_2fa
 from core.session import BrowserSession
@@ -49,10 +50,10 @@ def _normalize_proxy(proxy: str | None) -> str | None:
     text = str(proxy or "").strip()
     if not text:
         return None
-    low = text.lower()
-    if low.startswith(("http://", "https://", "socks5://", "socks5h://", "socks4://", "socks4a://")):
-        return text
-    return None
+    try:
+        return normalize_proxy_url(text)
+    except ValueError:
+        return None
 
 
 def is_running(acc_id: int) -> bool:

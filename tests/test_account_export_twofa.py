@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import unittest
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
 import core.account_export as account_export
@@ -17,7 +18,82 @@ class _CircuitSession:
         self.blocked_reason = ""
 
 
+class _ReauthSession:
+    device_id = "did-reauth"
+    auth_session_logging_id = "log-reauth"
+
+    def __init__(self):
+        self.requests = []
+        self.rotated = 0
+
+    def get_nextauth_headers(self, **_kwargs):
+        return {"accept": "application/json"}
+
+    def get_auth_navigate_headers(self, **kwargs):
+        return dict(kwargs)
+
+    def get_auth_headers(self, **kwargs):
+        return dict(kwargs)
+
+    def get(self, url, **kwargs):
+        self.requests.append(("GET", url, kwargs))
+        if url.endswith("/api/auth/csrf"):
+            return _Response(200, {"csrfToken": "csrf-value"}, url)
+        return _Response(200, {}, "https://auth.openai.com/email-verification")
+
+    def post(self, url, **kwargs):
+        self.requests.append(("POST", url, kwargs))
+        return _Response(200, {"url": "https://auth.openai.com/api/accounts/authorize?state=test"}, url)
+
+    def rotate_document_navigation_id(self):
+        self.rotated += 1
+
+
+class _Response:
+    def __init__(self, status_code, data, url=""):
+        self.status_code = status_code
+        self._data = data
+        self.url = url
+        self.text = ""
+
+    def json(self):
+        return self._data
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
 class AccountExportTwofaTests(unittest.TestCase):
+    def test_reauth_context_uses_liveness_callback_and_current_web_params(self):
+        session = _ReauthSession()
+        auth_url = account_export._trigger_reauth(
+            session,
+            "user@example.com",
+            callback_url="https://chatgpt.com/",
+        )
+
+        signin = next(item for item in session.requests if item[0] == "POST")
+        parsed = urlparse(signin[1])
+        query = parse_qs(parsed.query)
+        body = parse_qs(signin[2]["data"])
+        self.assertEqual(auth_url, "https://auth.openai.com/api/accounts/authorize?state=test&ext-oai-did=did-reauth&auth_session_logging_id=log-reauth&screen_hint=login_or_signup&login_hint=user%40example.com&ccaps=login_methods+chatgpt_login_finalizer_v1&auth_return_target_category=chatgpt_home")
+        self.assertNotIn("ext-passkey-client-capabilities", query)
+        self.assertEqual(query["ccaps"], ["login_methods chatgpt_login_finalizer_v1"])
+        self.assertEqual(query["auth_return_target_category"], ["chatgpt_home"])
+        self.assertEqual(body["callbackUrl"], ["https://chatgpt.com/"])
+
+    def test_follow_reauth_rotates_document_navigation_id(self):
+        session = _ReauthSession()
+        with patch.object(account_export, "_warm_auth_document_for_reauth"):
+            final_url = account_export._follow_reauth(
+                session,
+                "https://auth.openai.com/api/accounts/authorize?state=test",
+            )
+
+        self.assertEqual(final_url, "https://auth.openai.com/email-verification")
+        self.assertEqual(session.rotated, 1)
+
     def test_authorize_403_reuses_cf_cookie_and_retries(self):
         session = _CircuitSession()
         calls = []

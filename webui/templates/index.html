@@ -1727,7 +1727,40 @@
     .account-import-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 20px 18px; border-top: 1px solid #ebeef5; background: #fafbfc; }
     @media (max-width: 600px) { .account-import-options { grid-template-columns: 1fr; } }
 
-    /* ---- 新版配置布局（追加在概览下方） ---- */
+    /* ---- 账号批量导出弹窗 ---- */
+     #accountExportModal:not(.hidden) {
+       position: fixed; inset: 0; z-index: 1250; display: flex; align-items: center;
+       justify-content: center; padding: 24px; box-sizing: border-box; background: rgba(15,23,42,.45);
+     }
+     .account-export-dialog {
+       width: min(760px, 100%); max-height: min(900px, calc(100vh - 48px));
+       display: flex; flex-direction: column; background: #fff; border-radius: 12px;
+       border: 1px solid #ebeef5; box-shadow: 0 24px 70px rgba(15,23,42,.28); overflow: hidden;
+     }
+     .account-export-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+     .account-export-check { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; color: #606266; }
+     .account-export-check input { width: auto; min-height: auto; margin: 0; }
+     .account-export-sensitive { color: #b45309; }
+     .account-export-hint { padding: 10px 12px; border-radius: 8px; background: #fff7e6; color: #8a5a00; font-size: 12px; line-height: 1.5; }
+     @media (max-width: 600px) { .account-export-fields { grid-template-columns: 1fr; } }
+
+     #accountExportModal:not(.hidden) {
+       position: fixed; inset: 0; z-index: 1250; display: flex; align-items: center;
+       justify-content: center; padding: 24px; box-sizing: border-box; background: rgba(15,23,42,.45);
+     }
+     .account-export-dialog {
+       width: min(760px, 100%); max-height: min(900px, calc(100vh - 48px));
+       display: flex; flex-direction: column; background: #fff; border-radius: 12px;
+       border: 1px solid #ebeef5; box-shadow: 0 24px 70px rgba(15,23,42,.28); overflow: hidden;
+     }
+     .account-export-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+     .account-export-check { display: flex; align-items: center; gap: 8px; min-height: 32px; font-size: 13px; color: #606266; }
+     .account-export-check input { width: auto; min-height: auto; margin: 0; }
+     .account-export-sensitive { color: #b45309; }
+     .account-export-hint { padding: 10px 12px; border-radius: 8px; background: #fff7e6; color: #8a5a00; font-size: 12px; line-height: 1.5; }
+     @media (max-width: 600px) { .account-export-fields { grid-template-columns: 1fr; } }
+
+     /* ---- 新版配置布局（追加在概览下方） ---- */
     .config-layout-v2 {
       margin-top: 16px;
       display: grid;
@@ -2039,6 +2072,479 @@
       .config-overview-v2-title { font-size: 24px; }
     }
 
+    /* ============================================================
+       Polished visual layer
+       Keeps the existing DOM and interactions, but gives the console
+       a calmer hierarchy, clearer states, and a responsive shell.
+       ============================================================ */
+    :root {
+      --bg: #f4f6fb;
+      --surface: #ffffff;
+      --soft: #f8f9ff;
+      --text: #182237;
+      --muted: #718096;
+      --line: #e4e8f1;
+      --blue: #5968f2;
+      --blue-strong: #4654df;
+      --green: #1fa77a;
+      --red: #e05252;
+      --amber: #d58a2b;
+      --sidebar-width: 248px;
+      --sidebar-accent: #5968f2;
+      --sidebar-accent-soft: #eef0ff;
+      --shadow-sm: 0 2px 10px rgba(28, 39, 75, .05);
+      --shadow-md: 0 16px 38px rgba(28, 39, 75, .08);
+      --radius-sm: 10px;
+      --radius-md: 16px;
+      --radius-lg: 20px;
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 92% -6%, rgba(113, 104, 246, .12), transparent 28rem),
+        radial-gradient(circle at 2% 96%, rgba(72, 145, 255, .08), transparent 26rem),
+        var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: -1;
+      background-image: linear-gradient(rgba(89, 104, 242, .025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(89, 104, 242, .025) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent 72%);
+    }
+
+    main {
+      width: min(calc(100% - var(--page-gutter) * 2), 1680px);
+      max-width: 1680px;
+      margin: 28px auto 60px;
+      gap: 20px;
+    }
+    main > div:not(.hidden) { gap: 20px; }
+    .register-overview { padding: 4px 2px 0; }
+    .register-title {
+      margin-bottom: 16px;
+      color: #172039;
+      font-size: clamp(24px, 2.1vw, 30px);
+      font-weight: 800;
+      letter-spacing: -.035em;
+    }
+
+    .app-sidebar {
+      width: var(--sidebar-width);
+      background: rgba(255, 255, 255, .86);
+      border-right: 1px solid rgba(223, 228, 241, .9);
+      box-shadow: 10px 0 34px rgba(30, 42, 80, .035);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }
+    .app-sidebar::before {
+      content: "";
+      position: absolute;
+      top: 72px;
+      right: -1px;
+      width: 1px;
+      height: 140px;
+      background: linear-gradient(180deg, rgba(89,104,242,.65), transparent);
+    }
+    .sidebar-brand {
+      height: 78px;
+      padding: 0 22px;
+      border-bottom-color: #edf0f7;
+    }
+    .sidebar-brand-icon { width: 34px; height: 37px; filter: drop-shadow(0 7px 12px rgba(89,104,242,.2)); }
+    .sidebar-brand-title {
+      color: #19223a;
+      font-size: 16px;
+      letter-spacing: -.02em;
+    }
+    .sidebar-nav { padding: 24px 14px 20px; gap: 6px; }
+    .app-sidebar .sidebar-nav button,
+    .app-sidebar .sidebar-nav button.sidebar-item {
+      min-height: 46px;
+      padding: 0 14px;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      color: #68748b;
+      font-weight: 650;
+      transition: color .18s ease, background .18s ease, border-color .18s ease, transform .18s ease, box-shadow .18s ease;
+    }
+    .app-sidebar .sidebar-nav button:hover {
+      color: #283451;
+      background: #f7f8fd;
+      border-color: #edf0f7;
+      transform: translateX(2px);
+    }
+    .app-sidebar .sidebar-nav button.active {
+      color: var(--sidebar-accent);
+      background: linear-gradient(100deg, #eef0ff 0%, #f5f4ff 100%);
+      border-color: #dfe2ff;
+      box-shadow: 0 8px 18px rgba(89, 104, 242, .09), inset 3px 0 0 var(--sidebar-accent);
+    }
+    .sidebar-item-icon { width: 20px; height: 20px; }
+    .sidebar-footer {
+      padding: 14px;
+      border-top-color: #edf0f7;
+      background: linear-gradient(180deg, rgba(249,250,255,.25), rgba(245,247,253,.8));
+    }
+    .sidebar-footer a,
+    .sidebar-logout button {
+      min-height: 40px;
+      border: 1px solid transparent;
+      color: #78839a;
+      border-radius: 11px;
+      transition: color .18s ease, background .18s ease, border-color .18s ease;
+    }
+    .sidebar-footer a:hover {
+      color: var(--sidebar-accent);
+      background: var(--sidebar-accent-soft);
+      border-color: #dfe2ff;
+    }
+    .sidebar-logout button:hover { background: #fff2f2; border-color: #f9d7d7; }
+
+    .stats { gap: 16px; }
+    .stat {
+      position: relative;
+      isolation: isolate;
+      min-height: 116px;
+      padding: 18px;
+      overflow: hidden;
+      border: 1px solid rgba(225, 229, 241, .95);
+      border-radius: var(--radius-md);
+      background: rgba(255,255,255,.9);
+      box-shadow: var(--shadow-sm);
+      transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+    }
+    .stat::after {
+      content: "";
+      position: absolute;
+      right: -28px;
+      bottom: -40px;
+      width: 108px;
+      height: 108px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .035;
+      z-index: -1;
+    }
+    .stat:hover { transform: translateY(-3px); box-shadow: var(--shadow-md); border-color: #d8ddf6; }
+    .stat-top span { color: #7b879d; font-size: 13px; font-weight: 650; }
+    .stat-icon { width: 36px; height: 36px; border-radius: 11px; }
+    .stat-icon svg { width: 18px; height: 18px; }
+    .stat strong { margin-top: 15px; color: #202a43; font-size: 28px; font-weight: 800; letter-spacing: -.04em; }
+    .stat-icon--accounts, .stat-icon--total { color: #5968f2; background: #eef0ff; }
+    .stat-icon--available { color: #1fa77a; background: #eafaf4; }
+    .stat-icon--used { color: #d58a2b; background: #fff5e6; }
+    .stat-icon--failed { color: #e05252; background: #fff0f0; }
+
+    .jobs-panel-v2,
+    .accounts-panel-v2,
+    .codex-panel-v2,
+    .outlook-panel-v2 {
+      border-color: rgba(224, 229, 241, .95);
+      border-radius: var(--radius-lg);
+      background: rgba(255,255,255,.92);
+      box-shadow: var(--shadow-md);
+    }
+    .jobs-toolbar-v2,
+    .accounts-filter-v2,
+    .outlook-filter-v2,
+    .codex-filter-v2 { padding: 18px; }
+    .jobs-toolbar-v2 { border-bottom: 1px solid #edf0f6; }
+    #accountsToolbarV2 { padding: 14px 18px 18px; border-top: 1px solid #edf0f6; }
+    .accounts-filter-v2 { background: linear-gradient(180deg, rgba(250,251,255,.9), rgba(255,255,255,.7)); }
+    .outlook-filter-v2, .codex-filter-v2 { border-bottom: 1px solid #edf0f6; }
+
+    .jobs-tb-btn,
+    .acc-v2-toggle,
+    .acc-v2-date-select-btn,
+    .outlook-v2-select-btn {
+      min-height: 38px;
+      border-radius: 10px;
+      border-color: #dfe4ef;
+      color: #55627a;
+      font-weight: 650;
+      transition: transform .16s ease, box-shadow .16s ease, color .16s ease, background .16s ease, border-color .16s ease;
+    }
+    .jobs-tb-btn:hover:not(:disabled),
+    .acc-v2-toggle:hover,
+    .acc-v2-date-select-btn:hover,
+    .outlook-v2-select-btn:hover {
+      transform: translateY(-1px);
+      border-color: #bbc4f6;
+      color: var(--blue-strong);
+      background: #f7f8ff;
+      box-shadow: 0 5px 12px rgba(89,104,242,.08);
+    }
+    .jobs-tb-btn--primary {
+      color: #fff !important;
+      border-color: var(--blue) !important;
+      background: linear-gradient(135deg, #6875f5, #5260e8) !important;
+      box-shadow: 0 8px 16px rgba(89,104,242,.2);
+    }
+    .jobs-tb-btn--primary:hover:not(:disabled) { background: linear-gradient(135deg, #7480ff, #4654df) !important; box-shadow: 0 10px 20px rgba(89,104,242,.25); }
+    .jobs-tb-btn--good {
+      color: #138565 !important;
+      border-color: #b9e8d7 !important;
+      background: linear-gradient(135deg, #effcf7, #e5f8f1) !important;
+    }
+    .jobs-tb-btn--good:hover:not(:disabled) { color: #0d6f54 !important; border-color: #7dd7bd !important; background: #dff7ee !important; }
+    .jobs-tb-btn--danger {
+      color: #c83f4a !important;
+      border-color: #f3c3c7 !important;
+      background: linear-gradient(135deg, #fff7f7, #fff0f1) !important;
+    }
+    .jobs-tb-btn--danger:hover:not(:disabled) { color: #b52f3b !important; border-color: #ed969d !important; background: #ffe7e9 !important; }
+    .jobs-tb-btn:disabled { opacity: .58; transform: none; box-shadow: none; }
+
+    input, textarea, select {
+      border-color: #dfe4ef;
+      border-radius: 10px;
+      color: #26324d;
+      background: rgba(255,255,255,.96);
+      transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+    }
+    input:hover, textarea:hover, select:hover { border-color: #c7ceeb; }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: #8791f4;
+      box-shadow: 0 0 0 4px rgba(89,104,242,.12);
+      background: #fff;
+    }
+    .accounts-filter-v2 .acc-v2-btn-group,
+    .codex-filter-v2 .acc-v2-btn-group,
+    .outlook-filter-v2 .acc-v2-btn-group,
+    #accountsToolbarV2 .acc-v2-btn-group {
+      border-color: #e6e9f2;
+      border-radius: 12px;
+      background: #fbfcff;
+    }
+    .accounts-filter-v2 .acc-v2-toggle.is-active,
+    #codexToolbarV2 .jobs-tb-btn.is-active {
+      color: var(--blue-strong);
+      border-color: #c5cafb;
+      background: #eef0ff;
+      box-shadow: inset 0 0 0 1px rgba(89,104,242,.05);
+    }
+
+    .jobs-table-v2,
+    .accounts-table-v2,
+    .codex-table-v2,
+    .outlook-table-v2 { font-size: 13px; }
+    .jobs-table-v2 thead th,
+    .accounts-table-v2 thead th,
+    .codex-table-v2 thead th,
+    .outlook-table-v2 thead th {
+      height: 48px;
+      background: #f8f9fe;
+      border-bottom-color: #e8ebf4;
+      color: #7b879d;
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: .02em;
+    }
+    .jobs-table-v2 tbody td,
+    .accounts-table-v2 tbody td,
+    .codex-table-v2 tbody td,
+    .outlook-table-v2 tbody td { border-bottom-color: #eef0f5; }
+    .jobs-table-v2 tbody tr,
+    .accounts-table-v2 tbody tr,
+    .codex-table-v2 tbody tr,
+    .outlook-table-v2 tbody tr { transition: background .16s ease; }
+    .jobs-table-v2 tbody tr:hover td,
+    .accounts-table-v2 tbody tr:hover td,
+    .codex-table-v2 tbody tr:hover td,
+    .outlook-table-v2 tbody tr:hover td { background: #fafbff; }
+    .accounts-table-v2 .acc-v2-email,
+    .codex-table-v2 .acc-v2-email,
+    .outlook-table-v2 .acc-v2-email { color: #283451; }
+    .jobs-table-v2 .jobs-v2-pill,
+    .accounts-table-v2 .pill,
+    .codex-table-v2 .pill,
+    .outlook-table-v2 .pill { border-radius: 999px; font-weight: 700; }
+    .jobs-v2-pager { min-height: 58px; background: #fcfcfe; }
+
+    .config-overview-v2 {
+      position: relative;
+      overflow: hidden;
+      padding: 28px 30px;
+      border-color: #dfe3ff;
+      border-radius: var(--radius-lg);
+      background: linear-gradient(120deg, #eef0ff 0%, #f9f8ff 58%, #fff 100%);
+      box-shadow: var(--shadow-sm);
+    }
+    .config-overview-v2::after {
+      content: "";
+      position: absolute;
+      width: 190px;
+      height: 190px;
+      right: -52px;
+      top: -74px;
+      border-radius: 50%;
+      background: rgba(89,104,242,.1);
+    }
+    .config-overview-v2-title { position: relative; z-index: 1; color: #252f4a; font-size: 30px; }
+    .config-overview-v2-desc { position: relative; z-index: 1; color: #6f7b91; }
+    .config-nav-v2,
+    .config-card-v2,
+    .config-section-v2 {
+      border-color: #e1e5f0;
+      border-radius: var(--radius-md);
+      box-shadow: var(--shadow-sm);
+    }
+    .config-nav-v2 { top: 24px; padding: 16px 12px; }
+    .config-nav-v2-title { color: #8a95aa; letter-spacing: .03em; }
+    .config-nav-v2-item { border: 1px solid transparent; border-radius: 11px; }
+    .config-nav-v2-item:hover { background: #f7f8ff; border-color: #edf0ff; }
+    .config-nav-v2-item.is-active { background: #eef0ff; border-color: #dfe2ff; color: var(--blue-strong); box-shadow: inset 3px 0 0 var(--blue); }
+    .config-card-v2 { background: rgba(255,255,255,.92); }
+    .config-section-v2 {
+      padding: 24px;
+      background: rgba(255,255,255,.92);
+      content-visibility: auto;
+      contain-intrinsic-size: 560px;
+    }
+    .config-section-v2 h3 { color: #252f4a; }
+    .config-section-v2-body label.fld { border-color: #e9ecf4; border-radius: 12px; background: #fcfdff; }
+    .config-subtabs-v2 { border-color: #e6e9f2; background: #fafbff; }
+    .config-subtabs-v2 button.active { background: #eef0ff; color: var(--blue-strong); }
+
+    .banner { border-radius: 11px; line-height: 1.55; }
+    .log { border-radius: 12px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.04); }
+    #toast {
+      right: 24px;
+      bottom: 24px;
+      min-width: 180px;
+      padding: 12px 16px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      background: linear-gradient(135deg, #283451, #1b2439);
+      box-shadow: 0 16px 34px rgba(24,34,55,.24);
+      font-weight: 650;
+    }
+    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #liveLogPanel:not(.hidden),
+    #totpLogPanel:not(.hidden), #emailChangeLogPanel:not(.hidden), #qrPanel:not(.hidden) {
+      border-radius: 18px;
+      box-shadow: 0 0 0 9999px rgba(18, 27, 48, .48), 0 28px 80px rgba(24,34,55,.28);
+      backdrop-filter: blur(8px);
+    }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+      outline: 3px solid rgba(89,104,242,.3);
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 1100px) {
+      :root { --sidebar-width: 220px; }
+      .stat { min-height: 108px; padding: 16px; }
+      .stat strong { font-size: 25px; }
+    }
+    @media (max-width: 760px) {
+      :root { --page-gutter: 14px; }
+      body { padding-left: 0; padding-bottom: 76px; }
+      main { width: calc(100% - var(--page-gutter) * 2); margin: 20px var(--page-gutter) 28px; }
+      .app-sidebar {
+        top: auto;
+        width: 100%;
+        height: 68px;
+        flex-direction: row;
+        border-right: 0;
+        border-top: 1px solid #e3e7f1;
+        box-shadow: 0 -10px 30px rgba(28,39,75,.08);
+      }
+      .app-sidebar::before, .sidebar-brand { display: none; }
+      .sidebar-nav {
+        min-width: 0;
+        padding: 8px;
+        flex-direction: row;
+        align-items: stretch;
+        justify-content: space-around;
+        gap: 4px;
+      }
+      .app-sidebar .sidebar-nav button,
+      .app-sidebar .sidebar-nav button.sidebar-item {
+        min-width: 0;
+        min-height: 50px;
+        flex: 1;
+        justify-content: center;
+        padding: 0 6px;
+        border-radius: 12px;
+      }
+      .sidebar-item-label { display: none; }
+      .sidebar-footer {
+        flex: 0 0 48px;
+        padding: 8px 8px 8px 0;
+        border-top: 0;
+        flex-direction: row;
+        align-items: center;
+        background: transparent;
+      }
+      .sidebar-footer a { display: none; }
+      .sidebar-logout { margin: 0; }
+      .sidebar-logout button { width: 42px; min-height: 42px; justify-content: center; padding: 0; }
+      .sidebar-logout button span { display: none; }
+      .sidebar-footer-icon { width: 18px; height: 18px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .stat { min-height: 96px; padding: 14px; border-radius: 14px; }
+      .stat strong { margin-top: 10px; font-size: 23px; }
+      .stat-icon { width: 32px; height: 32px; }
+      .jobs-toolbar-v2, .accounts-filter-v2, .outlook-filter-v2, .codex-filter-v2 { padding: 14px; }
+      #accountsToolbarV2 { padding: 12px 14px 14px; }
+      .jobs-panel-v2, .accounts-panel-v2, .codex-panel-v2, .outlook-panel-v2 { border-radius: 16px; }
+      .config-layout-v2 { gap: 14px; }
+      .config-nav-v2 { top: 0; }
+      .config-section-v2 { padding: 18px; }
+    }
+    @media (max-width: 480px) {
+      main { margin-top: 14px; }
+      .register-title { font-size: 24px; margin-bottom: 12px; }
+      .config-overview-v2 { padding: 22px 18px; }
+      .config-overview-v2-title { font-size: 25px; }
+      .config-overview-v2-desc { font-size: 12px; }
+      .jobs-tb-field { width: 100%; justify-content: space-between; }
+      .jobs-toolbar-v2 .jobs-tb-btn--primary { width: 100%; }
+      .accounts-filter-v2 .acc-v2-search-wrap,
+      .codex-filter-v2 .acc-v2-search-wrap,
+      .outlook-filter-v2 .acc-v2-search-wrap { flex-basis: 100%; width: 100%; }
+      #toast { right: 14px; bottom: 82px; left: 14px; min-width: 0; text-align: center; }
+      #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #accountImportModal:not(.hidden), #accountExportModal:not(.hidden) {
+        padding: 12px;
+        align-items: flex-end;
+      }
+      .outlook-import-dialog, .account-import-dialog, .account-export-dialog {
+        width: 100%;
+        max-height: calc(100dvh - 24px);
+        border-radius: 18px 18px 14px 14px;
+      }
+      .outlook-import-foot, .account-import-foot, .account-export-foot { flex-wrap: wrap; }
+      .outlook-import-foot .jobs-tb-btn, .account-import-foot .jobs-tb-btn, .account-export-foot .jobs-tb-btn { flex: 1; }
+      .acc-v2-date-select-menu { min-width: 0; width: min(320px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+      .jobs-v2-op, .acc-v2-more-btn { min-height: 36px !important; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
+        scroll-behavior: auto !important;
+      }
+    }
+    /* 隐藏 tab 的复杂表格不参与布局与绘制，切换到 tab 时再恢复。 */
+    #tab-accounts.hidden, #tab-codex.hidden, #tab-outlook.hidden, #tab-config.hidden {
+      content-visibility: hidden;
+      contain: strict;
+      contain-intrinsic-size: 1px 720px;
+    }
+
   </style>
 </head>
 <body>
@@ -2056,7 +2562,7 @@
     </svg>
     <span class="sidebar-brand-title">GPT Registrator</span>
   </div>
-  <nav class="sidebar-nav">
+  <nav class="sidebar-nav" aria-label="页面导航">
     <button type="button" data-tab="register" class="sidebar-item active">
       <svg class="sidebar-item-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M12 5v14M5 12h14"/>
@@ -2306,6 +2812,7 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>
            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPaymentsV2" disabled title="按配置地区查询选中账号可用的 Checkout 支付方式；只读取，不发起支付">查支付方式</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnExtractSelectedLinksV2" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置">提链</button>
+           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnActivateSelectedAccountsV2" disabled title="对选中的 free(可Plus试用) 账号提交 MoMo 自动付款并消耗试用/支付 CDK">MoMo激活</button>
         </div>
         <div class="acc-v2-btn-group">
           <span class="acc-v2-btn-group-title">Agent</span>
@@ -2326,8 +2833,9 @@
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedTokensV2" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedEmailsV2" disabled title="复制选中账号的邮箱，每个账号一行">复制邮箱</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedEmailsV2" disabled title="仅复制选中账号的邮箱地址，不包含 AT/access_token">仅复制邮箱</button>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnExportAccountsV2" title="批量导出选中账号、当前页或当前筛选结果，并自定义字段">批量导出</button>
+           <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载整行TXT</button>
           <button type="button" class="jobs-tb-btn" id="btnArchiveSelectedAccountsV2" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档选中</button>
           <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedAccountsV2" disabled title="删除选中的本地账号/token记录">删除</button>
         </div>
@@ -2568,7 +3076,7 @@
   </div>
 </main>
 
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <div id="outlookImportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="outlookImportTitle">
   <div class="outlook-import-dialog" role="document">
     <div class="outlook-import-head">
@@ -2641,7 +3149,7 @@
     <div class="account-import-head">
       <div class="account-import-head-main">
         <h3 id="accountImportTitle">导入现有账户</h3>
-        <p>支持注册成功账号 JSON，以及文本格式：email----access_token、通用 API 五段账号 email----ChatGPT账号密码----2OTP密码----取码地址----access_token。</p>
+        <p>支持注册成功账号 JSON，以及文本格式：email----access_token、无取码地址四段账号 email----ChatGPT账号密码----2OTP密码----access_token、通用 API 五段账号 email----ChatGPT账号密码----2OTP密码----取码地址----access_token。无取码地址账号无法自动收取邮箱 OTP，可使用已保存密码/TOTP或手动验证码。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseAccountImport" aria-label="关闭">×</button>
     </div>
@@ -2660,6 +3168,7 @@
       </label>
       <label class="account-import-field"><span>或粘贴内容</span>
         <textarea id="accountImportText" placeholder="JSON：账号数组或对象
+无取码地址：email----ChatGPT密码----2OTP密码----access_token
 五段：email----ChatGPT密码----2OTP密码----取码地址----access_token
 简写：email----access_token[----totp_secret]"></textarea>
       </label>
@@ -2668,13 +3177,43 @@
     <div class="account-import-foot"><button type="button" class="jobs-tb-btn" id="btnCancelAccountImport">取消</button><button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitAccountImport">导入账号</button></div>
   </div>
 </div>
+<div id="accountExportModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="accountExportTitle">
+  <div class="account-export-dialog" role="document">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="accountExportTitle">批量导出账号</h3>
+        <p>可只导出邮箱，也可选择密码、2FA 等字段；默认不包含 AT/access_token。导出敏感字段前会再次确认。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseAccountExport" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <div class="account-import-field"><span>导出范围</span>
+        <div class="account-import-options">
+          <label class="account-export-check"><input type="radio" name="accountExportScope" value="selected">已选账号（<b id="accountExportSelectedCount">0</b>）</label>
+          <label class="account-export-check"><input type="radio" name="accountExportScope" value="current_page">当前页账号</label>
+          <label class="account-export-check"><input type="radio" name="accountExportScope" value="filtered" checked>当前筛选结果（最多 5000）</label>
+        </div>
+      </div>
+      <div class="account-import-field"><span>导出字段（可多选，顺序即输出顺序）</span>
+        <div class="account-export-fields" id="accountExportFieldsV2"></div>
+      </div>
+      <div class="account-import-options">
+        <label class="account-import-field"><span>格式</span><select id="accountExportFormatV2"><option value="txt">TXT（每行一条）</option><option value="csv">CSV</option><option value="json">JSON</option></select></label>
+        <label class="account-import-field"><span>分隔符（TXT/CSV）</span><select id="accountExportDelimiterV2"><option value="----">----（四横线）</option><option value=",">逗号 ,</option><option value="|">竖线 |</option><option value="\t">Tab</option></select></label>
+      </div>
+      <label class="account-export-check"><input type="checkbox" id="accountExportHeaderV2">导出标题行（CSV 默认开启）</label>
+      <div class="account-export-hint" id="accountExportSensitiveHintV2">默认仅导出邮箱，不会复制或导出 AT。</div>
+    </div>
+    <div class="outlook-import-foot"><button type="button" class="jobs-tb-btn" id="btnCancelAccountExport">取消</button><button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitAccountExport">生成并下载</button></div>
+  </div>
+</div>
 <div class="body hidden" id="logPanel">
   <h3>任务 #<span id="logJobId"></span> 日志 <button class="btn" id="btnCloseLog" style="float:right;min-height:28px;">关闭</button></h3>
   <div class="log" id="logContent">加载中…</div>
 </div>
 <div id="qrPanel" class="body hidden">
   <h3>支付二维码 <button class="btn" onclick="closeQrModal()">关闭</button></h3>
-  <img id="qrImage" alt="支付二维码">
+  <img id="qrImage" alt="支付二维码" loading="lazy" decoding="async">
   <a id="qrOpenLink" class="qr-link" href="#" target="_blank" rel="noopener noreferrer"></a>
 </div>
 
@@ -2700,6 +3239,73 @@ let JOB_STATUS_COUNTS = {};
 let jobsRenderSignature = '';
 const JOB_SELECTED = new Set();
 let activeLogJob = null, logTimer = null, jobsTimer = null;
+let jobsLoading = false;
+let jobsReloadQueued = false;
+let jobsLoadingPromise = null;
+let outlookRequestSeq = 0;
+let codexRequestSeq = 0;
+let ACTIVE_TAB = 'register';
+let summaryPromise = null;
+let summaryLoadedAt = 0;
+let summaryDirty = false;
+const SUMMARY_TTL = 800;
+
+// ---------- 加载调度 ----------
+// 非首屏 tab 只在首次进入时请求，短时间内重复切换直接复用结果。
+// 手动刷新/写操作通过 invalidateTab() 清除对应缓存，不影响业务数据及时性。
+const TAB_LOAD_TTL = 15 * 1000;
+const TAB_LOAD_STATE = Object.create(null);
+const TAB_LOADERS = {
+  register: refreshJobs,
+  accounts: loadAccounts,
+  codex: loadCodex,
+  outlook: loadOutlook,
+  config: loadConfig,
+};
+function invalidateTab(tab) {
+  if (tab && TAB_LOAD_STATE[tab]) TAB_LOAD_STATE[tab].loadedAt = 0;
+}
+function invalidateTabs(...tabs) { tabs.forEach(invalidateTab); }
+function markTabLoaded(tab) {
+  if (!tab) return;
+  const state = TAB_LOAD_STATE[tab] || (TAB_LOAD_STATE[tab] = {loadedAt: 0, promise: null});
+  state.loadedAt = Date.now();
+}
+function invalidateAfterMutation(url) {
+  const path = String(url || '');
+  if (path.includes('/jobs')) invalidateTab('register');
+  if (path.includes('/accounts') || path.includes('/account')) invalidateTab('accounts');
+  if (path.includes('/outlook')) invalidateTab('outlook');
+  if (path.includes('/codex')) invalidateTab('codex');
+  if (path.includes('/config')) invalidateTab('config');
+  if (/\/(jobs|accounts?|outlook)\b/.test(path)) {
+    summaryLoadedAt = 0;
+    summaryDirty = true;
+  }
+}
+function scheduleIdle(fn) {
+  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(fn, {timeout: 1200});
+  else setTimeout(fn, 80);
+}
+function ensureTabLoaded(tab, {force = false} = {}) {
+  const loader = TAB_LOADERS[tab];
+  if (!loader) return Promise.resolve();
+  const state = TAB_LOAD_STATE[tab] || (TAB_LOAD_STATE[tab] = {loadedAt: 0, promise: null});
+  const fresh = state.loadedAt && (Date.now() - state.loadedAt < TAB_LOAD_TTL);
+  if (!force && fresh) return state.promise || Promise.resolve();
+  if (state.promise) return state.promise;
+  state.promise = Promise.resolve(loader()).then((ok) => {
+    // 只有明确成功的 loader 才缓存，避免“请求进行中”或失败被误判为已加载。
+    state.loadedAt = ok === true ? Date.now() : 0;
+    return ok;
+  }).catch(() => {
+    state.loadedAt = 0;
+    return false;
+  }).finally(() => {
+    state.promise = null;
+  });
+  return state.promise;
+}
 
 // ---------- 分页状态 ----------
 const PAGERS = {
@@ -2891,11 +3497,22 @@ async function copyText(text) {
     showToast('已复制');
   } catch(e) { showToast('复制失败'); }
 }
-async function api(url, opts) {
-  const r = await fetch(url, opts);
-  const j = await r.json().catch(()=>({}));
-  if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
-  return j;
+const pendingGetRequests = new Map();
+async function api(url, opts = {}) {
+  const method = String(opts.method || 'GET').toUpperCase();
+  const key = method === 'GET' ? String(url) : '';
+  if (key && pendingGetRequests.has(key)) return pendingGetRequests.get(key);
+  const request = (async () => {
+    const r = await fetch(url, opts);
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+    if (method !== 'GET') invalidateAfterMutation(url);
+    return j;
+  })();
+  if (!key) return request;
+  pendingGetRequests.set(key, request);
+  try { return await request; }
+  finally { pendingGetRequests.delete(key); }
 }
 function debounce(fn, wait=250) {
   let t = null;
@@ -2906,27 +3523,40 @@ function debounce(fn, wait=250) {
 function activateTab(tab, persist=true) {
   const allowed = ['register','accounts','codex','outlook','config'];
   if (!allowed.includes(tab)) tab = 'register';
-  $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
+  const changed = ACTIVE_TAB !== tab;
+  ACTIVE_TAB = tab;
+  $$('nav button').forEach(x => {
+    const active = x.dataset.tab === tab;
+    x.classList.toggle('active', active);
+    if (active) x.setAttribute('aria-current', 'page');
+    else x.removeAttribute('aria-current');
+  });
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
-  if (tab === 'accounts') loadAccounts();
-  if (tab === 'codex') loadCodex();
-  if (tab === 'outlook') loadOutlook();
-  if (tab === 'config') loadConfig();
-  if (tab === 'register') refreshJobs();
+  if (changed && tab === 'register') loadSummary({force: true});
+  ensureTabLoaded(tab);
 }
 $$('nav button').forEach(b => b.addEventListener('click', () => activateTab(b.dataset.tab)));
 
 // ---------- 概览 ----------
-async function loadSummary() {
-  try {
-    const s = await api('/api/summary');
+async function loadSummary({force = false} = {}) {
+  const fresh = !summaryDirty && summaryLoadedAt && Date.now() - summaryLoadedAt < SUMMARY_TTL;
+  if (!force && fresh) return summaryPromise || Promise.resolve();
+  if (summaryPromise) return summaryPromise;
+  summaryPromise = api('/api/summary').then((s) => {
     $('#statAccounts').textContent = s.accounts;
     $('#statOutlook').textContent = s.outlook_total;
     $('#statAvailable').textContent = s.outlook_available;
     $('#statUsed').textContent = s.outlook_used;
     $('#statFailed').textContent = s.outlook_failed;
-  } catch(e) {}
+    summaryLoadedAt = Date.now();
+    summaryDirty = false;
+  }).catch(() => {
+    summaryLoadedAt = 0;
+  }).finally(() => {
+    summaryPromise = null;
+  });
+  return summaryPromise;
 }
 
 // ---------- 注册 / 任务 ----------
@@ -3118,22 +3748,54 @@ function updateJobsSelectionUi(pageRows = null) {
 }
 
 async function refreshJobs() {
-  try {
-    const p = PAGERS.jobs;
-    const res = await api(`/api/jobs?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}`);
-    const nextJobs = res.items || [];
-    JOBS_TOTAL = Number(res.total || nextJobs.length || 0);
-    JOB_STATUS_COUNTS = res.status_counts || {};
-    const totalPages = Math.max(1, Math.ceil(JOBS_TOTAL / p.size));
-    if (p.page > totalPages) { p.page = totalPages; return refreshJobs(); }
-    const nextSignature = JSON.stringify({items: nextJobs, total: JOBS_TOTAL, status_counts: JOB_STATUS_COUNTS, page: p.page, size: p.size});
-    JOBS = nextJobs;
-    if (nextSignature !== jobsRenderSignature) {
-      jobsRenderSignature = nextSignature;
-      renderJobs();
+  if (jobsLoading) {
+    jobsReloadQueued = true;
+    return jobsLoadingPromise;
+  }
+  jobsLoading = true;
+  jobsLoadingPromise = (async () => {
+    try {
+      while (true) {
+        jobsReloadQueued = false;
+        const p = PAGERS.jobs;
+        const page = p.page;
+        const size = p.size;
+        const res = await api(`/api/jobs?paged=1&page=${encodeURIComponent(page)}&page_size=${encodeURIComponent(size)}`);
+        if (jobsReloadQueued) continue;
+        const nextJobs = res.items || [];
+        const nextTotal = Number(res.total || nextJobs.length || 0);
+        const nextCounts = res.status_counts || {};
+        const totalPages = Math.max(1, Math.ceil(nextTotal / size));
+        if (p.page > totalPages) {
+          p.page = totalPages;
+          continue;
+        }
+        const nextSignature = JSON.stringify({items: nextJobs, total: nextTotal, status_counts: nextCounts, page, size});
+        JOBS_TOTAL = nextTotal;
+        JOB_STATUS_COUNTS = nextCounts;
+        JOBS = nextJobs;
+        if (nextSignature !== jobsRenderSignature) {
+          jobsRenderSignature = nextSignature;
+          renderJobs();
+        }
+        markTabLoaded('register');
+        if (!jobsReloadQueued) break;
+      }
+      return true;
+    } catch(e) {
+      // 网络恢复后由下一次可见性/定时刷新重试，不阻塞页面其它 tab。
+      invalidateTab('register');
+      return false;
     }
-    loadSummary();
-  } catch(e) {}
+  })().finally(() => {
+    jobsLoading = false;
+    jobsLoadingPromise = null;
+    if (jobsReloadQueued) {
+      jobsReloadQueued = false;
+      void refreshJobs();
+    }
+  });
+  return jobsLoadingPromise;
 }
 
 let modalScrollY = 0;
@@ -3146,7 +3808,8 @@ function updateModalScrollLock() {
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden')
     || !$('#emailChangeModalV2').classList.contains('hidden')
-     || !$('#accountImportModal').classList.contains('hidden');
+     || !$('#accountImportModal').classList.contains('hidden')
+      || !$('#accountExportModal').classList.contains('hidden');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -3402,7 +4065,9 @@ async function loadAccounts() {
       renderAccounts();
       if (!accountsReloadQueued) break;
     }
-  } catch(e) { showToast('加载账号失败: ' + e.message); }
+    markTabLoaded('accounts');
+    return true;
+  } catch(e) { showToast('加载账号失败: ' + e.message); return false; }
   finally {
     accountsLoading = false;
     if (accountsReloadQueued) {
@@ -3444,13 +4109,16 @@ async function pollAccountPlanStatuses() {
         const wasExtracting = ['queued', 'running'].includes(account?.extract_link_status);
         const isExtracting = ['queued', 'running'].includes(item.extract_link_status);
         const wasAgenting = ['queued', 'running'].includes(account?.codex_agent_status);
+         const wasMomoActivating = ['queued', 'running'].includes(account?.momo_activation_status);
         const isAgenting = ['queued', 'running'].includes(item.codex_agent_status);
+         const isMomoActivating = ['queued', 'running'].includes(item.momo_activation_status);
         const wasLiveStatus = account?.live_check_status || '';
         const isLiveStatus = item.live_check_status || '';
         if (wasChecking && !isChecking) needsFullReload = true;
         if (wasPaymentChecking && !isPaymentChecking) needsFullReload = true;
         if (wasExtracting && !isExtracting) needsFullReload = true;
         if (wasAgenting && !isAgenting) needsFullReload = true;
+         if (wasMomoActivating && !isMomoActivating) needsFullReload = true;
         if (wasLiveStatus !== isLiveStatus) needsFullReload = true;
         Object.assign(account, item);
       });
@@ -3555,6 +4223,33 @@ function _discountLabel(r) {
   if (type === 'percentage' && !Number.isNaN(n)) { const v = Number.isInteger(n) ? String(n) : String(n); return `${v}%折扣`; }
   if (!Number.isNaN(n)) return `${n}折扣`;
   return `${amount}折扣`;
+}
+function _momoActivationText(value) {
+  const text = String(value || '').trim();
+  if (!text || /(access[_ -]?token|refresh[_ -]?token|id[_ -]?token|secret|password|cookie|authorization|api[_ -]?key|job[_ -]?secret)/i.test(text)) return '';
+  return text.slice(0, 240);
+}
+function _momoActivationCell(r) {
+  const s = String(r.momo_activation_status || '').toLowerCase();
+  if (!['queued', 'running', 'success', 'failed'].includes(s)) return '';
+  const remote = _momoActivationText(r.momo_activation_remote_status);
+  const msg = _momoActivationText(r.momo_activation_message || r.momo_activation_error);
+  const title = [remote && `远端状态: ${remote}`, msg].filter(Boolean).join('；');
+  if (s === 'queued') return `<div class="acc-v2-sub"><span class="pill status-running" title="${esc(title)}">MoMo: 排队中</span></div>`;
+  if (s === 'running') return `<div class="acc-v2-sub"><span class="pill status-running" title="${esc(title)}">MoMo: 激活中</span></div>`;
+  if (s === 'success') return `<div class="acc-v2-sub"><span class="pill status-success" title="${esc(title || 'MoMo 自动付款已完成')}">MoMo: 激活成功</span></div>`;
+  return `<div class="acc-v2-sub"><span class="pill status-failed" title="${esc(title || 'MoMo 激活失败')}">MoMo: 激活失败</span></div>`;
+}
+function _momoActivationAction(r) {
+  const s = String(r.momo_activation_status || '').toLowerCase();
+  if (s === 'queued') return `<button disabled title="MoMo 激活任务正在排队">MoMo排队中…</button>`;
+  if (s === 'running') return `<button disabled title="MoMo 激活任务正在执行">MoMo激活中…</button>`;
+  if (s === 'success') return `<button disabled class="good" title="MoMo 自动付款已完成">MoMo已激活</button>`;
+  const plan = (r.current_plan_type || r.plan_type || '').toString().toLowerCase();
+  if (plan !== 'free' || !r.plus_trial_eligible) return '';
+  const failed = s === 'failed';
+  const reason = _momoActivationText(r.momo_activation_error || r.momo_activation_message);
+  return `<button class="good" data-momo-activate="${esc(r.id)}" title="${esc(failed && reason ? `重试 MoMo 激活；上次失败：${reason}` : '提交 MoMo 自动付款；会消耗试用/支付 CDK')}" >${failed ? '重试MoMo激活' : 'MoMo激活'}</button>`;
 }
 function _planCell(r) {
   const ok = r.plan_check_ok;
@@ -3713,6 +4408,7 @@ function _tokenCellV2(r) {
 }
 function _accountsV2MoreMenu(r) {
   const parts = [
+    `<button type="button" data-account-copy-secret="email" data-account-id="${esc(r.id)}" title="只复制邮箱地址，不包含 AT/access_token">仅复制邮箱</button>`,
     `<button type="button" data-account-copy-secret="copy_line" data-account-id="${esc(r.id)}">复制整行</button>`,
     `<button type="button" data-account-note="${esc(r.id)}" title="设置/清空该账号备注">备注</button>`,
     `<button type="button" data-account-change-email="${esc(r.id)}" title="从指定邮箱来源领取新邮箱并换绑">换绑邮箱</button>`,
@@ -3723,6 +4419,7 @@ function _accountsV2MoreMenu(r) {
     _planAction(r),
     _paymentMethodAction(r),
     _extractLinkAction(r),
+     _momoActivationAction(r),
     _codexAction(r),
     `<button type="button" data-codex-log="${esc(r.email)}" title="查看该账号最近一次 Codex 补跑日志">补跑日志</button>`,
     `<button type="button" data-account-archive="${esc(r.id)}" data-archived="${r.archived ? '0' : '1'}" title="${r.archived ? '恢复到默认账号列表' : '归档后默认账号列表不再显示'}">${r.archived ? '恢复' : '归档'}</button>`,
@@ -3767,7 +4464,7 @@ function renderAccounts() {
       </td>
       <td class="col-source">${esc(r.email_source || '-')}</td>
       <td class="col-token">${_tokenCellV2(r)}</td>
-      <td class="col-plan">${_planCell(r)}${_paymentMethodCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
+      <td class="col-plan">${_planCell(r)}${_momoActivationCell(r)}${_paymentMethodCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
       <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-small">${_totpCellV2(r)}</td>
       <td class="col-status">${_codexCellV2(r)}</td>
@@ -3794,13 +4491,14 @@ function renderAccounts() {
 
 function updateAccountSelectionUi(pageRows = null) {
   const none = ACCOUNT_SELECTED.size === 0;
+  const selectedMomoEligible = ACCOUNTS.filter(r => ACCOUNT_SELECTED.has(Number(r.id)) && _momoActivationEligible(r) && !['queued', 'running'].includes(String(r.momo_activation_status || '').toLowerCase())).length;
   const hintV2 = $('#accountsSelectedHintV2');
   if (hintV2) hintV2.textContent = `已选 ${ACCOUNT_SELECTED.size}`;
 
   const archiveLabel = SHOW_ARCHIVED_ACCOUNTS ? '恢复选中' : '归档选中';
   const archiveTitle = SHOW_ARCHIVED_ACCOUNTS ? '把选中的归档账号恢复到默认账号列表' : '归档选中的账号；默认账号列表将不再查询/显示这些账号';
   const v2Ids = [
-    'btnCheckSelectedPlansV2', 'btnCheckSelectedPaymentsV2', 'btnExtractSelectedLinksV2',
+    'btnCheckSelectedPlansV2', 'btnCheckSelectedPaymentsV2', 'btnExtractSelectedLinksV2', 'btnActivateSelectedAccountsV2',
      'btnGenerateSelectedAgentV2', 'btnDownloadSelectedAgentV2', 'btnUploadSelectedAgentSub2V2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
     'btnSetupSelectedTotpV2', 'btnChangeSelectedEmailsV2', 'btnNoteSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
@@ -3810,6 +4508,7 @@ function updateAccountSelectionUi(pageRows = null) {
     const el = document.getElementById(id);
     if (!el) return;
     el.disabled = none;
+    if (id === 'btnActivateSelectedAccountsV2') el.disabled = selectedMomoEligible === 0;
     if (id === 'btnArchiveSelectedAccountsV2') {
       el.textContent = archiveLabel;
       el.title = archiveTitle;
@@ -3989,6 +4688,7 @@ async function onAccountsBodyClick(e) {
         field === 'codex_agent_token' ? 'Agent Token 已复制' :
         field === 'totp_secret' ? '2FA 密钥已复制' :
         field === 'totp_code' ? `验证码已复制：${value}` :
+         field === 'email' ? '邮箱已复制（不含 AT）' :
         '账号整行已复制'
       );
     } catch(err) {
@@ -4072,6 +4772,12 @@ async function onAccountsBodyClick(e) {
   const changeEmailLogBtn = e.target.closest('[data-account-change-email-log]');
   if (changeEmailLogBtn) {
     openEmailChangeLog(Number(changeEmailLogBtn.dataset.accountChangeEmailLog));
+    return;
+  }
+
+  const momoBtn = e.target.closest('[data-momo-activate]');
+  if (momoBtn) {
+    await activateOneAccount(Number(momoBtn.dataset.momoActivate), momoBtn);
     return;
   }
 
@@ -4356,6 +5062,7 @@ async function refreshAccountsList(btn) {
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));
   bindAccountImportModal();
+  bindAccountExportModal();
 
   bindDateFilterPanel({
     btnId: 'btnDateFilterAccountsV2',
@@ -4679,16 +5386,171 @@ function bindDateFilterPanel({ btnId, panelId, fromId, toId, onApply }) {
   syncBtnText();
 }
 
-function copySelectedAccountEmails() {
+async function copySelectedAccountEmails() {
   const ids = Array.from(ACCOUNT_SELECTED).map(Number);
   if (!ids.length) { showToast('请先选择账号'); return; }
-  const emails = ACCOUNTS
-    .filter(r => ids.includes(Number(r.id)))
-    .map(r => (r.email || '').trim())
-    .filter(Boolean);
-  if (!emails.length) { showToast('选中账号没有可复制的邮箱'); return; }
-  copyText(emails.join('\n'));
-  showToast(`已复制 ${emails.length} 个邮箱`);
+  try {
+    // 通过后端按 ID 取邮箱，支持跨页选择；field=email 明确不会返回 AT/access_token。
+    const emails = await fetchAccountSecrets(ids, 'email');
+    if (!emails.length) { showToast('选中账号没有可复制的邮箱'); return; }
+    await copyText(emails.join('\n'));
+    showToast(`已复制 ${emails.length} 个邮箱（不含 AT）`);
+  } catch (err) { showToast('复制邮箱失败: ' + err.message); }
+}
+
+const ACCOUNT_EXPORT_FIELD_META = [
+  {key:'email', label:'邮箱', sensitive:false},
+  {key:'email_password', label:'邮箱密码', sensitive:true},
+  {key:'password', label:'账号登录密码', sensitive:true},
+  {key:'totp_secret', label:'2FA 密钥', sensitive:true},
+  {key:'totp_code', label:'当前 2FA 验证码', sensitive:true},
+  {key:'id', label:'账号 ID', sensitive:false},
+  {key:'email_source', label:'邮箱来源', sensitive:false},
+  {key:'user_name', label:'用户名', sensitive:false},
+  {key:'note', label:'备注', sensitive:false},
+  {key:'plan_type', label:'套餐', sensitive:false},
+  {key:'current_plan_type', label:'当前套餐', sensitive:false},
+  {key:'live_check_status', label:'查活状态', sensitive:false},
+  {key:'codex_status', label:'Codex 状态', sensitive:false},
+  {key:'created_at', label:'创建时间', sensitive:false},
+  {key:'updated_at', label:'更新时间', sensitive:false},
+  {key:'access_token', label:'access_token（AT）', sensitive:true},
+  {key:'codex_agent_token', label:'Codex Agent Token', sensitive:true},
+  {key:'copy_line', label:'完整整行（含 AT）', sensitive:true},
+];
+async function loadAccountExportFieldMeta() {
+  try {
+    const response = await api('/api/accounts/export-fields');
+    if (!Array.isArray(response.fields) || !response.fields.length) return;
+    const normalized = response.fields.filter(field => field && field.key && field.label).map(field => ({key: String(field.key), label: String(field.label), sensitive: !!field.sensitive}));
+    if (normalized.length) {
+      ACCOUNT_EXPORT_FIELD_META.splice(0, ACCOUNT_EXPORT_FIELD_META.length, ...normalized);
+      renderAccountExportFields();
+    }
+  } catch (_) { /* 静态默认字段仍可用，兼容旧后端。 */ }
+}
+function accountExportFilters() {
+  return {
+    archived: SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0',
+    plan: getAccountsPlanFilter(),
+    status: getAccountsStatusFilter(),
+    codex_status: getAccountsCodexFilter(),
+    totp_status: getAccountsTotpFilter(),
+    q: getAccountsQuery(),
+    date_from: $('#dateFromAccountsV2')?.value || '',
+    date_to: $('#dateToAccountsV2')?.value || '',
+  };
+}
+function selectedAccountExportFields() {
+  return $$('#accountExportFieldsV2 input[type=checkbox]:checked').map(el => el.value);
+}
+function updateAccountExportHint() {
+  const hint = $('#accountExportSensitiveHintV2');
+  const fields = selectedAccountExportFields();
+  const sensitive = ACCOUNT_EXPORT_FIELD_META.filter(x => fields.includes(x.key) && x.sensitive);
+  if (!hint) return;
+  hint.textContent = sensitive.length
+    ? `已选择敏感字段：${sensitive.map(x => x.label).join('、')}。点击生成时还会再次确认；未选择 AT 时不会导出 access_token。`
+    : '当前只导出非敏感字段，不会复制或导出 AT/access_token。';
+  hint.classList.toggle('account-export-sensitive', sensitive.length > 0);
+}
+function renderAccountExportFields() {
+  const root = $('#accountExportFieldsV2');
+  if (!root) return;
+  const defaults = new Set(['email', 'email_password', 'totp_secret']);
+  root.innerHTML = ACCOUNT_EXPORT_FIELD_META.map(field => `
+    <label class="account-export-check${field.sensitive ? ' account-export-sensitive' : ''}">
+      <input type="checkbox" value="${esc(field.key)}" ${defaults.has(field.key) ? 'checked' : ''}>
+      <span>${esc(field.label)}${field.sensitive ? ' 🔒' : ''}</span>
+    </label>`).join('');
+  root.querySelectorAll('input').forEach(input => input.addEventListener('change', updateAccountExportHint));
+  updateAccountExportHint();
+}
+function openAccountExportModal() {
+  const modal = $('#accountExportModal');
+  if (!modal) return;
+  renderAccountExportFields();
+  void loadAccountExportFieldMeta();
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number).filter(Boolean);
+  const selectedRadio = modal.querySelector('input[name="accountExportScope"][value="selected"]');
+  if (selectedRadio) { selectedRadio.disabled = !ids.length; selectedRadio.checked = !!ids.length; }
+  const filteredRadio = modal.querySelector('input[name="accountExportScope"][value="filtered"]');
+  if (filteredRadio && !ids.length) filteredRadio.checked = true;
+  const count = $('#accountExportSelectedCount');
+  if (count) count.textContent = String(ids.length);
+  const format = $('#accountExportFormatV2');
+  const header = $('#accountExportHeaderV2');
+  if (format) format.value = 'txt';
+  if (header) header.checked = false;
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+}
+function closeAccountExportModal() {
+  const modal = $('#accountExportModal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  updateModalScrollLock();
+}
+async function submitAccountExport() {
+  const fields = selectedAccountExportFields();
+  if (!fields.length) { showToast('请至少选择一个导出字段'); return; }
+  const scope = document.querySelector('input[name="accountExportScope"]:checked')?.value || 'filtered';
+  const ids = scope === 'selected'
+    ? Array.from(ACCOUNT_SELECTED).map(Number).filter(Boolean)
+    : scope === 'current_page' ? ACCOUNTS.map(row => Number(row.id)).filter(Boolean) : [];
+  if ((scope === 'selected' || scope === 'current_page') && !ids.length) { showToast('当前范围没有账号'); return; }
+  const sensitive = ACCOUNT_EXPORT_FIELD_META.filter(x => fields.includes(x.key) && x.sensitive);
+  let confirmSensitive = false;
+  if (sensitive.length) {
+    confirmSensitive = confirm(`导出内容包含敏感字段：${sensitive.map(x => x.label).join('、')}。\n\n请确认只在可信环境保存和使用这些内容。`);
+    if (!confirmSensitive) return;
+  }
+  const format = $('#accountExportFormatV2')?.value || 'txt';
+  const delimiter = $('#accountExportDelimiterV2')?.value || '----';
+  const includeHeader = !!$('#accountExportHeaderV2')?.checked;
+  const btn = $('#btnSubmitAccountExport');
+  if (btn) { btn.disabled = true; btn.textContent = '生成中…'; }
+  try {
+    const payload = {
+      scope, account_ids: scope === 'selected' ? ids : [], fields, format, delimiter,
+      include_header: includeHeader, confirm_sensitive: confirmSensitive, prepare: true,
+    };
+    if (scope === 'filtered' || scope === 'current_page') payload.filters = accountExportFilters();
+    if (scope === 'current_page') {
+      payload.page = PAGERS.accounts.page;
+      payload.page_size = PAGERS.accounts.size;
+      payload.account_ids = ids;
+    }
+    const r = await api('/api/accounts/export', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    if (!r.download_url) throw new Error('服务端未返回下载地址');
+    const a = document.createElement('a');
+    a.href = r.download_url; a.download = r.filename || ''; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 1000);
+    closeAccountExportModal();
+    showToast(`已导出 ${r.count || 0} 个账号${r.skipped_count ? `，跳过 ${r.skipped_count} 个` : ''}`);
+  } catch (err) {
+    showToast('导出失败: ' + err.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '生成并下载'; }
+  }
+}
+function bindAccountExportModal() {
+  const modal = $('#accountExportModal');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  $('#btnExportAccountsV2')?.addEventListener('click', openAccountExportModal);
+  $('#btnCloseAccountExport')?.addEventListener('click', closeAccountExportModal);
+  $('#btnCancelAccountExport')?.addEventListener('click', closeAccountExportModal);
+  $('#btnSubmitAccountExport')?.addEventListener('click', submitAccountExport);
+  modal.addEventListener('click', e => { if (e.target === modal) closeAccountExportModal(); });
+  $('#accountExportFormatV2')?.addEventListener('change', e => {
+    const header = $('#accountExportHeaderV2');
+    if (header) header.checked = e.target.value === 'csv';
+    const delimiter = $('#accountExportDelimiterV2');
+    if (delimiter) delimiter.disabled = e.target.value === 'json';
+  });
 }
 
 async function downloadSelectedAccountTxt() {
@@ -4809,6 +5671,62 @@ async function checkSelectedPayments() {
     updateAccountSelectionUi();
   } finally {
     if (btn) { btn.textContent = '查支付方式'; updateAccountSelectionUi(); }
+  }
+}
+
+function _momoActivationEligible(account) {
+  const plan = (account?.current_plan_type || account?.plan_type || '').toString().toLowerCase();
+  return plan === 'free' && !!account?.plus_trial_eligible;
+}
+async function activateOneAccount(id, btn) {
+  const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
+  if (!acc) { showToast('账号不存在'); return; }
+  if (!_momoActivationEligible(acc)) { showToast('仅支持 free(可Plus试用) 账号 MoMo 激活'); return; }
+  if (['queued', 'running'].includes(String(acc.momo_activation_status || '').toLowerCase())) { showToast('该账号已有 MoMo 激活任务'); return; }
+  if (!confirm(`确定为该账号提交 MoMo 自动付款吗？\n\n${acc.email || ('#' + id)}\n\n这会消耗 Plus 试用/支付 CDK，且可能产生实际付款；提交后无法撤销。`)) return;
+  const old = btn?.textContent || 'MoMo激活';
+  if (btn) { btn.disabled = true; btn.textContent = '激活中…'; }
+  try {
+    const r = await api('/api/accounts/activate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_id: Number(id)}),
+    });
+    showToast(r.message || 'MoMo 激活任务已入队');
+    planStatusRevision = '';
+    await pollAccountPlanStatuses();
+  } catch (err) {
+    showToast('MoMo 激活失败: ' + err.message);
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+async function activateSelectedAccounts() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number).filter(Boolean);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === id)).filter(Boolean);
+  const eligible = selected.filter(_momoActivationEligible);
+  if (!eligible.length) { showToast('选中账号里没有 free(可Plus试用)账号'); return; }
+  const busy = eligible.filter(a => ['queued', 'running'].includes(String(a.momo_activation_status || '').toLowerCase())).length;
+  if (!confirm(`确定为 ${eligible.length} 个账号提交 MoMo 自动付款吗？\n\n仅会提交 free 且可 Plus 试用的账号；${ids.length - eligible.length} 个不符合条件的账号会跳过${busy ? `，其中 ${busy} 个已有激活任务` : ''}。\n\n这会消耗 Plus 试用/支付 CDK，且可能产生实际付款；提交后无法撤销。`)) return;
+  const btn = $('#btnActivateSelectedAccountsV2');
+  const old = btn?.textContent || 'MoMo激活';
+  if (btn) { btn.disabled = true; btn.textContent = '激活中…'; }
+  try {
+    const r = await api('/api/accounts/activate-bulk', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_ids: eligible.map(a => Number(a.id))}),
+    });
+    const started = Number(r.started_count || (r.started || []).length || 0);
+    const busyCount = Number(r.busy_count || (r.busy || []).length || 0);
+    const failed = Number(r.failed_count || (r.failed || []).length || 0);
+    const skipped = Number(r.skipped_count || (r.skipped || []).length || (ids.length - eligible.length));
+    showToast(`MoMo 激活：已入队 ${started} 个，忙碌 ${busyCount} 个，失败 ${failed} 个，跳过 ${skipped} 个`);
+    ACCOUNT_SELECTED.clear();
+    planStatusRevision = '';
+    await pollAccountPlanStatuses();
+  } catch (err) {
+    showToast('批量 MoMo 激活失败: ' + err.message);
+  } finally {
+    if (btn) { btn.textContent = old; updateAccountSelectionUi(); }
   }
 }
 
@@ -5407,17 +6325,23 @@ function poolLabel(src) {
   return ({outlook:'Outlook', generic_api:'通用API', imap:'通用IMAP', cloudflare_domain:'域名邮箱'})[src] || src || '-';
 }
 async function loadOutlook() {
+  const requestSeq = ++outlookRequestSeq;
   try {
     const source = getPoolSource();
     const q = getOutlookQuery();
     const p = PAGERS.outlook;
-    const res = await api(`/api/outlook?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&source=${encodeURIComponent(source)}&q=${encodeURIComponent(q)}`);
+    const page = p.page;
+    const size = p.size;
+    const res = await api(`/api/outlook?paged=1&page=${encodeURIComponent(page)}&page_size=${encodeURIComponent(size)}&source=${encodeURIComponent(source)}&q=${encodeURIComponent(q)}`);
+    if (requestSeq !== outlookRequestSeq) return false;
     OUTLOOK = res.items || [];
     OUTLOOK_TOTAL = Number(res.total || OUTLOOK.length || 0);
-    const totalPages = Math.max(1, Math.ceil(OUTLOOK_TOTAL / p.size));
+    const totalPages = Math.max(1, Math.ceil(OUTLOOK_TOTAL / size));
     if (p.page > totalPages) { p.page = totalPages; return loadOutlook(); }
     renderOutlook();
-  } catch(e) {}
+    markTabLoaded('outlook');
+    return true;
+  } catch(e) { return false; }
 }
 function closeOutlookV2MoreMenus() {
   document.querySelectorAll('.outlook-table-v2 .acc-v2-more.open').forEach(el => el.classList.remove('open'));
@@ -5823,23 +6747,29 @@ function getCodexQuery() {
 }
 let CODEX_SHOW_ARCHIVED = false;
 async function loadCodex() {
+  const requestSeq = ++codexRequestSeq;
   try {
     const p = PAGERS.codex;
     const q = getCodexQuery();
     const archived = CODEX_SHOW_ARCHIVED ? 'only' : '0';
     const dateFrom = document.getElementById('dateFromCodexV2')?.value || '';
     const dateTo = document.getElementById('dateToCodexV2')?.value || '';
-    const r = await api(`/api/codex?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&q=${encodeURIComponent(q)}&archived=${encodeURIComponent(archived)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const page = p.page;
+    const size = p.size;
+    const r = await api(`/api/codex?paged=1&page=${encodeURIComponent(page)}&page_size=${encodeURIComponent(size)}&q=${encodeURIComponent(q)}&archived=${encodeURIComponent(archived)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    if (requestSeq !== codexRequestSeq) return false;
     CODEX = r.accounts || [];
     CODEX_TOTAL = Number(r.total || CODEX.length || 0);
-    const totalPages = Math.max(1, Math.ceil(CODEX_TOTAL / p.size));
+    const totalPages = Math.max(1, Math.ceil(CODEX_TOTAL / size));
     if (p.page > totalPages) { p.page = totalPages; return loadCodex(); }
     const st = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
     st('codexStatTotalV2', r.summary?.total ?? 0);
     st('codexStatExportedV2', r.summary?.exported ?? 0);
     st('codexStatPendingV2', r.summary?.pending ?? 0);
     renderCodex();
-  } catch(e) { showToast('加载 Codex 列表失败: ' + e.message); }
+    markTabLoaded('codex');
+    return true;
+  } catch(e) { showToast('加载 Codex 列表失败: ' + e.message); return false; }
 }
 const CODEX_SELECTED = new Set();
 function _codexUpdateSelectedHint() {
@@ -6982,8 +7912,11 @@ async function loadConfig() {
     CONFIG = await api('/api/config');
     renderConfigLayoutV2();
     bindConfigLayoutV2();
+    markTabLoaded('config');
+    return true;
   } catch(e) {
     showToast('加载配置失败: ' + e.message);
+    return false;
   }
 }
 
@@ -7053,8 +7986,16 @@ function readConfigElementValue(el, f) {
     if (el.type === 'checkbox') return !!el.checked;
     return el.value === 'true';
   }
-  if (f.type === 'int') return parseInt(el.value || '0', 10);
-  if (f.type === 'float') return parseFloat(el.value || '0');
+  if (f.type === 'int' || f.type === 'float') {
+    // 空数字交给后端写成空 .env 值，恢复 config/*.py 默认值；不要让 NaN
+    // 被 JSON.stringify 转成 null 后再触发 int(None) 或 float(None)。
+    const raw = String(el.value == null ? '' : el.value).trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return null;
+    if (f.type === 'int' && !Number.isInteger(value)) return null;
+    return value;
+  }
   return isPlaceholderEmpty(el.value) ? '' : el.value.trim();
 }
 
@@ -7102,11 +8043,29 @@ document.addEventListener('click', (e) => {
 });
 
 // ---------- 初始化 ----------
-loadSummary();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);
-jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 10000);
-setInterval(loadSummary, 30000);
-setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 10000);
+// 先让首屏 tab 绘制，再在空闲时补充统计；非首屏 tab 不发 summary 请求。
+scheduleIdle(() => {
+  if (ACTIVE_TAB === 'register' && document.visibilityState === 'visible') loadSummary();
+});
+jobsTimer = setInterval(() => {
+  if (document.visibilityState === 'visible' && ACTIVE_TAB === 'register') refreshJobs();
+}, 10000);
+setInterval(() => {
+  if (document.visibilityState === 'visible' && ACTIVE_TAB === 'register') loadSummary({force: true});
+}, 30000);
+setInterval(() => {
+  if (document.visibilityState === 'visible' && ACTIVE_TAB === 'accounts') pollAccountPlanStatuses();
+}, 10000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (ACTIVE_TAB === 'register') {
+    loadSummary({force: true});
+    refreshJobs();
+  } else if (ACTIVE_TAB === 'accounts') {
+    pollAccountPlanStatuses();
+  }
+});
 </script>
 </body>
 </html>

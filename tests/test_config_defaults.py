@@ -59,6 +59,40 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
     def test_config_editor_formats_empty_list_as_literal_empty_list(self):
         self.assertEqual(config_editor._format_env_value([], "list_str_multiline"), "[]")
 
+    def test_config_editor_formats_empty_numeric_values_without_int_none_error(self):
+        # 清空 number input 后，浏览器可能提交 null；这应清除 .env 覆盖并恢复源码默认值。
+        self.assertEqual(config_editor._format_env_value(None, "int"), "")
+        self.assertEqual(config_editor._format_env_value(None, "float"), "")
+        self.assertEqual(config_editor._format_env_value("", "int"), "")
+
+    def test_config_editor_rejects_invalid_numeric_values(self):
+        with self.assertRaisesRegex(ValueError, "有效的整数"):
+            config_editor._format_env_value("1.5", "int")
+        with self.assertRaisesRegex(ValueError, "有效的数字"):
+            config_editor._format_env_value(float("nan"), "float")
+        with self.assertRaisesRegex(ValueError, "有效的数字"):
+            config_editor._format_env_value(True, "float")
+
+    def test_config_editor_formats_valid_numeric_values(self):
+        self.assertEqual(config_editor._format_env_value(12, "int"), "12")
+        self.assertEqual(config_editor._format_env_value(12.0, "int"), "12")
+        self.assertEqual(config_editor._format_env_value(1.25, "float"), "1.25")
+
+    def test_update_config_writes_empty_env_for_null_numeric_value(self):
+        with patch.object(env_loader, "write_env_values", return_value=["OTP_MAX_WAIT"]) as write_env, \
+                patch.object(env_loader, "load_env") as load_env:
+            result = config_editor.update_config({"OTP_MAX_WAIT": None})
+
+        self.assertEqual(result["updated"], ["OTP_MAX_WAIT"])
+        write_env.assert_called_once_with({"OTP_MAX_WAIT": ""})
+        load_env.assert_called_once_with(override=True)
+
+    def test_update_config_does_not_write_invalid_numeric_value(self):
+        with patch.object(env_loader, "write_env_values") as write_env:
+            with self.assertRaisesRegex(ValueError, "有效的整数"):
+                config_editor.update_config({"OTP_MAX_WAIT": "1.5"})
+        write_env.assert_not_called()
+
     def test_apply_env_overrides_does_not_let_blank_values_mask_defaults(self):
         old_loaded = env_loader._LOADED
         env_loader._LOADED = True

@@ -2,6 +2,7 @@
 """已注册账号查活：优先复用已有 AT 预热后走 reauth OTP，成功刷新 AT 即视为正常。"""
 import logging
 import json
+import re
 import threading
 import time
 import uuid
@@ -9,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from config.proxy import redact_proxy_url
 from core import db
 from core.session import BrowserSession
 from core.codex_oauth import _account_registration_password, _account_totp_secret, _account_totp_code
@@ -21,11 +23,13 @@ from core.openai_auth import (
     EmailOtpInvalidError,
     AccountUnusableError,
     detect_account_unusable_text,
+    detect_account_unusable_response_body,
 )
 from core.account_export import (
     _follow_reauth_with_retry,
     _trigger_reauth_with_retry,
     _validate_reauth_otp,
+    _warm_auth_document_for_reauth,
     fetch_session,
     follow_oauth_callback,
 )
@@ -39,10 +43,19 @@ _RUNNING_LOCK = threading.Lock()
 # 查活网络预检失败（403/429/代理/超时等）多为出口 IP 被 CF 标记或代理池抖动，
 # 视为可换新 IP 重试；账号本身问题（废号/邮箱错误等）不重试。
 _RETRYABLE_NETWORK_HINTS = (
-    "403", "429", "502", "503", "504",
+    "403", "408", "425", "429", "500", "502", "503", "504",
     "proxy", "socks", "timeout", "timed out",
     "connection", "closed", "reset",
 )
+
+def _bounded_attempts(value: int | None, *, default: int, cap: int) -> int:
+    """Clamp caller/configured retry budgets to a small finite range."""
+    try:
+        attempts = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        attempts = default
+    return max(1, min(int(cap), attempts))
+
 
 _SESSION_FINGERPRINT_KEYS = {
     "device_id",
@@ -57,9 +70,24 @@ _SESSION_FINGERPRINT_KEYS = {
 }
 
 
+def _is_retryable_http_status(status: int | None) -> bool:
+    try:
+        value = int(status or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value in {403, 408, 425, 429} or value >= 500
+
+
 def _is_retryable_network_error(exc: BaseException) -> bool:
     if isinstance(exc, AccountUnusableError):
         return False
+    response = getattr(exc, "response", None)
+    try:
+        status = int(getattr(response, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if _is_retryable_http_status(status):
+        return True
     text = str(exc or "").lower()
     return any(h in text for h in _RETRYABLE_NETWORK_HINTS)
 
@@ -101,14 +129,85 @@ def _new_fingerprint_pinned_session(
     return session
 
 
+def _warm_chatgpt_homepage(session: BrowserSession, *, attempts: int = 2) -> bool:
+    """先访问 ChatGPT 首页，给同一会话建立 document/CF Cookie 上下文。
+
+    查活的 AT 刷新链路随后会进入 NextAuth、auth.openai.com 和 OAuth callback。
+    如果一上来就请求带认证语义的接口，Cloudflare 更容易把该会话判成异常脚本；
+    先走一次地址栏级首页导航可以让边缘 Cookie、导航头和会话画像按真实 Web
+    顺序建立。首页本身是 best-effort：403/网络抖动时保留响应 Cookie、清理本地
+    熔断并有限重试，最终仍让正式链路决定是否需要切换浏览器/出口。
+    """
+    request_get = getattr(session, "get", None)
+    get_headers = getattr(session, "get_chatgpt_navigate_headers", None)
+    if not callable(request_get) or not callable(get_headers):
+        return False
+
+    try:
+        from config import openai_protocol as protocol_cfg
+        timeout = max(1.0, float(getattr(protocol_cfg, "OPENAI_PREFLIGHT_TIMEOUT", 12.0) or 12.0))
+    except Exception:
+        timeout = 12.0
+
+    total_attempts = max(1, min(3, int(attempts or 1)))
+    for attempt in range(1, total_attempts + 1):
+        try:
+            logger.info("[查活] 首页预热：访问 https://chatgpt.com/（%s/%s）", attempt, total_attempts)
+            response = request_get(
+                "https://chatgpt.com/",
+                headers=get_headers(referer="", user_initiated=True),
+                allow_redirects=True,
+                timeout=timeout,
+            )
+            status = int(getattr(response, "status_code", 0) or 0)
+            if status >= 400:
+                # 直接按响应状态分类，避免把 HTTP 500/5xx 包成没有
+                # response.status_code 的 RuntimeError 后丢失可重试信息。
+                retryable = _is_retryable_http_status(status)
+                logger.warning(
+                    "[查活] 首页预热返回 HTTP %s（%s/%s）retryable=%s",
+                    status,
+                    attempt,
+                    total_attempts,
+                    retryable,
+                )
+            else:
+                observe = getattr(session, "observe_chatgpt_document", None)
+                if callable(observe):
+                    observe(response)
+                logger.info("[查活] 首页预热完成：HTTP %s", status)
+                return True
+        except Exception as exc:
+            retryable = _is_retryable_network_error(exc)
+            logger.warning(
+                "[查活] 首页预热失败（%s/%s）retryable=%s：%s",
+                attempt,
+                total_attempts,
+                retryable,
+                _safe_error_text(exc, max_length=180),
+            )
+            # BrowserSession 收到 403/429 会打开本地熔断；必须先清掉，才能
+            # 继续访问 /auth/login，并保留本轮响应刚下发的 __cf_bm 等 Cookie。
+        # 无论是 HTTP 边缘响应还是传输异常，都清掉本地熔断；Cookie Jar
+        # 始终留在同一个 BrowserSession 中供下一次导航/正式认证链使用。
+        _clear_optional_bootstrap_circuit(session)
+        if attempt >= total_attempts or not retryable:
+            break
+        time.sleep(min(3.0, float(attempt)))
+    return False
+
+
 def _warm_login_fingerprint_context(session: BrowserSession) -> None:
     """复现 plus 纯协议注册成功样本的登录页初始化顺序。"""
     from core.chatgpt_bootstrap import anonymous_bootstrap
 
     logger.info(
-        "[查活] 登录链预热：/auth/login 顶层导航 → anonymous bootstrap → "
+        "[查活] 登录链预热：首页 → /auth/login 顶层导航 → anonymous bootstrap → "
         "providers → session → CSRF → session"
     )
+    # 首页要在 /auth/login 和任何 NextAuth 请求之前访问；失败不直接判死，
+    # 但会把 403 后的 CF Cookie/熔断状态处理好交给后续链路。
+    _warm_chatgpt_homepage(session)
     nav = session.get(
         "https://chatgpt.com/auth/login",
         headers=session.get_chatgpt_navigate_headers(
@@ -124,7 +223,8 @@ def _warm_login_fingerprint_context(session: BrowserSession) -> None:
     if callable(observe):
         observe(nav)
     anonymous_bootstrap(session, strict=False)
-    # best-effort bootstrap 的非关键接口不能阻断正式认证链。
+    # 清理 anonymous bootstrap 可能留下的可选接口熔断，再按 Web 登录页顺序
+    # 完成 providers 和匿名 session 预热；任一正式预热失败都交由上层重试。
     _clear_optional_bootstrap_circuit(session)
     get_providers(session)
     probe_auth_session(session)
@@ -152,10 +252,11 @@ def _network_preflight_with_retry(
     # 一次网络预检只创建一个 BrowserSession。403 响应下发的新 __cf_bm、
     # OAuth/设备上下文都保留在同一 Cookie Jar 中供下一轮使用。
     session = _new_fingerprint_pinned_session(email, proxy, state)
+    max_attempts = _bounded_attempts(max_attempts, default=4, cap=4)
     for attempt in range(1, max_attempts + 1):
         logger.info(
             "[查活] 复用统一会话：proxy=%s device_id=%s oai_session_id=%s（网络预检第 %s/%s 次）",
-            session.proxy or "配置随机/直连", session.device_id,
+            redact_proxy_url(session.proxy) if session.proxy else "配置随机/直连", session.device_id,
             str(getattr(session, "oai_session_id", "") or "")[:12] + "...",
             attempt, max_attempts,
         )
@@ -178,7 +279,7 @@ def _network_preflight_with_retry(
             _clear_optional_bootstrap_circuit(session)
             logger.warning(
                 "[查活] 网络预检失败（%s/%s），保留当前 session/deviceId/CF Cookie 重试：%s",
-                attempt, max_attempts, str(exc)[:200],
+                attempt, max_attempts, _safe_error_text(exc, max_length=200),
             )
             time.sleep(2)
     raise RuntimeError(f"网络预检多次失败：{last_exc}")
@@ -191,7 +292,10 @@ def _now() -> str:
 def _safe_fingerprint_for_account(session: BrowserSession) -> dict:
     """账号里只记录运行环境画像，不保存会话/设备标识。"""
     fp = session.fingerprint_summary()
-    return {k: v for k, v in fp.items() if k not in _SESSION_FINGERPRINT_KEYS}
+    safe = {k: v for k, v in fp.items() if k not in _SESSION_FINGERPRINT_KEYS}
+    if "proxy" in safe:
+        safe["proxy"] = redact_proxy_url(safe.get("proxy")) or ""
+    return safe
 
 
 def _safe_fingerprint_text_for_account(session: BrowserSession) -> str:
@@ -352,7 +456,7 @@ def _follow_continue_and_fetch(session: BrowserSession, continue_url: str, *, re
     只有 callback 本身失败时才重放 continue_url。重试耗尽后抛给上层，由
     live_check_service 按既有策略换成独立直连会话完整兜底。
     """
-    max_attempts = 3
+    max_attempts = _bounded_attempts(3, default=3, cap=3)
     for attempt in range(1, max_attempts + 1):
         try:
             follow_oauth_callback(session, continue_url, referer=referer)
@@ -365,7 +469,7 @@ def _follow_continue_and_fetch(session: BrowserSession, continue_url: str, *, re
             logger.warning(
                 "[查活] OAuth callback 临时失败（%s/%s），保留当前 "
                 "session/deviceId/CF Cookie，%.1fs 后重试：%s",
-                attempt, max_attempts, delay, str(exc)[:200],
+                attempt, max_attempts, delay, _safe_error_text(exc, max_length=200),
             )
             time.sleep(delay)
 
@@ -380,7 +484,7 @@ def _follow_continue_and_fetch(session: BrowserSession, continue_url: str, *, re
             logger.warning(
                 "[查活] Session/AT 拉取临时失败（%s/%s），保留当前 "
                 "session/deviceId/CF Cookie，%.1fs 后重试：%s",
-                attempt, max_attempts, delay, str(exc)[:200],
+                attempt, max_attempts, delay, _safe_error_text(exc, max_length=200),
             )
             time.sleep(delay)
     raise RuntimeError("查活 Session/AT 拉取重试耗尽")
@@ -448,19 +552,48 @@ def _warm_authenticated_session(session: BrowserSession, access_token: str) -> N
     from core.chatgpt_bootstrap import authenticated_bootstrap
 
     try:
+        # AT 刷新前先完成一次真实首页 document 导航，让当前会话先拿到
+        # ChatGPT/Cloudflare 的边缘 Cookie，再进入带 Authorization 的 bootstrap。
+        _warm_chatgpt_homepage(session)
         logger.info("[查活] 使用已有 accessToken 预热登录态...")
         authenticated_bootstrap(session, access_token, strict=False)
         logger.info("[查活] accessToken 预热完成，继续走 reauth OTP")
     except Exception as exc:
         # strict=False 已经会吞掉大部分单接口错误；这里仅兜住初始化异常。
-        logger.warning("[查活] accessToken 预热失败，继续走 reauth OTP：%s: %s", type(exc).__name__, str(exc)[:180])
+        logger.warning("[查活] accessToken 预热失败，继续走 reauth OTP：%s: %s", type(exc).__name__, _safe_error_text(exc, max_length=180))
     finally:
         _clear_optional_bootstrap_circuit(session)
 
 
-def _exception_response_text(exc: BaseException) -> str:
+def _safe_error_text(value: object, *, max_length: int = 500) -> str:
+    text = str(value or "")
+    def _safe_url(match):
+        raw = match.group(0)
+        try:
+            parsed = urlparse(raw)
+            host = parsed.hostname or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            return f"{parsed.scheme}://{host}{port}{parsed.path}"
+        except Exception:
+            return raw.split("?", 1)[0].split("@", 1)[-1]
+    text = re.sub(r"https?://[^\s'\"<>]+", _safe_url, text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?i)(['\"]?(?:access[_-]?token|refresh[_-]?token|csrf(?:token)?|password|secret|otp|code)['\"]?\s*[:=]\s*['\"]?)[^,}\s'\"]+",
+        r"\1<redacted>",
+        text,
+    )
+    text = re.sub(r"[\r\n\x00-\x1f\x7f]", " ", text)
+    text = " ".join(text.split())
+    return text[:max_length] + ("…" if len(text) > max_length else "")
+
+
+def _raw_exception_response_text(exc: BaseException) -> str:
     response = getattr(exc, "response", None)
     return str(getattr(response, "text", "") or "")
+
+
+def _exception_response_text(exc: BaseException) -> str:
+    return _safe_error_text(_raw_exception_response_text(exc))
 
 
 def _exception_status_code(exc: BaseException) -> int | None:
@@ -482,6 +615,7 @@ def _validate_reauth_with_retry(
     """提交 reauth OTP；验证码错误时重新发送并重新取码。"""
     current_otp: str | None = None
     last_exc: Exception | None = None
+    max_otp_attempts = _bounded_attempts(max_otp_attempts, default=3, cap=3)
     for attempt in range(1, max_otp_attempts + 1):
         try:
             if current_otp is None:
@@ -500,8 +634,12 @@ def _validate_reauth_with_retry(
             raise
         except Exception as exc:
             last_exc = exc
-            body = _exception_response_text(exc)
-            dead_code = detect_account_unusable_text(body) or detect_account_unusable_text(str(exc))
+            body = _raw_exception_response_text(exc)
+            dead_code = (
+                detect_account_unusable_response_body(body)
+                or detect_account_unusable_text(body)
+                or detect_account_unusable_text(str(exc))
+            )
             if dead_code:
                 raise AccountUnusableError(
                     f"账号已废弃（{dead_code}），邮箱不可再用",
@@ -518,7 +656,7 @@ def _validate_reauth_with_retry(
                 "[查活] 重认证 OTP 无效/过期，重新发送后再取（%s/%s）：%s",
                 attempt,
                 max_otp_attempts,
-                str(exc)[:180],
+                _safe_error_text(exc, max_length=180),
             )
             send_email_otp(session)
             otp_after_ts = time.time()
@@ -530,23 +668,48 @@ def _validate_reauth_with_retry(
 def _login_via_reauth(
     session: BrowserSession,
     email: str,
-    otp_after_ts: float,
+    otp_after_ts: float | None = None,
     email_source: str | None = None,
 ) -> dict:
     """按 2FA 已验证链路重新认证并刷新 ChatGPT session。"""
-    auth_url = _trigger_reauth_with_retry(session, email)
+    # The authorize navigation, not the NextAuth signin POST, sends the OTP.
+    # Capture the mailbox boundary immediately before that navigation so an old
+    # message cannot win after the optional API delay/auth-document warmup.
+    auth_url = _trigger_reauth_with_retry(
+        session,
+        email,
+        callback_url="https://chatgpt.com/",
+    )
     logger.info("[查活] reauth authorize URL 已获取")
     human_delay("api")
-    final_url = _follow_reauth_with_retry(session, auth_url)
+    # Warm auth.openai.com before taking the mailbox time boundary.  The
+    # authorize navigation below is the request that actually sends OTP.
+    _warm_auth_document_for_reauth(session)
+    reauth_otp_after_ts = time.time()
+    # Avoid warming the same auth document twice; keep authorize retries in the
+    # helper so a 403 still reuses this session's Cookie Jar and circuit state.
+    final_url = _follow_reauth_with_retry(
+        session,
+        auth_url,
+        warm_auth_document=False,
+    )
     dead_code = detect_account_unusable_text(final_url)
     if dead_code:
         raise AccountUnusableError(f"账号已废弃（{dead_code}）", error_code=dead_code)
+    parsed = urlparse(str(final_url or ""))
+    auth_host = (parsed.hostname or "").lower().rstrip(".")
+    auth_path = (parsed.path or "").lower()
+    if auth_host not in {"auth.openai.com", "www.auth.openai.com"} or "/email-verification" not in auth_path:
+        raise RuntimeError(
+            "reauth authorize 落点异常，未进入邮箱验证页面："
+            f"{_safe_error_text(final_url, max_length=220)}"
+        )
     human_delay("navigate")
     logger.info("[查活] 已跟随 reauth authorize URL，开始等待邮箱 OTP")
     continue_url = _validate_reauth_with_retry(
         session,
         email,
-        otp_after_ts,
+        reauth_otp_after_ts,
         email_source=email_source,
     )
     logger.info("[查活] reauth OTP 验证通过，开始交换新 token")
@@ -644,6 +807,11 @@ def _login_via_full_web_flow(
         proxy,
         fingerprint_state=fingerprint_state,
     )
+    # Match the existing-AT reauth chain: warm the auth-domain document in
+    # this same Cookie Jar before spending the authorize URL, then timestamp
+    # the mailbox immediately before the navigation that triggers OTP.
+    human_delay("api")
+    _warm_auth_document_for_reauth(session)
     otp_after_ts = time.time()
     final_url = follow_authorize(session, authorize_url)
     dead_code = detect_account_unusable_text(final_url)
@@ -652,6 +820,7 @@ def _login_via_full_web_flow(
             f"账号已废弃（{dead_code}）",
             error_code=dead_code,
         )
+    human_delay("navigate")
     session_info = _login_via_password_or_otp(
         session,
         email,
@@ -681,6 +850,7 @@ def _validate_with_retry(
 ) -> dict:
     current_otp = None
     last_exc: Exception | None = None
+    max_otp_attempts = _bounded_attempts(max_otp_attempts, default=3, cap=3)
     for attempt in range(1, max_otp_attempts + 1):
         try:
             if current_otp is None:
@@ -696,7 +866,7 @@ def _validate_with_retry(
             last_exc = exc
             if attempt >= max_otp_attempts:
                 break
-            logger.warning("[查活] OTP 无效/过期，重新发送后再取：%s", str(exc)[:180])
+            logger.warning("[查活] OTP 无效/过期，重新发送后再取：%s", _safe_error_text(exc, max_length=180))
             send_email_otp(session)
             # 以“重新发送请求完成后”为新基准，避免刚刚失败的上一封旧码再次被 after 容忍窗口命中。
             otp_after_ts = time.time()
@@ -707,7 +877,7 @@ def _validate_with_retry(
             if attempt >= max_otp_attempts or not _is_retryable_network_error(exc):
                 raise
             last_exc = exc
-            logger.warning("[查活] OTP 验证网络抖动，重新发送后再取（%s/%s）：%s", attempt, max_otp_attempts, str(exc)[:180])
+            logger.warning("[查活] OTP 验证网络抖动，重新发送后再取（%s/%s）：%s", attempt, max_otp_attempts, _safe_error_text(exc, max_length=180))
             try:
                 send_email_otp(session)
             except Exception:
@@ -776,7 +946,7 @@ def check_account_liveness(
             session = _new_fingerprint_pinned_session(email, proxy, task_fingerprint_state)
             logger.info(
                 "[查活] 会话创建完成：proxy=%s device_id=%s（复用2FA稳定链路）",
-                session.proxy or "直连/配置随机",
+                redact_proxy_url(session.proxy) if session.proxy else "直连/配置随机",
                 session.device_id,
             )
             logger.info("[查活] 指纹摘要：%s", session.fingerprint_summary_text())
@@ -786,7 +956,6 @@ def check_account_liveness(
                 session_info = _login_via_reauth(
                     session,
                     email,
-                    time.time(),
                     email_source=email_source,
                 )
             except Exception as reauth_exc:
@@ -798,7 +967,7 @@ def check_account_liveness(
                 failed_proxy = session.proxy if proxy is None else proxy
                 logger.warning(
                     "[查活] AT reauth 链临时失败，切换干净会话执行纯协议完整登录：%s",
-                    str(reauth_exc)[:240],
+                    _safe_error_text(reauth_exc, max_length=240),
                 )
                 try:
                     session.session.close()
@@ -836,7 +1005,7 @@ def check_account_liveness(
             "checked_at": checked_at,
             "access_token": access_token,
             "session": session_info,
-            "proxy_used": session.proxy or None,
+            "proxy_used": redact_proxy_url(session.proxy) or None,
             "fingerprint": fp,
             "fingerprint_text": _safe_fingerprint_text_for_account(session),
         }
@@ -849,8 +1018,18 @@ def check_account_liveness(
         if code:
             logger.warning("[查活] 已废号：%s %s", email, code)
             return {"ok": False, "status": "deactivated", "checked_at": checked_at, "error": code}
-        logger.warning("[查活] 失败：%s %s: %s", email, type(exc).__name__, str(exc)[:260])
-        return {"ok": False, "status": "failed", "checked_at": checked_at, "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
+        status_code = _exception_status_code(exc)
+        safe_error = _safe_error_text(exc)
+        logger.warning("[查活] 失败：%s %s: %s", email, type(exc).__name__, safe_error[:260])
+        return {
+            "ok": False,
+            "status": "failed",
+            "checked_at": checked_at,
+            "error": f"{type(exc).__name__}: {safe_error}",
+            "http_status": status_code,
+            "phase": "network" if status_code in {403, 408, 425, 429} or (status_code and status_code >= 500) else "auth",
+            "error_code": "edge_http" if status_code in {403, 408, 425, 429} or (status_code and status_code >= 500) else "",
+        }
     finally:
         try:
             logger.info("[查活] 结束：%s", email)

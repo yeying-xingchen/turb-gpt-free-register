@@ -132,7 +132,14 @@ def _proxy_retry_config() -> tuple[int, float]:
 
 
 def _is_transient_network_error(exc: Exception) -> bool:
-    """识别可重试的临时性网络错误（TLS / 连接超时 / 连接重置 / 代理拒绝）。"""
+    """识别可重试的临时性网络/边缘错误（含真实 response status）。"""
+    response = getattr(exc, "response", None)
+    try:
+        status = int(getattr(response, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status in (403, 408, 425, 429) or status >= 500:
+        return True
     name = type(exc).__name__
     msg = str(exc).lower()
     transient_classes = ("SSLError", "ConnectionError", "Timeout", "CurlError", "ProxyError")
@@ -150,6 +157,14 @@ def _is_transient_network_error(exc: Exception) -> bool:
         "curl: (35)",
         "curl: (52)",                # empty reply from server
         "curl: (56)",                # network recv failure
+        "status=403",
+        "status=408",
+        "status=425",
+        "status=429",
+        "status=5",                  # network_preflight 的 status=5xx 文本
+        "http 403",
+        "http error 403",
+        "http 429",
     )
     return any(k in msg for k in transient_keywords)
 

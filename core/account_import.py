@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -45,6 +46,28 @@ def _looks_like_http_url(value: Any) -> bool:
     except ValueError:
         return False
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+# ``email----token----totp----source`` was accepted by older versions of the
+# importer.  Keep recognising the known source values so the new four-field
+# ``email----ChatGPT_password----totp----token`` form remains unambiguous.
+_KNOWN_EMAIL_SOURCES = {
+    "outlook", "outlook_pool", "generic_api", "generic-api", "imap",
+    "cloudflare_domain", "cloudflare-domain", "cloudflare", "cloudflare_temp_email",
+    "gptmail", "mailnest", "cloudmail", "remail", "djbnb", "imported", "manual",
+}
+
+
+def _looks_like_email_source(value: Any) -> bool:
+    return _text(value).lower() in _KNOWN_EMAIL_SOURCES
+
+
+def _looks_like_access_token(value: Any) -> bool:
+    """Recognise common access-token shapes for ambiguous short formats."""
+    token = _strip_bearer(value)
+    if not token:
+        return False
+    return token.startswith("eyJ") or (token.count(".") >= 2 and len(token) >= 20) or len(token) >= 40
 
 
 def _as_dict(value: Any) -> dict:
@@ -162,8 +185,9 @@ def _normalise_record(raw: Any, index: int) -> tuple[dict | None, dict | None]:
     # Generic API account exports use ``password`` for the ChatGPT login
     # password; unlike Outlook rows it is safe to promote it to the explicit
     # field used by the liveness password/TOTP flow.
+    line_format = str(result.get("account_line_format") or "").strip().lower().replace("-", "_")
     if (
-        result.get("email_source") == "generic_api"
+        (result.get("email_source") == "generic_api" or line_format in {"chatgpt_api_no_code_url", "chatgpt_no_code_url"})
         and result.get("password")
         and not result.get("registration_password")
     ):
@@ -215,13 +239,39 @@ def parse_account_json(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECOR
 
 
 def _split_line(line: str) -> list[str]:
-    if "----" in line:
-        return [part.strip() for part in line.split("----")]
-    if "====" in line:
-        return [part.strip() for part in line.split("====")]
-    if "\t" in line:
-        return [part.strip() for part in line.split("\t")]
-    return [line.strip()]
+    """Split a text account row while tolerating common copy/paste separators.
+
+    The documented format uses ``----``. A fair number of exported account
+    lists use ``|``, tabs, commas, semicolons, colons, or whitespace instead.
+    URL strings are protected by only using the weaker fallbacks when the row
+    does not contain an URL scheme.
+    """
+    text = str(line or "").strip()
+    # Normalize punctuation commonly introduced by Chinese IMEs/chat apps.
+    text = text.translate(str.maketrans({
+        "｜": "|", "，": ",", "；": ";", "：": ":", "　": " ",
+        "﹣": "-", "－": "-", "—": "-", "–": "-",
+    }))
+    for separator in ("----", "====", "|||", "\t"):
+        if separator in text:
+            return [part.strip() for part in text.split(separator)]
+    if "|" in text:
+        return [part.strip() for part in text.split("|")]
+    # Comma/semicolon are safe fallback separators for simple account lists.
+    for separator in (";", ","):
+        if separator in text:
+            return [part.strip() for part in text.split(separator)]
+    # ``email:token`` / ``email:password:totp:token`` is common in copied
+    # credential lists. Do not split URL-bearing rows, because ``https://``
+    # contains colons of its own.
+    if "://" not in text and _valid_email(text.split(":", 1)[0]):
+        return [part.strip() for part in text.split(":")]
+    # Finally accept whitespace-separated rows such as ``email token``. Only
+    # do this when the first field is visibly an email, so a malformed prose
+    # line is still reported instead of being treated as credentials.
+    if _valid_email(text.split(None, 1)[0] if text.split(None, 1) else ""):
+        return [part.strip() for part in re.split(r"\s+", text) if part.strip()]
+    return [text]
 
 
 def parse_account_text(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECORDS) -> tuple[list[dict], list[dict]]:
@@ -231,12 +281,14 @@ def parse_account_text(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECOR
 
     * ``email----access_token[----totp_secret]``
     * ``email----code_url----access_token[----totp_secret]``
+    * ``email----ChatGPT_password----2OTP_secret----access_token``（不带取码地址）
     * ``email----ChatGPT_password----2OTP_secret----code_url----access_token``
     * Outlook 素材整行 ``email----password----clientId----refreshToken----access_token``
 
     五段通用 API 格式中，第 2 段是 ChatGPT 账号密码，第 3 段是 2OTP/TOTP
     密钥，第 4 段是取码地址，最后一段是 access token；取码地址会保存到通用
-    API 邮箱池，方便后续查活自动收取 OTP。
+    API 邮箱池，方便后续查活自动收取 OTP。四段无取码地址格式不会创建邮箱池
+    记录，但会保存 ChatGPT 密码和 TOTP。
     """
     valid: list[dict] = []
     errors: list[dict] = []
@@ -263,17 +315,26 @@ def parse_account_text(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECOR
         if len(parts) >= 5:
             # 通用 API 账号：邮箱、ChatGPT 密码、2OTP/TOTP 密钥、取码地址、AT。
             # Outlook 旧整行没有 URL，仍按 email/password/clientId/refreshToken/AT
-            # 兼容解析。
+            # 兼容解析。也接受用空的第 4 段显式省略取码地址：
+            # email----ChatGPT_password----2OTP_secret--------access_token。
             token_index = 4
-            material_line = "----".join(parts[:4])
             fields["password"] = parts[1]
             if _looks_like_http_url(parts[3]):
+                material_line = "----".join(parts[:4])
                 fields["registration_password"] = parts[1]
                 fields["totp_secret"] = parts[2]
                 fields["code_url"] = parts[3]
                 fields["email_source"] = "generic_api"
                 fields["account_line_format"] = "chatgpt_api"
+            elif not parts[3]:
+                # 保持字段位置不变的无取码地址格式：
+                # email----ChatGPT_password----TOTP--------access_token。
+                material_line = "----".join(parts[:3])
+                fields["registration_password"] = parts[1]
+                fields["totp_secret"] = parts[2]
+                fields["account_line_format"] = "chatgpt_api_no_code_url"
             else:
+                material_line = "----".join(parts[:4])
                 fields["client_id"] = parts[2]
                 fields["refresh_token"] = parts[3]
                 fields["email_source"] = "outlook"
@@ -287,6 +348,24 @@ def parse_account_text(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECOR
             token_index = 2
             totp = parts[3]
             material_line = "----".join(parts[:2])
+        elif len(parts) == 4 and _looks_like_http_url(parts[3]):
+            # URL 放在末尾但没有 access_token，不能把 URL 当成 token 静默导入。
+            errors.append({
+                "line": line_number,
+                "reason": "格式错误：无取码地址格式应为 email----ChatGPT密码----TOTP----access_token；取码地址格式请把 URL 放在第二段并提供 access_token",
+            })
+            continue
+        elif len(parts) == 4 and _looks_like_email_source(parts[3]):
+            # 兼容旧的 email----token----totp----source 写法；source 不参与账号凭证。
+            totp = parts[2]
+        elif len(parts) == 4:
+            # 无邮箱接码地址的账号：邮箱、ChatGPT 密码、2OTP/TOTP 密钥、AT。
+            token_index = 3
+            material_line = "----".join(parts[:3])
+            fields["password"] = parts[1]
+            fields["registration_password"] = parts[1]
+            fields["totp_secret"] = parts[2]
+            fields["account_line_format"] = "chatgpt_api_no_code_url"
         elif len(parts) == 3 and _looks_like_http_url(parts[1]):
             # 通用 API 账号：email----code_url----access_token。
             fields["code_url"] = parts[1]
@@ -295,9 +374,6 @@ def parse_account_text(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECOR
             material_line = "----".join(parts[:2])
         elif len(parts) == 3:
             # 简写：email----access_token----totp_secret。
-            totp = parts[2]
-        elif len(parts) == 4:
-            # 兼容旧的 email----token----totp----source 写法；source 不参与账号凭证。
             totp = parts[2]
 
         token = _strip_bearer(parts[token_index] if token_index < len(parts) else "")

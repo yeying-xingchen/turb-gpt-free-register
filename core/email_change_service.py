@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from config.proxy import normalize_proxy_url, redact_proxy_url
 from core import db
 from core.email_provider import (
     acquire_email_from_source, email_material_line,
@@ -39,22 +40,19 @@ def _append_log(account_id: int, message: str, *, clear: bool = False) -> None:
 
 
 def _proxy(value: str | None) -> str:
+    """Normalize a persisted proxy, ignoring historical non-URL labels."""
     text = str(value or "").strip()
-    return text if text.lower().startswith(("http://", "https://", "socks4://", "socks5://", "socks5h://")) else ""
+    if not text:
+        return ""
+    try:
+        return normalize_proxy_url(text)
+    except ValueError:
+        return ""
 
 
 def _proxy_label(value: str | None) -> str:
     """日志用代理摘要，保留路由信息但隐藏认证密码。"""
-    text = str(value or "").strip()
-    if not text:
-        return "direct"
-    try:
-        parsed = urlparse(text)
-        auth = "***:***@" if parsed.username or parsed.password else ""
-        port = f":{parsed.port}" if parsed.port else ""
-        return f"{parsed.scheme}://{auth}{parsed.hostname or '?'}{port}"
-    except Exception:
-        return "proxy://***"
+    return redact_proxy_url(value) or "direct"
 
 
 def _cost(started: float) -> str:

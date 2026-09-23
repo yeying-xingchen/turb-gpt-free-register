@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 
 from config import payment as payment_cfg
 from config import proxy as proxy_cfg
+from config.proxy import normalize_proxy_url, redact_proxy_url
 from core import db
 
 logger = logging.getLogger(__name__)
@@ -243,15 +244,16 @@ def _proxy_map() -> dict[str, str]:
 def _proxy_for(region_name: str) -> str:
     overrides = _proxy_map()
     value = overrides.get(str(region_name or "").lower()) or overrides.get("default")
-    if value:
-        return value
-    value = str(_setting("PAYMENT_METHOD_CHECK_PROXY", "") or "").strip()
-    if value:
-        return value
-    # A configured pool is the last fallback.  Operators should use a proxy
-    # whose exit country matches each selected checkout region.
-    pool = getattr(proxy_cfg, "PROXY_POOL", []) or []
-    return str(pool[0] if pool else "").strip()
+    if not value:
+        value = str(_setting("PAYMENT_METHOD_CHECK_PROXY", "") or "").strip()
+    if not value:
+        # A configured pool is the last fallback.  Operators should use a proxy
+        # whose exit country matches each selected checkout region.
+        pool = getattr(proxy_cfg, "PROXY_POOL", []) or []
+        value = str(pool[0] if pool else "").strip()
+    if not value:
+        return ""
+    return normalize_proxy_url(value)
 
 
 def _redact_error(value: Any) -> str:

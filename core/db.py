@@ -29,6 +29,10 @@ _PAYMENT_METHOD_CHECK_QUEUE_STALE_SECONDS = 3600
 # 否则旧 worker 仍在远端执行时，重复点击会创建第二个任务并可能重复扣次。
 _EXTRACT_LINK_STALE_SECONDS = 3600
 _EXTRACT_LINK_QUEUE_STALE_SECONDS = 1800
+# MoMo activation uses the same long-running remote-job profile as extract-link,
+# but keeps its own names so callers/tests can tune or inspect the timeout.
+_MOMO_ACTIVATION_STALE_SECONDS = _EXTRACT_LINK_STALE_SECONDS
+_MOMO_ACTIVATION_QUEUE_STALE_SECONDS = _EXTRACT_LINK_QUEUE_STALE_SECONDS
 
 _OUTLOOK_JSON = _PROJECT_ROOT / "用于注册的邮箱.json"
 _OUTLOOK_TXT = _PROJECT_ROOT / "用于注册的邮箱.txt"
@@ -74,6 +78,12 @@ _SQLITE_READY_PATH: Path | None = None
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _sql_like_contains(value: object, *, escape: str = "!") -> str:
+    """Build a literal case-insensitive LIKE contains pattern."""
+    text = str(value or "").strip().lower()
+    return "%" + text.replace(escape, escape + escape).replace("%", escape + "%").replace("_", escape + "_") + "%"
 
 
 def _ensure_storage() -> None:
@@ -400,7 +410,7 @@ def _query_collection(collection: str, *, status: str | None = None, archived: s
     if archived not in (None, "all", "include"):
         where.append("archived=?"); params.append(int(archived in (True, "1", "true", "yes", "only")))
     if q and str(q).strip():
-        where.append("lower(payload) LIKE ?"); params.append("%" + str(q).strip().lower() + "%")
+        where.append("lower(payload) LIKE ? ESCAPE '!'"); params.append(_sql_like_contains(q))
     if date_from:
         where.append("created_at >= ?"); params.append(str(date_from) + ("T00:00:00" if len(str(date_from)) == 10 else ""))
     if date_to:
@@ -431,7 +441,7 @@ def _query_collection_page(collection: str, *, status: str | None = None,
     if archived not in (None, "all", "include"):
         where.append("archived=?"); params.append(int(archived in (True, "1", "true", "yes", "only")))
     if q and str(q).strip():
-        where.append("lower(payload) LIKE ?"); params.append("%" + str(q).strip().lower() + "%")
+        where.append("lower(payload) LIKE ? ESCAPE '!'"); params.append(_sql_like_contains(q))
     if date_from:
         value = str(date_from)
         where.append("created_at >= ?"); params.append(value + ("T00:00:00" if len(value) == 10 else ""))
@@ -620,6 +630,64 @@ def _safe_payment_result(result: dict[str, Any]) -> dict[str, Any]:
     return {key: clean(result.get(key)) for key in allowed if result.get(key) is not None}
 
 
+def _safe_momo_activation_summary(value: Any) -> dict[str, Any]:
+    """Keep only a bounded, non-secret MoMo activation result summary.
+
+    Activation adapters may receive a remote response containing job secrets,
+    tokens, checkout payloads, or account material.  This helper deliberately
+    accepts an explicit summary object only and drops sensitive-looking keys at
+    every nesting level before it is serialized into the account payload.
+    """
+    sensitive_keys = {
+        "token", "accesstoken", "access_token", "refresh_token", "id_token",
+        "secret", "job_secret", "authorization", "cookie", "cookies", "headers",
+        "raw", "payload", "body", "request", "response", "session", "credential",
+        "credentials", "password", "passwd", "email", "account_email", "accountemail",
+        "checkout_session_id", "checkoutsessionid", "client_secret", "api_key", "apikey",
+    }
+    # The summary is intentionally narrower than a generic JSON sanitizer: only
+    # descriptive remote-job/account-plan fields are persisted.  plan_type and
+    # expires_at are allowed only when supplied inside this explicit summary.
+    allowed_keys = {
+        "status", "remote_status", "message", "ok", "success", "activated",
+        "plan_type", "expires_at", "plan_expires_at", "activation_status",
+        "activation_id", "job_id", "provider", "channel", "country", "currency",
+        "amount", "currency_code", "checked_at", "completed_at", "error_code",
+    }
+
+    def clean(value: Any, depth: int = 0) -> Any:
+        if depth > 4:
+            return None
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for raw_key, raw_value in value.items():
+                key = str(raw_key)
+                lower = key.lower().replace("-", "_")
+                if lower in sensitive_keys or lower not in allowed_keys:
+                    continue
+                cleaned = clean(raw_value, depth + 1)
+                if cleaned is not None:
+                    out[key] = cleaned
+            return out
+        if isinstance(value, list):
+            return [clean(item, depth + 1) for item in value[:50] if clean(item, depth + 1) is not None]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if isinstance(value, str):
+                return _safe_payment_error(value)
+            return value
+        return _safe_payment_error(value)
+
+    cleaned = clean(value)
+    return cleaned if isinstance(cleaned, dict) else {}
+
+
+def _safe_momo_activation_text(value: Any, limit: int = 500) -> str | None:
+    if value is None:
+        return None
+    text = _safe_payment_error(value).strip()
+    return text[:limit] if text else None
+
+
 def _outlook_line(row: dict) -> str:
     return "----".join([
         row.get("email") or "",
@@ -702,6 +770,17 @@ def _account_line(row: dict) -> str:
             str(row.get("registration_password") or row.get("password") or ""),
             str(row.get("totp_secret") or ""),
             str(row.get("code_url") or ""),
+        ])
+        return f"{base}----{row.get('access_token') or ''}"
+    if str(row.get("account_line_format") or "").strip().lower().replace("-", "_") in {
+        "chatgpt_api_no_code_url", "chatgpt_no_code_url",
+    }:
+        # 无邮箱接码地址的导入账号：保留密码/TOTP/AT，但不伪造空邮箱池
+        # 地址，也不把 ChatGPT 密码重复追加到传统账号整行末尾。
+        base = "----".join([
+            str(row.get("email") or ""),
+            str(row.get("registration_password") or row.get("password") or ""),
+            str(row.get("totp_secret") or ""),
         ])
         return f"{base}----{row.get('access_token') or ''}"
     base = row.get("original_email_line") or row.get("email") or ""
@@ -953,13 +1032,13 @@ def list_email_pool_page(
         where.append("ep.status=?")
         params.append(status)
     if q and str(q).strip():
-        like = "%" + str(q).strip().lower() + "%"
+        like = _sql_like_contains(q)
         # payload 覆盖邮箱池自身字段；source 和关联账号 payload 保持旧 WebUI
         # 的搜索能力（例如搜索 generic_api 或已注册账号 token）。
         where.append(
-            "(lower(ep.payload) LIKE ? OR lower(ep.source) LIKE ? OR EXISTS ("
+            "(lower(ep.payload) LIKE ? ESCAPE '!' OR lower(ep.source) LIKE ? ESCAPE '!' OR EXISTS ("
             "SELECT 1 FROM accounts AS a "
-            "WHERE a.email = ep.email COLLATE NOCASE AND lower(a.payload) LIKE ?))"
+            "WHERE a.email = ep.email COLLATE NOCASE AND lower(a.payload) LIKE ? ESCAPE '!'))"
         )
         params.extend([like, like, like])
     clause = " AND ".join(where)
@@ -1861,6 +1940,130 @@ def recover_interrupted_extract_links() -> int:
         return recovered
 
 
+def claim_account_activation(acc_id: int, trigger: str = "manual") -> str | bool:
+    """Atomically claim a MoMo activation task and return its ownership nonce."""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        status = str(row.get("momo_activation_status") or "").lower()
+        if status in {"queued", "running"}:
+            stamp_key = "momo_activation_queued_at" if status == "queued" else "momo_activation_started_at"
+            stale_after = _MOMO_ACTIVATION_QUEUE_STALE_SECONDS if status == "queued" else _MOMO_ACTIVATION_STALE_SECONDS
+            age = _timestamp_age_seconds(row.get(stamp_key))
+            if age is None or age < stale_after:
+                return False
+        now = _now()
+        nonce = uuid.uuid4().hex
+        row.update({
+            "momo_activation_status": "queued",
+            "momo_activation_ok": False,
+            "momo_activation_nonce": nonce,
+            "momo_activation_trigger": str(trigger or "manual"),
+            "momo_activation_queued_at": now,
+            "momo_activation_started_at": None,
+            "momo_activation_completed_at": None,
+            "momo_activation_checked_at": None,
+            "momo_activation_error": None,
+            "momo_activation_message": "已入队",
+            "momo_activation_job_id": None,
+            "momo_activation_remote_status": "queued",
+            "momo_activation_result_summary": {},
+            "updated_at": now,
+        })
+        _save_accounts(accounts)
+        return nonce
+
+
+def mark_account_activation_running(acc_id: int, nonce: str | None = None) -> bool:
+    """Move a claimed MoMo activation task to running, respecting ownership."""
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("momo_activation_status") not in {"queued", "running"}:
+            return False
+        if nonce is not None and str(row.get("momo_activation_nonce") or "") != str(nonce):
+            return False
+        now = _now()
+        row["momo_activation_status"] = "running"
+        row["momo_activation_started_at"] = row.get("momo_activation_started_at") or now
+        row["momo_activation_error"] = None
+        row["momo_activation_message"] = "任务运行中"
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def update_account_activation(acc_id: int, result: dict | None = None, nonce: str | None = None) -> bool:
+    """Persist only an allowlisted MoMo activation outcome; stale workers are fenced."""
+    result = result or {}
+    expected_nonce = nonce if nonce is not None else result.get("_nonce")
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        if expected_nonce is not None and str(row.get("momo_activation_nonce") or "") != str(expected_nonce):
+            return False
+        raw_status = str(result.get("status") or ("success" if result.get("ok") else "failed")).strip().lower()
+        status = "success" if raw_status in {"success", "succeeded", "activated"} and bool(result.get("ok")) else raw_status
+        if status not in {"queued", "running", "success", "failed", "stopped", "cancelled"}:
+            status = "failed"
+        ok = bool(result.get("ok")) and status == "success"
+        now = _now()
+        row["momo_activation_status"] = status
+        row["momo_activation_ok"] = ok
+        row["momo_activation_checked_at"] = result.get("checked_at") or now
+        row["momo_activation_remote_status"] = _safe_momo_activation_text(result.get("remote_status"), 80)
+        row["momo_activation_error"] = None if ok or status in {"queued", "running"} else _safe_momo_activation_text(result.get("error"), 500)
+        if result.get("message") is not None:
+            row["momo_activation_message"] = _safe_momo_activation_text(result.get("message"), 500)
+        if result.get("job_id") is not None:
+            row["momo_activation_job_id"] = _safe_momo_activation_text(result.get("job_id"), 180)
+        if result.get("trigger") is not None:
+            row["momo_activation_trigger"] = _safe_momo_activation_text(result.get("trigger"), 80)
+        if status in {"success", "failed", "stopped", "cancelled"}:
+            row["momo_activation_completed_at"] = now
+        summary = result.get("result_summary")
+        if isinstance(summary, dict):
+            safe = _safe_momo_activation_summary(summary)
+            row["momo_activation_result_summary"] = safe
+            plan_type = safe.get("plan_type") or safe.get("current_plan_type")
+            if ok and plan_type:
+                row["current_plan_type"] = str(plan_type)
+                row["plan_type"] = str(plan_type)
+            if ok:
+                for key in ("expires_at", "plan_expires_at"):
+                    if safe.get(key) is not None:
+                        row[key] = safe[key]
+        row["updated_at"] = now
+        _save_accounts(accounts)
+        return True
+
+
+def recover_interrupted_activations() -> int:
+    """Fence queued/running activation workers left behind by a WebUI restart."""
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("momo_activation_status") not in {"queued", "running"}:
+                continue
+            row["momo_activation_status"] = "failed"
+            row["momo_activation_ok"] = False
+            row["momo_activation_error"] = "WebUI 重启导致 MoMo 开通任务中断，请重新开通"
+            row["momo_activation_message"] = "任务已中断"
+            row["momo_activation_completed_at"] = now
+            row["momo_activation_nonce"] = uuid.uuid4().hex
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
 def _account_matches_query(row: dict, q: str | None) -> bool:
     q = str(q or "").strip().lower()
     if not q:
@@ -2003,6 +2206,10 @@ def list_account_plan_check_statuses(
         "totp_setup_status", "totp_setup_ok", "totp_setup_error",
         "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
         "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
+        "momo_activation_status", "momo_activation_ok", "momo_activation_error",
+        "momo_activation_message", "momo_activation_trigger", "momo_activation_queued_at",
+        "momo_activation_started_at", "momo_activation_completed_at", "momo_activation_checked_at",
+        "momo_activation_job_id", "momo_activation_remote_status", "momo_activation_result_summary",
         "original_email", "email_source", "email_change_status", "email_change_ok",
         "email_change_error", "email_change_new_email", "email_change_started_at", "email_change_completed_at",
     )
@@ -2078,7 +2285,14 @@ def list_account_plan_check_statuses(
                     "totp_setup_checked_at": row.get("totp_setup_checked_at"),
                     "totp_setup_started_at": row.get("totp_setup_started_at"),
                     "totp_setup_completed_at": row.get("totp_setup_completed_at"),
-                    "totp_enabled": bool(str(row.get("totp_secret") or "").strip()),
+                    "momo_activation_status": row.get("momo_activation_status"),
+                     "momo_activation_ok": row.get("momo_activation_ok"),
+                     "momo_activation_error": row.get("momo_activation_error"),
+                     "momo_activation_message": row.get("momo_activation_message"),
+                     "momo_activation_remote_status": row.get("momo_activation_remote_status"),
+                     "momo_activation_job_id": row.get("momo_activation_job_id"),
+                     "momo_activation_checked_at": row.get("momo_activation_checked_at"),
+                     "totp_enabled": bool(str(row.get("totp_secret") or "").strip()),
                     "email": row.get("email"),
                     "original_email": row.get("original_email"),
                     "email_source": row.get("email_source"),
@@ -2163,6 +2377,49 @@ def get_account(acc_id: int) -> dict | None:
     with _LOCK:
         row = next((r for r in _load_accounts() if int(r.get("id") or 0) == int(acc_id)), None)
         return _decorate_account(row) if row else None
+
+
+def get_accounts_by_ids(account_ids: list[int]) -> list[dict]:
+    """按 ID 批量读取账号，并按传入顺序返回去重后的账号。
+
+    批量复制/导出不能对每个 ID 重复加载整张账号表；这里直接走 SQLite
+    ``IN`` 查询，同时仍复用账号装饰逻辑，避免把分页列表中的敏感字段下发。
+    """
+    wanted: list[int] = []
+    seen: set[int] = set()
+    for raw in account_ids or []:
+        try:
+            acc_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if acc_id <= 0 or acc_id in seen:
+            continue
+        seen.add(acc_id)
+        wanted.append(acc_id)
+    if not wanted:
+        return []
+
+    with _LOCK:
+        _ensure_sqlite()
+        with closing(_sqlite_conn()) as conn:
+            rows_by_id: dict[int, dict] = {}
+            # Keep each IN query below SQLite's common 999-variable limit.
+            for start in range(0, len(wanted), 900):
+                batch = wanted[start:start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                for raw in conn.execute(
+                    f"SELECT id, payload FROM accounts WHERE id IN ({placeholders})",
+                    batch,
+                ):
+                    try:
+                        row = json.loads(raw["payload"])
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    row["id"] = int(raw["id"])
+                    rows_by_id[int(raw["id"])] = _decorate_account(row)
+        return [rows_by_id[acc_id] for acc_id in wanted if acc_id in rows_by_id]
 
 
 def get_account_by_email(email: str) -> dict | None:
@@ -3165,8 +3422,8 @@ def _codex_filter_sql(
         where.append("created_at <= ?")
         params.append(value + ("T23:59:59.999999" if len(value) == 10 else ""))
     if q and str(q).strip():
-        where.append("lower(payload) LIKE ?")
-        params.append("%" + str(q).strip().lower() + "%")
+        where.append("lower(payload) LIKE ? ESCAPE '!'")
+        params.append(_sql_like_contains(q))
     return where, params
 
 
