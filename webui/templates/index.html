@@ -4688,7 +4688,11 @@ async function onAccountsBodyClick(e) {
     const field = copySecretBtn.dataset.accountCopySecret;
     copySecretBtn.disabled = true;
     try {
-      const value = await fetchOneAccountSecret(id, field);
+      const sensitive = field === 'login_credentials' || field === 'full_export';
+      if (sensitive && !confirm(field === 'login_credentials'
+        ? '登录凭据包含注册密码和 2FA 密钥，确定复制吗？'
+        : '完整导出包含敏感凭据和 Token，确定复制吗？')) return;
+      const value = await fetchOneAccountSecret(id, field, sensitive);
       if (!value) { showToast('可复制内容为空'); return; }
       copyText(value);
       showToast(
@@ -5154,8 +5158,10 @@ async function fetchAccountSecrets(ids, field, confirmSensitive = false) {
   return (r.values || []).map(x => x.value).filter(Boolean);
 }
 
-async function fetchOneAccountSecret(id, field) {
-  const r = await api(`/api/accounts/${encodeURIComponent(id)}/secret?field=${encodeURIComponent(field)}`);
+async function fetchOneAccountSecret(id, field, confirmSensitive = false) {
+  const params = new URLSearchParams({field});
+  if (confirmSensitive) params.set('confirm_sensitive', 'true');
+  const r = await api(`/api/accounts/${encodeURIComponent(id)}/secret?${params.toString()}`);
   return r.value || '';
 }
 
@@ -7697,9 +7703,11 @@ function bindCloudMailToolsV2() {
 }
 function _configValueV2(key) {
   const root = document.querySelector(`#configSectionsV2 [data-key="${CSS.escape(key)}"]`);
-  if (root && !root.dataset.secret) return root.value;
+  // Secret controls are masked when configured, but a newly typed value must
+  // be usable by CloudMail actions before the user saves the whole form.
+  if (root) return String(root.value ?? '');
   const f = CONFIG.find(x => x.key === key);
-  return f && !f.secret ? String(f.value ?? '') : '';
+  return f ? String(f.value ?? '') : '';
 }
 async function genCloudMailTokenV2() {
   const btn = $('#btnGenCloudMailTokenV2');
@@ -7714,8 +7722,9 @@ async function genCloudMailTokenV2() {
       body: JSON.stringify({
         api_base: _configValueV2('CLOUDMAIL_API_BASE').trim(),
         admin_email: _configValueV2('CLOUDMAIL_ADMIN_EMAIL').trim(),
-        // Secret inputs stay masked; backend falls back to the process config.
-        password: '',
+        // Blank keeps the backend fallback; a newly typed value is sent
+        // process-only and is persisted only when explicitly supplied.
+        password: _configValueV2('CLOUDMAIL_PASSWORD').trim(),
         path: _configValueV2('CLOUDMAIL_TOKEN_PATH').trim() || '/api/public/genToken',
       }),
     });
@@ -7741,10 +7750,10 @@ async function loadCloudMailDomainsV2() {
       body: JSON.stringify({
         api_base: _configValueV2('CLOUDMAIL_API_BASE').trim(),
         admin_email: _configValueV2('CLOUDMAIL_ADMIN_EMAIL').trim(),
-        // Masked secrets are not fetched into the browser; backend fallback
-        // uses the process configuration without persisting it to .env.
-        password: '',
-        token: '',
+        // Blank masked values use backend fallback; newly typed values are
+        // sent for this request and persisted only when explicitly supplied.
+        password: _configValueV2('CLOUDMAIL_PASSWORD').trim(),
+        token: _configValueV2('CLOUDMAIL_AUTH_TOKEN').trim(),
       }),
     });
     const domains = Array.isArray(r.domains) ? r.domains : [];
@@ -8111,13 +8120,22 @@ async function saveConfigUpdates(triggerBtn) {
     const f = CONFIG.find(x => x.key === el.dataset.key);
     if (!f || seen.has(f.key)) return;
     seen.add(f.key);
-    updates[f.key] = readConfigElementValue(el, f);
+    const pending = CONFIG_PENDING_UPDATES[f.key];
+    updates[f.key] = pending === '__CLEAR_SECRET__' ? pending : readConfigElementValue(el, f);
   });
   const buttons = [triggerBtn, ...$$('#tab-config [data-save-config-v2]')].filter(Boolean);
   buttons.forEach(btn => { btn.disabled = true; });
   try {
     const r = await api('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({updates}) });
-    for (const [k, v] of Object.entries(updates)) { const f = CONFIG.find(x => x.key === k); if (f) f.value = v; delete CONFIG_PENDING_UPDATES[k]; }
+    for (const [k, v] of Object.entries(updates)) {
+      const f = CONFIG.find(x => x.key === k);
+      if (f) {
+        f.value = v === '__CLEAR_SECRET__' ? (f.type === 'list_str_multiline' ? [] : '') : v;
+        if (f.secret && v === '__CLEAR_SECRET__') f.secret_configured = false;
+        if (f.secret && v !== '__CLEAR_SECRET__' && v != null && String(v).trim()) f.secret_configured = true;
+      }
+      delete CONFIG_PENDING_UPDATES[k];
+    }
     renderConfigLayoutV2();
     showToast(r.reloaded ? '配置已生效' : '配置已保存（需重启）');
   } catch(e) { showToast('保存失败: ' + e.message); }

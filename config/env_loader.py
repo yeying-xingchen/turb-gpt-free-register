@@ -15,6 +15,16 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _PROJECT_ROOT / ".env"
 _LOADED = False
+# Track Secret values that were actually supplied by .env.  This lets a blank
+# .env placeholder preserve an external/process-only Secret, while still
+# allowing an explicit WebUI clear to remove a value previously loaded from
+# .env rather than accidentally resurrecting it.
+_DOTENV_APPLIED_SECRET_VALUES: dict[str, str] = {}
+_DOTENV_APPLIED_ENV_PATH: Path | None = None
+# Keys explicitly cleared through WebUI.  A blank `.env` normally preserves an
+# external/process-only fallback, but an intentional clear must suppress it
+# until a later nonblank value is supplied.
+_SUPPRESSED_PROCESS_SECRET_KEYS: set[str] = set()
 
 # 这些多行列表字段允许用空值显式覆盖为 []。
 # 例如 WebUI 清空代理池后会写入 PROXY_POOL="" / PROXY_POOL="[]"，不能再回退到源码默认本地代理。
@@ -67,6 +77,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "SUB2API_API_KEY": "sub2api 管理接口 API Key",
     "SUB2API_PROXY_KEY": "sub2api 代理键",
     "SUB2API_API_TOKEN": "sub2api 管理接口鉴权 Token（旧配置名，兼容）",
+    "SUB2_CODEX_API_TOKEN": "sub2 Codex 兼容 API Token",
     "SMS_API_KEY": "接码平台 API Key（如 GrizzlySMS）",
     "SMSBOWER_API_KEY": "SMSBower API Key",
     "L_ADMIN_AUTH_CODE": "本地 L 接码服务 ADMIN_AUTH_CODE",
@@ -84,23 +95,70 @@ def load_env(*, override: bool = False) -> Path:
     """加载项目根 .env 到进程环境。可重复调用（reload 时用 override=True）。
 
     优先使用 python-dotenv；未安装时使用本文件内置的轻量 parser，避免配置读取强依赖。
+    Secret 的空 `.env` 占位符不会覆盖仅存在于当前进程的 fallback Secret；但如果该值
+    之前确实由 `.env` 加载，则 WebUI 写入空值时会清掉旧的 dotenv 值。这样既保留
+    process-only fallback，也不破坏非空 `.env` 的热加载和显式清除。
     """
-    global _LOADED
+    global _LOADED, _DOTENV_APPLIED_SECRET_VALUES, _DOTENV_APPLIED_ENV_PATH
+    file_values = read_env_file() if _ENV_PATH.exists() else {}
+    if _DOTENV_APPLIED_ENV_PATH != _ENV_PATH:
+        _DOTENV_APPLIED_SECRET_VALUES = {}
+        _DOTENV_APPLIED_ENV_PATH = _ENV_PATH
+    previous_dotenv = dict(_DOTENV_APPLIED_SECRET_VALUES)
+    before_values = {key: os.environ.get(key) for key in SECRET_ENV_KEYS}
+
     try:
         from dotenv import load_dotenv
     except ImportError:  # pragma: no cover
         if _ENV_PATH.exists():
-            for key, value in read_env_file().items():
+            for key, value in file_values.items():
                 if override or key not in os.environ:
                     os.environ[key] = value
-        _LOADED = True
-        return _ENV_PATH
-
-    if _ENV_PATH.exists():
-        load_dotenv(dotenv_path=_ENV_PATH, override=override)
+        else:
+            # 没有项目 .env 时仍保留当前进程环境。
+            pass
     else:
-        # 仍然允许系统环境变量生效
-        load_dotenv(override=override)
+        if _ENV_PATH.exists():
+            load_dotenv(dotenv_path=_ENV_PATH, override=override)
+        else:
+            # 仍然允许系统环境变量生效
+            load_dotenv(override=override)
+
+    applied: dict[str, str] = {}
+    for key in SECRET_ENV_KEYS:
+        file_has_key = key in file_values
+        file_value = str(file_values.get(key) or "")
+        before = before_values.get(key)
+        current = os.environ.get(key)
+        previous = previous_dotenv.get(key)
+
+        if file_has_key and file_value.strip():
+            # A newly supplied nonblank value supersedes an explicit clear.
+            _SUPPRESSED_PROCESS_SECRET_KEYS.discard(key)
+            # override=True（热加载）时 current 应等于文件值；override=False
+            # 且已有外部环境变量时，保留外部值并不把它标记成 dotenv-owned。
+            if current == file_value:
+                applied[key] = file_value
+            continue
+
+        if file_has_key and not file_value.strip():
+            if key in _SUPPRESSED_PROCESS_SECRET_KEYS:
+                os.environ[key] = ""
+                continue
+            if previous is not None and before == previous:
+                # WebUI 明确把此前由 .env 提供的值清空。
+                os.environ[key] = ""
+            elif before is not None and str(before).strip():
+                # process-only / 外部环境 Secret 优先于空占位符。
+                os.environ[key] = before
+            # 无此前值时保留 dotenv 写入的空字符串。
+            continue
+
+        if previous is not None and before == previous:
+            # 删除 .env 中此前由它提供的 Secret 时同步清除旧覆盖值。
+            os.environ[key] = ""
+
+    _DOTENV_APPLIED_SECRET_VALUES = applied
     _LOADED = True
     return _ENV_PATH
 
@@ -165,6 +223,13 @@ def write_env_values(updates: dict[str, str]) -> list[str]:
         existing_lines = _ENV_PATH.read_text(encoding="utf-8").splitlines()
 
     remaining = {str(k): ("" if v is None else str(v)) for k, v in updates.items()}
+    for key, value in remaining.items():
+        if key not in SECRET_ENV_KEYS:
+            continue
+        if str(value).strip():
+            _SUPPRESSED_PROCESS_SECRET_KEYS.discard(key)
+        else:
+            _SUPPRESSED_PROCESS_SECRET_KEYS.add(key)
     written: list[str] = []
     out_lines: list[str] = []
     key_re = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -193,6 +258,16 @@ def write_env_values(updates: dict[str, str]) -> list[str]:
     tmp = _ENV_PATH.with_suffix(".env.tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(_ENV_PATH)
+
+    # An explicit empty Secret is a deliberate clear, not a masked/omitted
+    # value.  Set it empty before reload so load_env cannot mistake a
+    # process-only fallback for an external value that should be preserved.
+    for key, value in remaining.items():
+        if key in SECRET_ENV_KEYS and not str(value).strip():
+            os.environ[key] = ""
+    for key, value in updates.items():
+        if str(key) in SECRET_ENV_KEYS and not str(value or "").strip():
+            os.environ[str(key)] = ""
 
     # 让当前进程立刻看到新值
     load_env(override=True)

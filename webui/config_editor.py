@@ -1203,7 +1203,7 @@ def get_config() -> list[dict]:
             # Never send proxy/API credentials to the WebUI.  The form can
             # replace a configured secret, while an empty submission preserves
             # the existing .env value (see update_config below).
-            item["secret_configured"] = bool(value) if field["type"] != "list_str_multiline" else bool(value)
+            item["secret_configured"] = bool(value) or bool(str(os.getenv(key) or "").strip())
             item["value"] = [] if field["type"] == "list_str_multiline" else ""
         else:
             item["value"] = value

@@ -32,6 +32,14 @@ from webui import config_editor
 logger = logging.getLogger(__name__)
 
 
+def _strip_codex_token_previews(rows: list[dict] | None) -> list[dict]:
+    """Remove legacy access-token fragments before returning Codex list rows."""
+    for row in rows or []:
+        if isinstance(row, dict):
+            row.pop("access_token_preview", None)
+    return rows or []
+
+
 def _safe_public_url(value: object) -> str:
     """Return a sub2api URL without embedded credentials or query secrets."""
     raw = str(value or "").strip()
@@ -2742,7 +2750,7 @@ def create_app(auth_code: str | None = None) -> Flask:
                 offset=(page - 1) * page_size,
             )
             result.update({"ok": True, "page": page, "page_size": page_size})
-            result["accounts"] = result.pop("items")
+            result["accounts"] = _strip_codex_token_previews(result.pop("items"))
             result["summary"] = db.codex_accounts_summary()
             return jsonify(result)
         result = db.list_codex_accounts_page(
@@ -2755,7 +2763,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         )
         return jsonify({
             "summary": db.codex_accounts_summary(),
-            "accounts": result["items"],
+            "accounts": _strip_codex_token_previews(result["items"]),
         })
 
     @app.post("/api/codex/archive")
