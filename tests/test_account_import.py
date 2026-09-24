@@ -49,6 +49,16 @@ class AccountImportParserTests(unittest.TestCase):
         self.assertEqual(records[0]["refresh_token"], "refresh-token")
         self.assertEqual(records[0]["access_token"], "access-token")
 
+    def test_parses_double_hyphen_account_line_with_jwt(self):
+        token = "eyJ" + "-x" * 40
+        records, errors = account_import.parse_account_text(
+            "user@example.com--password,client-secret--client-id--" + token
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["email"], "user@example.com")
+        self.assertEqual(records[0]["access_token"], token)
+
     def test_parses_chatgpt_account_without_code_url(self):
         text = "user@example.com----chatgpt-password----JBSWY3DPEHPK3PXP----access-token"
 

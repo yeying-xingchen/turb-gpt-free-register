@@ -18,7 +18,8 @@ from core.browser_traffic import SeleniumTrafficTracker
 from core.roxy_asset_cache import RoxyLocalAssetCache
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
-from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
+from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult, _redact_text
+from config.proxy import redact_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ def _build_driver(opened: RoxyOpenResult):
     from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
 
     if opened.debugger_address:
-        logger.info("[Roxy] Selenium 连接 debuggerAddress=%s", opened.debugger_address)
+        logger.info("[Roxy] Selenium 连接 debuggerAddress=%s", _redact_text(opened.debugger_address))
         options = Options()
         # 页面里长轮询/风控脚本偶尔会让 driver.get 等到超时；eager 只等 DOMContentLoaded。
         options.page_load_strategy = "eager"
@@ -73,11 +74,18 @@ def _build_driver(opened: RoxyOpenResult):
             driver = webdriver.Chrome(service=Service(executable_path=driver_path), options=options)
         else:
             driver = webdriver.Chrome(options=options)
-        _apply_browser_automation_mask(driver)
+        try:
+            _apply_browser_automation_mask(driver)
+        except Exception:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            raise
         return driver
 
     if opened.webdriver_url:
-        logger.info("[Roxy] Selenium 连接 webdriver_url=%s", opened.webdriver_url)
+        logger.info("[Roxy] Selenium 连接 webdriver_url=%s", _redact_text(opened.webdriver_url))
         options = Options()
         options.page_load_strategy = "eager"
         _enable_performance_logging(options)
@@ -2204,7 +2212,7 @@ def run_roxy_registration(
 ) -> dict:
     """Roxy 指纹浏览器自动化注册入口。"""
     client = RoxyBrowserClient()
-    opened = client.open_profile()
+    opened = None
     driver = None
     create_acknowledged = False
     openai_password: str | None = None
@@ -2213,6 +2221,7 @@ def run_roxy_registration(
     asset_cache: RoxyLocalAssetCache | None = None
     asset_cache_snapshot: dict | None = None
     network_traffic: dict | None = None
+    run_succeeded = False
 
     def _merge_proxy_transport_traffic() -> None:
         """用代理链全量计数补正仅覆盖当前页面 target 的 CDP 统计。"""
@@ -2249,6 +2258,9 @@ def run_roxy_registration(
                 logger.debug("[Roxy注册] 刷新浏览器流量统计失败：%s", exc)
 
     try:
+        # Keep profile creation/opening inside the protected lifecycle so a
+        # failed create/open still closes its relay and cleans any profile.
+        opened = client.open_profile()
         driver = _build_driver(opened)
         try:
             asset_cache = RoxyLocalAssetCache(opened.debugger_address, label="Roxy").start()
@@ -2436,28 +2448,40 @@ def run_roxy_registration(
             else:
                 logger.info("[Roxy注册][Codex] ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth")
         except Exception as exc:
-            codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
+            codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {_redact_text(exc)[:180]}"}
 
         # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
         post_register_dwell(email, label="Roxy注册")
         _traffic_checkpoint()
         if asset_cache is not None:
-            asset_cache_snapshot = asset_cache.stop()
+            try:
+                asset_cache_snapshot = asset_cache.stop()
+            except Exception as exc:
+                logger.debug("[Roxy注册] 停止本地静态资源缓存失败：%s", _redact_text(exc))
         if traffic_tracker is not None:
-            network_traffic = traffic_tracker.stop()
+            try:
+                network_traffic = traffic_tracker.stop()
+            except Exception as exc:
+                logger.debug("[Roxy注册] 停止浏览器流量统计失败：%s", _redact_text(exc))
         if asset_cache_snapshot is not None:
             if not isinstance(network_traffic, dict):
                 network_traffic = {}
             network_traffic["local_asset_cache"] = asset_cache_snapshot
         _merge_proxy_transport_traffic()
         if data_saver is not None:
-            data_saver.stop()
+            try:
+                data_saver.stop()
+            except Exception as exc:
+                logger.debug("[Roxy注册] 停止省流量拦截失败：%s", _redact_text(exc))
         account_id = save_account_data(
             email=email,
             access_token=access_token,
             totp_secret=totp_secret,
             email_source=resolve_email_source(email),
-            proxy_used=((opened.raw or {}).get("proxy_pool_target") if opened else None) or proxy or None,
+            proxy_used=(
+                ((opened.raw or {}).get("proxy_pool_target") if opened else None)
+                or (redact_proxy_url(proxy) if proxy else None)
+            ),
             batch_dir=batch_dir,
             extra={
                 "user": session_info.get("user"),
@@ -2470,6 +2494,7 @@ def run_roxy_registration(
             },
         )
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
+        run_succeeded = True
         return {
             "success": bool(codex_ok),
             "email": email,
@@ -2493,14 +2518,17 @@ def run_roxy_registration(
                 pass
         _merge_proxy_transport_traffic()
         if data_saver is not None:
-            data_saver.stop()
-        logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, exc)
+            try:
+                data_saver.stop()
+            except Exception as stop_exc:
+                logger.debug("[Roxy注册] 失败路径停止省流量拦截失败：%s", _redact_text(stop_exc))
+        logger.error("[Roxy注册] 失败：%s: %s", type(exc).__name__, _redact_text(exc))
         logger.debug("[Roxy注册] 失败详情", exc_info=True)
         # 未确认创建前回收邮箱；确认后避免重复使用。
         try:
             if email:
                 from core.email_provider import release_email
-                release_email(email, status="failed" if create_acknowledged else "available", note=f"Roxy注册失败: {str(exc)[:180]}")
+                release_email(email, status="failed" if create_acknowledged else "available", note=f"Roxy注册失败: {_redact_text(exc)[:180]}")
         except Exception:
             pass
         return {
@@ -2521,11 +2549,26 @@ def run_roxy_registration(
             except Exception:
                 pass
         if data_saver is not None:
-            data_saver.stop()
-        if driver and not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
+            try:
+                data_saver.stop()
+            except Exception as exc:
+                logger.debug("[Roxy注册] 最终停止省流量拦截失败：%s", _redact_text(exc))
+        keep_open = bool(_cfg.ROXY_KEEP_BROWSER_OPEN)
+        # Preserve the whole browser/profile/relay only after a successful run.
+        # On failure, KEEP_BROWSER_OPEN must not leave a browser attached to a
+        # profile that cleanup_profile(force=True) has closed/deleted.
+        preserve_open = keep_open and run_succeeded
+        if driver and not preserve_open:
             try:
                 driver.quit()
-            except Exception:
-                pass
-        if not bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
-            client.cleanup_profile(opened)
+            except Exception as exc:
+                logger.debug("[Roxy注册] 关闭浏览器失败：%s", _redact_text(exc))
+        try:
+            if not preserve_open:
+                client.cleanup_profile(opened, force=not run_succeeded)
+        except Exception as exc:
+            logger.debug("[Roxy注册] 清理 Roxy profile 失败：%s", _redact_text(exc))
+        finally:
+            # Keep-open intentionally preserves the relay after success, but
+            # the HTTP session itself is never left attached to the run.
+            client.close(close_relay=not preserve_open)

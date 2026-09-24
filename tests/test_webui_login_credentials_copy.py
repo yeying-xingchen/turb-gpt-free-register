@@ -19,7 +19,7 @@ class WebUiLoginCredentialsCopyTests(unittest.TestCase):
             "totp_secret": "TOTPSECRET",
         }
 
-        response = self.client.get("/api/accounts/41/secret?field=login_credentials")
+        response = self.client.get("/api/accounts/41/secret?field=login_credentials&confirm_sensitive=true")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
@@ -35,7 +35,7 @@ class WebUiLoginCredentialsCopyTests(unittest.TestCase):
             "totp_secret": "",
         }
 
-        response = self.client.get("/api/accounts/42/secret?field=login_credentials")
+        response = self.client.get("/api/accounts/42/secret?field=login_credentials&confirm_sensitive=true")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["value"], "legacy@example.test------")

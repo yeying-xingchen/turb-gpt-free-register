@@ -302,6 +302,12 @@ def parse_account_text(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECOR
             errors.append({"line": line_number, "reason": f"单次最多导入 {max_records} 条记录"})
             break
         parts = _split_line(line)
+        # Some exported local-account lists use ``--`` (two hyphens) as the
+        # field separator instead of the documented ``----``.  Split only
+        # when the canonical separator is absent; JWTs/passwords may contain
+        # single hyphens and must remain untouched.
+        if "----" not in line and line.count("--") >= 3:
+            parts = [part.strip() for part in line.split("--", 3)]
         if len(parts) < 2:
             errors.append({"line": line_number, "reason": "格式错误：至少需要 email----access_token"})
             continue
@@ -360,12 +366,23 @@ def parse_account_text(text: str, *, max_records: int = MAX_ACCOUNT_IMPORT_RECOR
             totp = parts[2]
         elif len(parts) == 4:
             # 无邮箱接码地址的账号：邮箱、ChatGPT 密码、2OTP/TOTP 密钥、AT。
+            # A compact Outlook export may instead use:
+            # email--mail_password,client_id--refresh_token--access_token.
             token_index = 3
             material_line = "----".join(parts[:3])
-            fields["password"] = parts[1]
-            fields["registration_password"] = parts[1]
-            fields["totp_secret"] = parts[2]
-            fields["account_line_format"] = "chatgpt_api_no_code_url"
+            if "----" not in line and "," in parts[1] and _looks_like_access_token(parts[3]):
+                password, client_id = (item.strip() for item in parts[1].split(",", 1))
+                fields["password"] = password
+                fields["client_id"] = client_id
+                fields["refresh_token"] = parts[2]
+                fields["email_source"] = "outlook"
+                fields["account_line_format"] = "outlook_compact"
+                material_line = "----".join((parts[0], password, client_id, parts[2]))
+            else:
+                fields["password"] = parts[1]
+                fields["registration_password"] = parts[1]
+                fields["totp_secret"] = parts[2]
+                fields["account_line_format"] = "chatgpt_api_no_code_url"
         elif len(parts) == 3 and _looks_like_http_url(parts[1]):
             # 通用 API 账号：email----code_url----access_token。
             fields["code_url"] = parts[1]

@@ -33,7 +33,7 @@ import pyotp
 # 协议级常量（CLIENT_ID/URL/SCOPE/OUTPUT_DIRNAME）虽然不会改，统一从 _cfg 读，
 # 这样 reload 后立即生效，不用再分两套导入。
 from config import codex as _cfg
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 from core.humanize import delay as human_delay
 from core.openai_auth import (
     _is_transient_network_error,
@@ -1994,3 +1994,8 @@ def run_codex_oauth(
             email=email,
             message=f"{type(exc).__name__}: {str(exc)[:200]}",
         )
+    finally:
+        try:
+            close_browser_session(session)
+        except BaseException:
+            logger.debug("[Codex] 关闭 BrowserSession 失败", exc_info=True)

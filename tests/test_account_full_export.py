@@ -93,6 +93,14 @@ class AccountFullExportTests(unittest.TestCase):
                 "https://example.com/api/messages?mailbox=a@b.com",
             )
 
+    def test_build_code_url_encodes_mailbox_query_value(self):
+        import config.email as ce
+        with mock.patch.object(ce, "OMNIMAIL_BASE", "https://example.com/api/", create=True):
+            self.assertEqual(
+                db._build_generic_api_code_url("a+b@example.com"),
+                "https://example.com/api/messages?mailbox=a%2Bb@example.com",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

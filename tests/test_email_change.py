@@ -74,6 +74,37 @@ class EmailChangeTests(unittest.TestCase):
         self.assertIs(used_session, second)
         self.assertEqual(post.call_count, 2)
         new_session.assert_called_once_with(9, None, email="")
+        first.session.close.assert_called_once_with()
+        second.session.close.assert_not_called()
+
+    def test_final_failed_attempt_closes_every_failed_session(self):
+        first, second, third = MagicMock(), MagicMock(), MagicMock()
+        with patch.object(email_change_service, "_post", side_effect=[
+                 OSError("first reset"), OSError("second reset"), OSError("final reset"),
+             ]), patch.object(email_change_service, "_new_session", side_effect=[second, third]), \
+             patch.object(email_change_service, "_append_log"), \
+             patch.object(email_change_service.time, "sleep"):
+            with self.assertRaisesRegex(OSError, "final reset"):
+                email_change_service._post_with_network_retry(
+                    first, account_id=9, path="/backend-api/accounts/change_email/begin",
+                    token="token", payload={"email": "new@example.com"},
+                )
+        first.session.close.assert_called_once_with()
+        second.session.close.assert_called_once_with()
+        third.session.close.assert_called_once_with()
+
+    def test_replacement_creation_failure_closes_current_session(self):
+        first = MagicMock()
+        with patch.object(email_change_service, "_post", side_effect=OSError("reset")), \
+             patch.object(email_change_service, "_new_session", side_effect=RuntimeError("cannot create")), \
+             patch.object(email_change_service, "_append_log"), \
+             patch.object(email_change_service.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "cannot create"):
+                email_change_service._post_with_network_retry(
+                    first, account_id=9, path="/backend-api/accounts/change_email/begin",
+                    token="token", payload={"email": "new@example.com"},
+                )
+        first.session.close.assert_called_once_with()
 
     def test_recent_login_reuses_live_check_full_login_flow(self):
         session = MagicMock()

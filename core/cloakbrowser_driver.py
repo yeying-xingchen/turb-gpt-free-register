@@ -9,8 +9,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from config import cloakbrowser as _cfg
+from config.proxy import redact_proxy_url
+from core.roxybrowser_client import _redact_text
 
 logger = logging.getLogger(__name__)
+
+
+def _close_relay_safely(relay, label: str) -> None:
+    if relay is None:
+        return
+    try:
+        relay.close()
+    except Exception as exc:
+        logger.debug("[Cloak] %s：%s", label, _redact_text(exc))
 
 
 @dataclass
@@ -131,6 +142,7 @@ class CloakSeleniumDriver:
         self.context = context
         self.page = page
         self._proxy_relay = proxy_relay
+        self._closed = False
         self._page_load_timeout_ms = int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90) * 1000
         self.switch_to = _SwitchTo(self)
 
@@ -185,18 +197,34 @@ class CloakSeleniumDriver:
         self.page.reload(wait_until="domcontentloaded", timeout=self._page_load_timeout_ms)
 
     def quit(self) -> None:
+        """Close context, browser, and proxy relay independently and idempotently."""
+        if self._closed:
+            return
+        self._closed = True
+        context_failed = False
         try:
             if self.context is not None:
                 self.context.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            context_failed = True
+            logger.debug("[Cloak] 关闭浏览器 context 失败：%s", _redact_text(exc))
         try:
-            self.browser.close()
-        except Exception:
-            pass
+            # A persistent context can also own the browser object.  If
+            # context.close() failed, attempt browser.close() anyway even when
+            # both references point at the same object.
+            if self.browser is not None and (self.browser is not self.context or context_failed):
+                self.browser.close()
+        except Exception as exc:
+            logger.debug("[Cloak] 关闭浏览器实例失败：%s", _redact_text(exc))
         relay, self._proxy_relay = self._proxy_relay, None
         if relay is not None:
-            relay.close()
+            try:
+                relay.close()
+            except Exception as exc:
+                logger.debug("[Cloak] 关闭代理链失败：%s", exc)
+
+    def close(self) -> None:
+        self.quit()
 
     def find_elements(self, by: Any, selector: str) -> list[CloakElement]:
         loc = self._locator(by, selector)
@@ -421,6 +449,11 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     try:
         from cloakbrowser import launch, launch_persistent_context
     except ImportError as exc:
+        if proxy_relay is not None:
+            try:
+                proxy_relay.close()
+            except Exception as close_exc:
+                logger.debug("[Cloak] cloakbrowser 导入失败后关闭代理链失败：%s", close_exc)
         raise RuntimeError("未安装 cloakbrowser，请执行：pip install cloakbrowser") from exc
 
     launch_args = list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
@@ -454,7 +487,8 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     logger.info(
         "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
         opts.get("headless"), opts.get("humanize"), opts.get("geoip"),
-        proxy_url or "无", opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
+        redact_proxy_url(proxy_url) if proxy_url else "无",
+        opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
         locale_opts.get("accept_language") or "自动/默认", bool(user_data_dir),
     )
     context_kwargs = {}
@@ -465,25 +499,48 @@ def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, C
     if locale_opts.get("accept_language"):
         context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
 
-    if user_data_dir:
-        context = launch_persistent_context(user_data_dir, **opts)
-        page = context.new_page()
-        browser = getattr(context, "browser", None) or context
-        # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
-    else:
-        browser = launch(**opts)
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
+    browser = None
+    context = None
+    try:
+        if user_data_dir:
+            context = launch_persistent_context(user_data_dir, **opts)
+            page = context.new_page()
+            browser = getattr(context, "browser", None) or context
+            # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
+        else:
+            browser = launch(**opts)
+            context = browser.new_context(**context_kwargs)
+            page = context.new_page()
 
-    driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
+        driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
+    except Exception:
+        try:
+            if context is not None:
+                context.close()
+        except Exception:
+            pass
+        try:
+            if browser is not None and browser is not context:
+                browser.close()
+        except Exception:
+            pass
+        if proxy_relay is not None:
+            try:
+                proxy_relay.close()
+            except Exception as close_exc:
+                logger.debug("[Cloak] 启动失败后关闭代理链失败：%s", close_exc)
+        raise
     # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
     # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
     driver._registration_log_prefix = "[Cloak注册]"
     driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
+    safe_options = {k: v for k, v in opts.items() if k != "license_key"}
+    if proxy_url:
+        safe_options["proxy"] = redact_proxy_url(proxy_url)
     return driver, CloakOpenResult(raw={
         "driver": "cloakbrowser",
-        "proxy": proxy_url,
-        "proxy_pool_target": proxy_pool_target or proxy_url,
+        "proxy": redact_proxy_url(proxy_url) if proxy_url else "",
+        "proxy_pool_target": redact_proxy_url(proxy_pool_target or proxy_url) if (proxy_pool_target or proxy_url) else "",
         "locale": locale_opts,
-        "options": {k: v for k, v in opts.items() if k != "license_key"},
+        "options": safe_options,
     })

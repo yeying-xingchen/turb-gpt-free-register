@@ -129,8 +129,16 @@ def _post_with_network_retry(
             )
             # 明确的业务 4xx 不重复提交；网络错误、429 和 5xx 才重试。
             if isinstance(exc, RuntimeError) and "返回 4" in text and "返回 429" not in text:
+                try:
+                    close_browser_session(current)
+                except BaseException:
+                    logger.debug("[邮箱换绑] 关闭业务失败会话失败", exc_info=True)
                 raise
             if attempt >= 3:
+                try:
+                    close_browser_session(current)
+                except BaseException:
+                    logger.debug("[邮箱换绑] 关闭最终失败会话失败", exc_info=True)
                 break
             delay = attempt * 2
             next_route = "代理池新会话" if attempt == 1 else "直连兜底"
@@ -140,11 +148,34 @@ def _post_with_network_retry(
                 f"{delay}s 后切换到{next_route}重试",
             )
             logger.warning("[邮箱换绑] %s attempt=%s failed: %s", path, attempt, text[:300])
-            time.sleep(delay)
+            try:
+                time.sleep(delay)
+            except BaseException:
+                try:
+                    close_browser_session(current)
+                except BaseException:
+                    logger.debug("[邮箱换绑] sleep 失败后关闭会话失败", exc_info=True)
+                raise
             # 第二次从代理池重新选择出口；第三次明确直连，避免坏代理持续 reset。
-            current = _new_session(
-                account_id, None if attempt == 1 else "", email=fingerprint_email,
-            )
+            previous = current
+            try:
+                replacement = _new_session(
+                    account_id, None if attempt == 1 else "", email=fingerprint_email,
+                )
+            except BaseException:
+                # Replacement construction can fail before returning a session;
+                # the failed current session still belongs to this operation.
+                try:
+                    close_browser_session(previous)
+                except BaseException:
+                    logger.debug("[邮箱换绑] 创建替换会话失败后关闭旧会话失败", exc_info=True)
+                raise
+            current = replacement
+            if current is not previous:
+                try:
+                    close_browser_session(previous)
+                except BaseException:
+                    logger.debug("[邮箱换绑] 关闭重试旧会话失败", exc_info=True)
     assert last_exc is not None
     raise last_exc
 
@@ -215,6 +246,13 @@ def _refresh_recent_login(
 
     login_started = time.monotonic()
     selected_proxy = getattr(session, "proxy", None)
+    # Recent Login always starts a fresh preflight session. Release the caller's
+    # old BrowserSession before creating replacement routes so its relay does
+    # not survive the re-auth path.
+    try:
+        close_browser_session(session)
+    except Exception:
+        logger.debug("[邮箱换绑] 关闭原 Recent Login 会话失败", exc_info=True)
     # 与后台查活一致：代理路线的完整认证链只要收到 403，就用一套完全
     # 独立的直连会话重跑。OAuth callback 的 403 会让当前 BrowserSession
     # 进入 15 分钟熔断；仅清除熔断后继续请求既不能修复出口，也容易复用
@@ -226,6 +264,7 @@ def _refresh_recent_login(
     last_exc: BaseException | None = None
     for route_index, (route_proxy, route_state, route_label) in enumerate(routes):
         login_session: BrowserSession | None = None
+        returned_session = False
         try:
             _append_log(account_id, f"Recent Login 路线开始：{route_label}")
             login_session, authorize_url = _network_preflight_with_retry(
@@ -254,6 +293,7 @@ def _refresh_recent_login(
                 account_id,
                 f"Recent Login 完成：route={route_label}，已获取新鲜 AT，cost={_cost(login_started)}",
             )
+            returned_session = True
             return login_session, fresh_token
         except AccountUnusableError:
             raise
@@ -267,11 +307,12 @@ def _refresh_recent_login(
                 "Recent Login 代理路线收到 403/会话熔断，"
                 f"关闭失败会话并从 CSRF 开始使用独立直连兜底：{type(exc).__name__}: {str(exc)[:260]}",
             )
-            if login_session is not None:
+        finally:
+            if login_session is not None and not returned_session:
                 try:
                     close_browser_session(login_session)
                 except Exception:
-                    pass
+                    logger.debug("[邮箱换绑] 关闭 Recent Login 会话失败", exc_info=True)
 
     assert last_exc is not None
     raise last_exc
@@ -380,6 +421,7 @@ def _check_live_in_current_session(
 
 def _run(account_id: int, source: str) -> dict:
     new_email = ""
+    session: BrowserSession | None = None
     task_started = time.monotonic()
     stage = "初始化"
     with _LOCK:
@@ -492,6 +534,11 @@ def _run(account_id: int, source: str) -> dict:
         logger.exception("[邮箱换绑] 失败 account_id=%s", account_id)
         return {"ok": False, "id": account_id, "error": error}
     finally:
+        if session is not None:
+            try:
+                close_browser_session(session)
+            except Exception:
+                logger.debug("[邮箱换绑] 关闭主会话失败", exc_info=True)
         with _LOCK:
             _RUNNING.discard(account_id)
         _SLOTS.release()

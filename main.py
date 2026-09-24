@@ -17,7 +17,7 @@ from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
 from config.proxy import redact_proxy_url
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
     follow_authorize,
@@ -257,18 +257,27 @@ def run_registration(
         if on_email_acquired:
             on_email_acquired(email)
 
-    # 创建浏览器会话（proxy=None 时自动从 config.PROXY_POOL 随机抽一个）
-    session = BrowserSession(proxy=proxy)
+    session: BrowserSession | None = None
+    try:
+        # 创建浏览器会话（proxy=None 时自动从 config.PROXY_POOL 随机抽一个）
+        session = BrowserSession(proxy=proxy)
 
-    # 统一使用安全摘要记录代理，避免用户名/密码进入日志。
-    proxy_label = redact_proxy_url(session.proxy) if session.proxy else "无"
+        # 统一使用安全摘要记录代理，避免用户名/密码进入日志。
+        proxy_label = redact_proxy_url(session.proxy) if session.proxy else "无"
 
-    if not birthday:
-        birthday = generate_random_birthday()
+        if not birthday:
+            birthday = generate_random_birthday()
 
-    logger.info(f"[注册] 开始：{email}，代理={proxy_label}")
-    logger.info(f"[注册] 本次随机生日: {birthday}")
-    logger.debug(f"[注册] 设备ID={session.device_id}，会话日志ID={session.auth_session_logging_id}")
+        logger.info(f"[注册] 开始：{email}，代理={proxy_label}")
+        logger.info(f"[注册] 本次随机生日: {birthday}")
+        logger.debug(f"[注册] 设备ID={session.device_id}，会话日志ID={session.auth_session_logging_id}")
+    except BaseException:
+        if session is not None:
+            try:
+                close_browser_session(session)
+            except BaseException:
+                logger.debug("[注册] 初始化阶段关闭 BrowserSession 失败", exc_info=True)
+        raise
 
     create_acknowledged = False
     try:
@@ -589,6 +598,12 @@ def run_registration(
         except Exception:
             pass
         return {"success": False, "email": email, "error": str(e)}
+    finally:
+        if session is not None:
+            try:
+                close_browser_session(session)
+            except BaseException:
+                logger.debug("[注册] 关闭 BrowserSession 失败", exc_info=True)
 
 
 def main():

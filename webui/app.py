@@ -514,7 +514,18 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.after_request
     def _compress_json_response(response: Response):
-        """默认对 JSON API 响应启用 gzip，减少本地前端拉取大列表的传输体积。"""
+        """压缩普通 JSON，并禁止缓存敏感接口的响应。"""
+        # Secret endpoints can contain account credentials/tokens.  They must
+        # never be stored by a browser/proxy cache, even when an older caller
+        # does not explicitly set headers.
+        if (
+            request.path == "/api/accounts/secret-bulk"
+            or request.path.startswith("/api/accounts/") and request.path.endswith("/secret")
+            or request.path.startswith("/api/codex/download")
+            or request.path in {"/api/accounts/export", "/api/cloudmail/gen-token", "/api/cloudmail/domains"}
+        ):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
         accept_encoding = request.headers.get("Accept-Encoding")
         gzip_allowed = _accepts_gzip(accept_encoding)
         if (
@@ -797,6 +808,14 @@ def create_app(auth_code: str | None = None) -> Flask:
         acc = db.get_account(acc_id)
         if not acc:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
+        if field in {"login_credentials", "full_export"}:
+            confirmed = str(request.args.get("confirm_sensitive") or "").strip().lower() in {"1", "true", "yes", "on"}
+            if not confirmed:
+                return jsonify({
+                    "ok": False,
+                    "error": f"读取 {field} 包含敏感凭据，请传入 confirm_sensitive=true 后重试",
+                    "sensitive_fields": [field],
+                }), 400
         try:
             value = _account_secret_value(acc, field)
         except ValueError as exc:
@@ -811,9 +830,28 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
         ids = data.get("account_ids") if "account_ids" in data else data.get("ids")
         field = str(data.get("field") or "").strip()
-        allowed_fields = {"email", "access_token", "copy_line", "codex_agent_token", "totp_secret", "totp_code", "password", "email_password"}
+        allowed_fields = {
+            "email", "access_token", "copy_line", "codex_agent_token", "totp_secret", "totp_code",
+            "password", "email_password", "login_credentials", "full_export",
+        }
         if field not in allowed_fields:
-            return jsonify({"ok": False, "error": "field 仅支持 email/access_token/copy_line/codex_agent_token/totp_secret/totp_code/password/email_password"}), 400
+            return jsonify({
+                "ok": False,
+                "error": (
+                    "field 仅支持 email/access_token/copy_line/codex_agent_token/"
+                    "totp_secret/totp_code/password/email_password/login_credentials/full_export"
+                ),
+            }), 400
+        # These bulk formats combine multiple credentials into one value.  Do
+        # not allow an accidental/background caller to retrieve them without an
+        # explicit user confirmation; the UI asks for confirmation immediately
+        # before issuing this request.
+        if field in {"login_credentials", "full_export"} and data.get("confirm_sensitive") is not True:
+            return jsonify({
+                "ok": False,
+                "error": f"读取 {field} 包含敏感凭据，请传入 confirm_sensitive=true 后重试",
+                "sensitive_fields": [field],
+            }), 400
         if not isinstance(ids, list) or not ids:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
         if len(ids) > 5000:
@@ -3637,7 +3675,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     # 配置读写
     # ----------------------------------------------------------
     @app.get("/api/config")
+    @app.get("/api/config/templates")
     def api_config_get():
+        """Return safe editable configuration metadata; secrets are masked."""
         return jsonify(config_editor.get_config())
 
     @app.post("/api/cloudmail/gen-token")
@@ -3650,7 +3690,11 @@ def create_app(auth_code: str | None = None) -> Flask:
 
             api_base = (data.get("api_base") or "").strip()
             admin_email = (data.get("email") or data.get("admin_email") or "").strip()
+            supplied_password = bool((data.get("password") or "").strip())
             password = (data.get("password") or "").strip()
+            if not password:
+                from config import email as _email_cfg
+                password = str(getattr(_email_cfg, "CLOUDMAIL_PASSWORD", "") or "").strip()
             path = (data.get("path") or "/api/public/genToken").strip() or "/api/public/genToken"
             token = gen_token(
                 email=admin_email,
@@ -3665,7 +3709,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                 updates["CLOUDMAIL_API_BASE"] = api_base
             if admin_email:
                 updates["CLOUDMAIL_ADMIN_EMAIL"] = admin_email
-            if password:
+            # An empty password means "use the already configured process value";
+            # never write that fallback back to .env.  This keeps masked-secret
+            # buttons useful without duplicating process-only credentials.
+            if supplied_password:
                 updates["CLOUDMAIL_PASSWORD"] = password
             if path:
                 updates["CLOUDMAIL_TOKEN_PATH"] = path
@@ -3677,13 +3724,14 @@ def create_app(auth_code: str | None = None) -> Flask:
                 logger.exception("CloudMail Token 写入后热加载失败")
             return jsonify({
                 "ok": True,
-                "token": token,
                 "written": written,
                 "message": "CloudMail Token 已生成，且当前 CloudMail 配置已保存",
             })
-        except Exception as exc:
+        except Exception:
             logger.exception("生成 CloudMail Token 失败")
-            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+            # Provider payloads can echo credentials/tokens; never send the
+            # exception text back to the browser.
+            return jsonify({"ok": False, "error": "CloudMail Token 生成失败，请检查配置或服务响应"}), 400
 
     @app.post("/api/cloudmail/domains")
     def api_cloudmail_domains():
@@ -3696,15 +3744,25 @@ def create_app(auth_code: str | None = None) -> Flask:
             updates = {}
             api_base = (data.get("api_base") or "").strip()
             admin_email = (data.get("email") or data.get("admin_email") or "").strip()
+            supplied_password = bool((data.get("password") or "").strip())
+            supplied_token = bool((data.get("token") or "").strip())
             password = (data.get("password") or "").strip()
             token = (data.get("token") or "").strip()
+            if not password or not token:
+                from config import email as _email_cfg
+                if not password:
+                    password = str(getattr(_email_cfg, "CLOUDMAIL_PASSWORD", "") or "").strip()
+                if not token:
+                    token = str(getattr(_email_cfg, "CLOUDMAIL_AUTH_TOKEN", "") or "").strip()
             if api_base:
                 updates["CLOUDMAIL_API_BASE"] = api_base
             if admin_email:
                 updates["CLOUDMAIL_ADMIN_EMAIL"] = admin_email
-            if password:
+            # Blank masked secrets intentionally use the backend fallback; only
+            # persist values explicitly entered in this request.
+            if supplied_password:
                 updates["CLOUDMAIL_PASSWORD"] = password
-            if token:
+            if supplied_token:
                 updates["CLOUDMAIL_AUTH_TOKEN"] = token
             if updates:
                 write_env_values(updates)
@@ -3725,9 +3783,11 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "written": written,
                 "message": f"已获取 {len(domains)} 个 CloudMail 可用域名并保存",
             })
-        except Exception as exc:
+        except Exception:
             logger.exception("获取 CloudMail 域名失败")
-            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+            # Do not expose provider response bodies, which may contain the
+            # Authorization token or other request credentials.
+            return jsonify({"ok": False, "error": "获取 CloudMail 域名失败，请检查配置或服务响应"}), 400
 
     @app.post("/api/config")
     def api_config_set():

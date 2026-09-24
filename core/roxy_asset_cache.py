@@ -19,7 +19,7 @@ import os
 import queue
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -56,6 +56,15 @@ _REPLAY_RESPONSE_HEADERS = {
     "access-control-allow-origin", "access-control-expose-headers",
     "cross-origin-resource-policy", "timing-allow-origin",
 }
+_DEFAULT_MAX_FULFILLED_NETWORK_IDS = 4096
+_DEFAULT_MAX_FULFILLED_URLS = 4096
+
+
+def _configured_limit(name: str, default: int) -> int:
+    try:
+        return max(1, int(getattr(_cfg, name, default) or default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _mode() -> str:
@@ -106,6 +115,14 @@ class RoxyLocalAssetCache:
         self.cache_dir = Path(raw_dir).expanduser().resolve()
         self.max_age = max(0, int(getattr(_cfg, "ROXY_LOCAL_ASSET_CACHE_MAX_AGE", 86400) or 0))
         self.max_item_bytes = max(1024, int(getattr(_cfg, "ROXY_LOCAL_ASSET_CACHE_MAX_ITEM_BYTES", 25 * 1024 * 1024) or 0))
+        self.max_fulfilled_network_ids = _configured_limit(
+            "ROXY_LOCAL_ASSET_CACHE_MAX_FULFILLED_NETWORK_IDS",
+            _DEFAULT_MAX_FULFILLED_NETWORK_IDS,
+        )
+        self.max_fulfilled_urls = _configured_limit(
+            "ROXY_LOCAL_ASSET_CACHE_MAX_FULFILLED_URLS",
+            _DEFAULT_MAX_FULFILLED_URLS,
+        )
         self._thread: threading.Thread | None = None
         self._ws: Any | None = None
         self._stop = threading.Event()
@@ -115,7 +132,11 @@ class RoxyLocalAssetCache:
         self._pending_bodies: dict[int, dict[str, Any]] = {}
         self._responses: dict[str, dict[str, Any]] = {}
         self._fulfilled_network_ids: set[str] = set()
+        self._fulfilled_network_id_order: deque[str] = deque()
         self._fulfilled_urls: Counter[str] = Counter()
+        # One URL is stored per pending fulfilled event; this bounds both the
+        # number of keys and the total counter values when CDP events are lost.
+        self._fulfilled_url_order: deque[str] = deque()
         self._fulfilled_lock = threading.Lock()
         self._errors: queue.Queue[str] = queue.Queue(maxsize=20)
         self.recorded = 0
@@ -151,7 +172,91 @@ class RoxyLocalAssetCache:
         )
 
     def _entry_path(self, url: str) -> Path:
-        return self.cache_dir / _cache_key(url)[:2] / f"{_cache_key(url)}.json"
+        key = _cache_key(url)
+        return self.cache_dir / key[:2] / f"{key}.json"
+
+    def _purge_stale_files(self) -> None:
+        """Remove only expired cache entries owned by this cache directory."""
+        if not self.max_age or not self.cache_dir.exists():
+            return
+        cutoff = time.time() - self.max_age
+        try:
+            with _CACHE_STORE_LOCK:
+                for directory in self.cache_dir.iterdir():
+                    # Check the shard directory before iterating so a symlink
+                    # cannot make cleanup follow a path outside cache_dir.
+                    if (
+                        directory.is_symlink()
+                        or not directory.is_dir()
+                        or len(directory.name) != 2
+                        or any(char not in "0123456789abcdef" for char in directory.name.lower())
+                    ):
+                        continue
+                    try:
+                        paths = tuple(directory.iterdir())
+                    except OSError as exc:
+                        self._remember_error(f"purge: {type(exc).__name__}: {exc}")
+                        continue
+                    for path in paths:
+                        if path.is_symlink() or path.suffix.lower() != ".json" or len(path.stem) != 64 or any(
+                            char not in "0123456789abcdef" for char in path.stem.lower()
+                        ):
+                            continue
+                        try:
+                            if path.stat().st_mtime < cutoff:
+                                path.unlink()
+                        except FileNotFoundError:
+                            continue
+                        except OSError as exc:
+                            self._remember_error(f"purge: {type(exc).__name__}: {exc}")
+                    try:
+                        directory.rmdir()
+                    except OSError:
+                        pass
+        except OSError as exc:
+            self._remember_error(f"purge: {type(exc).__name__}: {exc}")
+
+    def _remember_fulfilled_network_id(self, request_id: str) -> None:
+        request_id = str(request_id or "")
+        if not request_id:
+            return
+        with self._fulfilled_lock:
+            if request_id in self._fulfilled_network_ids:
+                return
+            self._fulfilled_network_ids.add(request_id)
+            self._fulfilled_network_id_order.append(request_id)
+            while len(self._fulfilled_network_ids) > self.max_fulfilled_network_ids:
+                oldest = self._fulfilled_network_id_order.popleft()
+                self._fulfilled_network_ids.discard(oldest)
+
+    def _remember_fulfilled_url(self, url: str) -> None:
+        url = str(url or "")
+        if not url:
+            return
+        with self._fulfilled_lock:
+            self._fulfilled_urls[url] += 1
+            self._fulfilled_url_order.append(url)
+            while len(self._fulfilled_url_order) > self.max_fulfilled_urls:
+                oldest = self._fulfilled_url_order.popleft()
+                count = self._fulfilled_urls.get(oldest, 0)
+                if count <= 1:
+                    self._fulfilled_urls.pop(oldest, None)
+                else:
+                    self._fulfilled_urls[oldest] = count - 1
+
+    def _consume_fulfilled_url(self, url: str) -> None:
+        with self._fulfilled_lock:
+            count = self._fulfilled_urls.get(url, 0)
+            if count <= 0:
+                return
+            if count == 1:
+                self._fulfilled_urls.pop(url, None)
+            else:
+                self._fulfilled_urls[url] = count - 1
+            try:
+                self._fulfilled_url_order.remove(url)
+            except ValueError:
+                pass
 
     def _load(self, url: str) -> dict[str, Any] | None:
         path = self._entry_path(url)
@@ -236,10 +341,11 @@ class RoxyLocalAssetCache:
     def start(self) -> "RoxyLocalAssetCache":
         if not self.enabled:
             return self
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._purge_stale_files()
         if not self.debugger_address:
             logger.warning("[%s][本地缓存] Roxy 未返回 debuggerAddress，无法启用", self.label)
             return self
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._thread = threading.Thread(target=self._run, name="roxy-asset-cache", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=8)
@@ -349,13 +455,12 @@ class RoxyLocalAssetCache:
                 "responseHeaders": headers,
                 "body": str(cached["body_b64"]),
             })
-            with self._fulfilled_lock:
-                if network_id:
-                    self._fulfilled_network_ids.add(network_id)
-                # 部分 Chromium 在 Request 阶段的 Fetch.requestPaused 不提供
-                # networkId；另有版本返回的 ID 与 Network.requestId 不一致。
-                # 无论是否拿到 networkId，都用精确 URL 计数作关联兜底。
-                self._fulfilled_urls[url] += 1
+            if network_id:
+                self._remember_fulfilled_network_id(network_id)
+            # 部分 Chromium 在 Request 阶段的 Fetch.requestPaused 不提供
+            # networkId；另有版本返回的 ID 与 Network.requestId 不一致。
+            # 无论是否拿到 networkId，都用精确 URL 计数作关联兜底。
+            self._remember_fulfilled_url(url)
             self.cache_hits += 1
             self.bytes_saved += int(cached.get("body_bytes") or 0)
         except Exception as exc:
@@ -370,20 +475,18 @@ class RoxyLocalAssetCache:
         response = params.get("response") or {}
         url = str(response.get("url") or "")
         with self._fulfilled_lock:
-            if request_id and request_id in self._fulfilled_network_ids:
-                # ID 已匹配时也要消费 URL 兜底计数，避免残留计数误匹配后续请求。
-                if self._fulfilled_urls.get(url, 0) > 0:
-                    self._fulfilled_urls[url] -= 1
-                    if self._fulfilled_urls[url] <= 0:
-                        self._fulfilled_urls.pop(url, None)
-                return
-            if self._fulfilled_urls.get(url, 0) > 0:
-                self._fulfilled_urls[url] -= 1
-                if self._fulfilled_urls[url] <= 0:
-                    self._fulfilled_urls.pop(url, None)
-                if request_id:
-                    self._fulfilled_network_ids.add(request_id)
-                return
+            fulfilled_by_id = bool(request_id and request_id in self._fulfilled_network_ids)
+            fulfilled_by_url = self._fulfilled_urls.get(url, 0) > 0
+        if fulfilled_by_id:
+            # ID 已匹配时也要消费 URL 兜底计数，避免残留计数误匹配后续请求。
+            if fulfilled_by_url:
+                self._consume_fulfilled_url(url)
+            return
+        if fulfilled_by_url:
+            self._consume_fulfilled_url(url)
+            if request_id:
+                self._remember_fulfilled_network_id(request_id)
+            return
         resource_type = str(params.get("type") or "")
         status = int(response.get("status") or 0)
         if status != 200 or not self.is_cacheable(url, resource_type):
@@ -453,6 +556,8 @@ class RoxyLocalAssetCache:
             pass
         if self._thread is not None:
             self._thread.join(timeout=3)
+        if self.enabled:
+            self._purge_stale_files()
         result = self.snapshot()
         self._final_snapshot = dict(result)
         if self.enabled:

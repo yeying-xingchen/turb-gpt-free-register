@@ -2400,11 +2400,11 @@ $('#btnRefreshAccounts').addEventListener('click', async () => {
 });
 
 
-async function fetchAccountSecrets(ids, field) {
+async function fetchAccountSecrets(ids, field, confirmSensitive = false) {
   const r = await api('/api/accounts/secret-bulk', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({account_ids: ids, field}),
+    body: JSON.stringify({account_ids: ids, field, ...(confirmSensitive ? {confirm_sensitive: true} : {})}),
   });
   return (r.values || []).map(x => x.value).filter(Boolean);
 }
@@ -3719,20 +3719,27 @@ function configGroups() {
 function renderConfigField(f) {
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   let html = `<label class="fld">${esc(f.label)}<span class="hint">${esc(f.help)} · <span class="mono">${esc(f.key)}</span></span>`;
-  if (f.type === 'bool') {
+  if (f.key === 'LIVE_CHECK_DRIVER') {
+    const current = String(fv == null ? 'auto' : fv).trim().toLowerCase() || 'auto';
+    const choices = [['auto', '自动（协议优先，边缘失败切 Playwright）'], ['protocol', '纯协议'], ['playwright', 'Playwright 浏览器']];
+    html += `<select data-key="${attrEsc(f.key)}">${choices.map(([value, label]) => `<option value="${value}"${value === current ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select>`;
+  } else if (f.type === 'bool') {
     html += `<select data-key="${attrEsc(f.key)}"><option value="true"${fv?' selected':''}>开启 (True)</option><option value="false"${!fv?' selected':''}>关闭 (False)</option></select>`;
   } else if (f.type === 'int') {
     html += `<input type="number" data-key="${attrEsc(f.key)}" value="${attrEsc(fv == null ? '' : fv)}">`;
   } else if (f.type === 'float') {
     html += `<input type="number" step="0.1" data-key="${attrEsc(f.key)}" value="${attrEsc(fv == null ? '' : fv)}">`;
   } else if (f.type === 'list_str_multiline') {
-    html += `<textarea data-key="${attrEsc(f.key)}" placeholder="每行一条，可留空">${attrEsc((fv||[]).join('\n'))}</textarea>`;
+    html += `<textarea data-key="${attrEsc(f.key)}" data-secret="${f.secret ? '1' : '0'}" placeholder="${f.secret ? (f.secret_configured ? '已配置，输入新值替换；留空保持不变' : '每行一条，可留空') : '每行一条，可留空'}">${attrEsc((f.secret ? [] : (fv||[])).join('\n'))}</textarea>`;
   } else {
     // 空字符串/占位符 '-' 都显示为空输入框，避免误保存成真实值
-    const shown = isPlaceholderEmpty(fv) ? '' : fv;
+    const shown = f.secret ? '' : (isPlaceholderEmpty(fv) ? '' : fv);
     const inputType = f.secret ? 'password' : 'text';
-    const ph = f.secret ? '保存在 .env，可留空' : '可留空';
-    html += `<input type="${inputType}" data-key="${attrEsc(f.key)}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
+    const ph = f.secret ? (f.secret_configured ? '已配置，输入新值替换；留空保持不变' : '保存在 .env，可留空') : '可留空';
+    html += `<input type="${inputType}" data-key="${attrEsc(f.key)}" data-secret="${f.secret ? '1' : '0'}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
+  }
+  if (f.secret) {
+    html += ` <button type="button" class="btn config-secret-clear" data-clear-secret="${attrEsc(f.key)}" title="清除已保存的 Secret；留空仍会保留原值">清除 Secret</button>`;
   }
   const field = html + `</label>`;
   const decorated = f.external_url
@@ -3940,9 +3947,9 @@ function renderCloudMailTokenTools() {
 
 function _configValue(key) {
   const el = $(`#tab-config [data-key="${CSS.escape(key)}"]`);
-  if (el) return el.value;
+  if (el && !el.dataset.secret) return el.value;
   const f = CONFIG.find(x => x.key === key);
-  return f ? (f.value || '') : '';
+  return f && !f.secret ? (f.value || '') : '';
 }
 
 async function genCloudMailToken() {
@@ -3958,7 +3965,8 @@ async function genCloudMailToken() {
       body: JSON.stringify({
         api_base: _configValue('CLOUDMAIL_API_BASE').trim(),
         admin_email: _configValue('CLOUDMAIL_ADMIN_EMAIL').trim(),
-        password: _configValue('CLOUDMAIL_PASSWORD').trim(),
+        // Secret inputs stay masked; backend falls back to the process config.
+        password: '',
         path: _configValue('CLOUDMAIL_TOKEN_PATH').trim() || '/api/public/genToken',
       }),
     });
@@ -3985,8 +3993,10 @@ async function loadCloudMailDomains() {
       body: JSON.stringify({
         api_base: _configValue('CLOUDMAIL_API_BASE').trim(),
         admin_email: _configValue('CLOUDMAIL_ADMIN_EMAIL').trim(),
-        password: _configValue('CLOUDMAIL_PASSWORD').trim(),
-        token: _configValue('CLOUDMAIL_AUTH_TOKEN').trim(),
+        // Secret inputs stay masked; backend falls back to the process config.
+        password: '',
+        // Secret inputs stay masked; backend falls back to the process config.
+        token: '',
       }),
     });
     const domains = Array.isArray(r.domains) ? r.domains : [];
@@ -4034,7 +4044,7 @@ function renderConfigPanel() {
 
 async function loadConfig() {
   try {
-    CONFIG = await api('/api/config');
+    CONFIG = await api('/api/config/templates');
     renderConfigTabs();
     renderConfigPanel();
   } catch(e) {
@@ -4052,6 +4062,19 @@ $('#configTabs').addEventListener('click', (e) => {
 });
 
 $('#configForm').addEventListener('click', (e) => {
+  const clearSecret = e.target.closest('[data-clear-secret]');
+  if (clearSecret) {
+    e.preventDefault();
+    e.stopPropagation();
+    const key = clearSecret.dataset.clearSecret;
+    const input = $('#configForm').querySelector(`[data-key="${CSS.escape(key)}"]`);
+    if (input) {
+      input.value = '';
+      input.dataset.secretClear = '1';
+      CONFIG_PENDING_UPDATES[key] = '__CLEAR_SECRET__';
+    }
+    return;
+  }
   const emailBtn = e.target.closest('[data-email-config-section]');
   if (emailBtn) {
     CONFIG_EMAIL_ACTIVE_SECTION = emailBtn.dataset.emailConfigSection;
@@ -4131,6 +4154,7 @@ async function saveRoxyWorkspaceSelection() {
 }
 function readConfigElementValue(el, f) {
   if (!f) return undefined;
+  if (f.secret && el.dataset.secretClear === '1') return '__CLEAR_SECRET__';
   if (f.type === 'list_str_multiline') return el.value.split('\n').map(s=>s.trim()).filter(Boolean);
   if (f.type === 'bool') return el.value === 'true';
   if (f.type === 'int' || f.type === 'float') {
@@ -4150,6 +4174,7 @@ $('#configForm').addEventListener('input', (e) => {
   if (!el) return;
   const f = CONFIG.find(x => x.key === el.dataset.key);
   if (!f) return;
+  if (f.secret && el.dataset.secretClear === '1' && el.value) delete el.dataset.secretClear;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
 });
 $('#configForm').addEventListener('change', (e) => {
@@ -4157,6 +4182,7 @@ $('#configForm').addEventListener('change', (e) => {
   if (!el) return;
   const f = CONFIG.find(x => x.key === el.dataset.key);
   if (!f) return;
+  if (f.secret && el.dataset.secretClear === '1' && el.value) delete el.dataset.secretClear;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
 });
 

@@ -19,8 +19,12 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL",
+    "PLAN_CHECK_PROXY",
+    "PAYMENT_METHOD_CHECK_PROXIES",
     "DJB_PROXIES",
     "DJB_EXIT_PROXIES",
+    "PAY153_ENTRY_PROXIES",
+    "PAY153_EXIT_PROXIES",
     "MOMO_ACTIVATION_ENTRY_PROXIES",
 }
 
@@ -135,7 +139,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CLOAK_LICENSE_KEY", "file": "cloakbrowser.py", "type": "str", "group": "CloakBrowser",
-        "label": "Cloak License", "help": "Pro license；留空使用免费 binary",
+        "label": "Cloak License", "help": "Pro license；留空使用免费 binary；仅保存在 .env，不会在配置列表明文返回", "storage": "env", "secret": True,
     },
     {
         "key": "CLOAK_FINGERPRINT_SEED", "file": "cloakbrowser.py", "type": "str", "group": "CloakBrowser",
@@ -383,8 +387,8 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "GENERIC_API_PROXY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "通用 API 取码代理", "help": "仅用于 generic_api 接口取码；默认直接走本地 HTTP 代理 http://127.0.0.1:7897，不读取代理池，也不套用代理池上游链式；留空则直连",
-        "storage": "env",
+        "label": "通用 API 取码代理", "help": "仅用于 generic_api 接口取码；支持带认证的代理 URL，凭证不会在配置列表明文返回；留空则沿用代理池回退或直连",
+        "storage": "env", "secret": True,
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -588,7 +592,7 @@ EDITABLE_FIELDS = [
     # ---- 代理池 ----
     {
         "key": "PROXY_POOL", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理",
+        "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理；凭证仅保存在 .env，不会在配置列表明文返回", "secret": True,
         "recommended_links": [
             {
                 "label": "IPWO 家宽",
@@ -612,8 +616,8 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PROXY_POOL_UPSTREAM_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "代理池上游代理", "help": "可选；代理池每个目标代理通过此本地上游连接。留空则不链式。地址明文显示，仅保存到 .env",
-        "storage": "env",
+        "label": "代理池上游代理", "help": "可选；代理池每个目标代理通过此本地上游连接。支持认证代理 URL，凭证不会在配置列表明文返回；留空则不链式",
+        "storage": "env", "secret": True,
     },
     {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",
@@ -621,13 +625,13 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_PROXY", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
-        "label": "套餐/Agent专用代理(每行一个)", "help": "用于查套餐、查活和生成 Agent Token；支持动态代理 URL，每行一条。仅保存到 .env",
+        "label": "套餐/Agent专用代理(每行一个)", "help": "用于查套餐、查活和生成 Agent Token；支持动态代理 URL，每行一条。凭证不会在配置列表明文返回，仅保存到 .env",
         "storage": "env", "secret": True,
     },
     {
         "key": "PLAN_CHECK_UPSTREAM_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/Agent本地上游代理", "help": "可选；仅用于套餐/Agent专用代理，形成“本地代理 -> 动态代理 -> ChatGPT”的代理链。留空则不链式。地址明文显示。仅保存到 .env",
-        "storage": "env",
+        "label": "套餐/Agent本地上游代理", "help": "可选；仅用于套餐/Agent专用代理，形成“本地代理 -> 动态代理 -> ChatGPT”的代理链。留空则不链式。凭证不会在配置列表明文返回，仅保存到 .env",
+        "storage": "env", "secret": True,
     },
     {
         "key": "PLAN_CHECK_TIMEOUT", "file": "proxy.py", "type": "float", "group": "代理池",
@@ -794,10 +798,12 @@ EDITABLE_FIELDS = [
     {
         "key": "PAY153_ENTRY_PROXIES", "file": "extract_link.py", "type": "list_str_multiline", "group": "提链",
         "label": "pay153 入口代理池", "help": "pay153 后端使用：每行一条代理；留空且配置了内部密钥时走 pay153 动态代理",
+        "storage": "env", "secret": True,
     },
     {
         "key": "PAY153_EXIT_PROXIES", "file": "extract_link.py", "type": "list_str_multiline", "group": "提链",
         "label": "pay153 出口代理池", "help": "pay153 后端使用：每行一条代理；hosted/pix/momo 等路径可留空沿用入口代理",
+        "storage": "env", "secret": True,
     },
     {
         "key": "PAY153_RETRY_COUNT", "file": "extract_link.py", "type": "int", "group": "提链",
@@ -907,7 +913,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
-        "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
+        "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key；仅保存在 .env，不会在配置列表明文返回", "storage": "env", "secret": True,
     },
     # ---- 接码平台 ----
     # ---- Codex：基础 / CPA / sub2api 配置 ----
@@ -1193,7 +1199,14 @@ def get_config() -> list[dict]:
             value = _normalize_config_value(value, field["type"])
         item = dict(field)
         item["storage"] = "env"
-        item["value"] = value
+        if field.get("secret"):
+            # Never send proxy/API credentials to the WebUI.  The form can
+            # replace a configured secret, while an empty submission preserves
+            # the existing .env value (see update_config below).
+            item["secret_configured"] = bool(value) if field["type"] != "list_str_multiline" else bool(value)
+            item["value"] = [] if field["type"] == "list_str_multiline" else ""
+        else:
+            item["value"] = value
         out.append(item)
     return out
 
@@ -1366,9 +1379,26 @@ def update_config(updates: dict) -> dict:
         if field is None:
             ignored.append(key)
             continue
-        # Explicit null/empty numeric values clear the .env override; they
-        # must not silently fall back to the currently loaded default.
-        env_updates[key] = _format_env_value(value, field["type"])
+        if field.get("secret"):
+            # Secret values are masked in get_config. An empty form submission
+            # preserves the existing .env value; use the explicit sentinel to
+            # clear one intentionally.
+            if value == "__CLEAR_SECRET__" or (
+                field["type"] == "list_str_multiline"
+                and isinstance(value, (list, tuple))
+                and any(str(item).strip() == "__CLEAR_SECRET__" for item in value)
+            ):
+                env_updates[key] = ""
+            elif value is None or (isinstance(value, str) and not value.strip()):
+                continue
+            elif isinstance(value, (list, tuple)) and not any(str(x).strip() for x in value):
+                continue
+            else:
+                env_updates[key] = _format_env_value(value, field["type"])
+        else:
+            # Explicit null/empty numeric values clear the .env override; they
+            # must not silently fall back to the currently loaded default.
+            env_updates[key] = _format_env_value(value, field["type"])
         updated.append(key)
 
 

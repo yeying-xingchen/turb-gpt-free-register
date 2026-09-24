@@ -89,6 +89,18 @@ Thumbs.db
 # Local verification/backup artifacts (may contain account data, tokens, or .git snapshots)
 artifacts/
 压缩文件*.zip
+
+# Captures and protocol traces may contain OAuth/CSRF/session data or PII.
+/Default-all-domains-*.json
+/are-capture-*.jsonl
+/docs/protocol_har_summary.json
+*.har
+*.har.json
+*.pcap
+*.pcapng
+captures/
+protocol-captures/
+
 webui.log
 webui.pid
 logs/

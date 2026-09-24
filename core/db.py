@@ -14,6 +14,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
@@ -74,10 +75,25 @@ _DEFAULT_ACCOUNTS_JSON = _ACCOUNTS_JSON
 _DEFAULT_OUTLOOK_JSON = _OUTLOOK_JSON
 _DEFAULT_JOBS_JSON = _JOBS_JSON
 _SQLITE_READY_PATH: Path | None = None
+_SQLITE_INIT_STATE = threading.local()
+
+
+def _close_sqlite_connection(conn: sqlite3.Connection | None) -> None:
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """Return the current UTC time as an offset-aware ISO timestamp.
+
+    Persisted timestamps must carry their timezone so age checks do not compare
+    a local naive value with the UTC clock used by the database layer.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _sql_like_contains(value: object, *, escape: str = "!") -> str:
@@ -94,12 +110,17 @@ def _ensure_storage() -> None:
 def _sqlite_conn() -> sqlite3.Connection:
     """创建短生命周期连接；WAL 允许 WebUI 读与注册线程写并行。"""
     _ensure_storage()
-    conn = sqlite3.connect(str(_active_sqlite_path()), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(_active_sqlite_path()), timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+    except Exception:
+        _close_sqlite_connection(conn)
+        raise
 
 
 def _active_sqlite_path() -> Path:
@@ -128,7 +149,7 @@ def _read_legacy_sqlite_collection(collection: str) -> list[dict] | None:
         return None
 
 
-def _ensure_sqlite() -> None:
+def _ensure_sqlite_impl() -> None:
     """首次运行将现有 JSON 一次性导入 SQLite，之后 SQLite 为唯一读写源。"""
     global _SQLITE_READY, _SQLITE_READY_PATH
     active_path = _active_sqlite_path()
@@ -139,6 +160,7 @@ def _ensure_sqlite() -> None:
         if _SQLITE_READY and _SQLITE_READY_PATH == active_path:
             return
         conn = _sqlite_conn()
+        _SQLITE_INIT_STATE.connection = conn
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS accounts (
                 id INTEGER NOT NULL,
@@ -303,7 +325,7 @@ def _ensure_sqlite() -> None:
                 meta = dict(content)
                 meta["_filename"] = filename
                 meta["_size"] = stat.st_size
-                meta["_mtime"] = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+                meta["_mtime"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
                 es = state.get(filename) or {}
                 meta["_exported_at"] = es.get("exported_at")
                 meta["_exported_count"] = es.get("exported_count", 0)
@@ -326,7 +348,7 @@ def _ensure_sqlite() -> None:
                 if not account:
                     continue
                 account_id = int(account["id"])
-                stamp = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+                stamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
                 conn.execute(
                     "INSERT OR IGNORE INTO codex_agent_accounts(account_id,email,filename,created_at,updated_at,payload) VALUES(?,?,?,?,?,?)",
                     (account_id, email or str(json.loads(account["payload"]).get("email") or ""), path.name, stamp, stamp, json.dumps(content, ensure_ascii=False)),
@@ -343,9 +365,21 @@ def _ensure_sqlite() -> None:
         if not migration_done:
             conn.execute("INSERT OR REPLACE INTO storage_meta(key, value) VALUES('legacy_import_completed', ?)", (_now(),))
         conn.commit()
-        conn.close()
+        _SQLITE_INIT_STATE.connection = None
+        _close_sqlite_connection(conn)
         _SQLITE_READY = True
         _SQLITE_READY_PATH = active_path
+
+
+def _ensure_sqlite() -> None:
+    """Initialize SQLite and always release its initialization connection."""
+    _SQLITE_INIT_STATE.connection = None
+    try:
+        _ensure_sqlite_impl()
+    finally:
+        conn = getattr(_SQLITE_INIT_STATE, "connection", None)
+        _SQLITE_INIT_STATE.connection = None
+        _close_sqlite_connection(conn)
 
 
 def _load_collection(collection: str) -> list[dict]:
@@ -809,6 +843,20 @@ def _account_line(row: dict) -> str:
 _TWOFA_EXPORT_URL = "https://2fa.run/"
 
 
+def _safe_export_segment(value: object, *, delimiters: tuple[str, ...]) -> str:
+    """Keep ordinary exports readable while escaping delimiter/newline-bearing cells.
+
+    Account material can contain user-controlled mailbox URLs or passwords.  A
+    quote/escape-free concatenation would let a newline or ``---`` create extra
+    records or columns.  Percent-encode only fields that need it, preserving the
+    established output for normal values.
+    """
+    text = str(value or "")
+    if any(token in text for token in delimiters) or "\n" in text or "\r" in text:
+        return quote(text, safe="@._~:/?=&%+-")
+    return text
+
+
 def _account_full_export_line(row: dict) -> str:
     """生成“完整导出”单行，格式严格按需求：
 
@@ -821,11 +869,14 @@ def _account_full_export_line(row: dict) -> str:
     - 2FA：固定前缀 “2FA:” 拼接 TOTP 密钥。
     分隔符：前四段之间为 “---”，2FA 段之前为 “----”（与需求保持一致）。
     """
-    email = str(row.get("email") or "").strip()
-    email_api = _resolve_email_api_link(email, str(row.get("email_source") or "").strip())
+    email = _safe_export_segment(str(row.get("email") or "").strip(), delimiters=("---", "----"))
+    email_api = _safe_export_segment(
+        _resolve_email_api_link(str(row.get("email") or "").strip(), str(row.get("email_source") or "").strip()),
+        delimiters=("---", "----"),
+    )
     # 仅填 ChatGPT 注册密码；若该账号没有，则留空。
-    password = _extract_registration_password(row)
-    totp = str(row.get("totp_secret") or "").strip()
+    password = _safe_export_segment(_extract_registration_password(row), delimiters=("---", "----"))
+    totp = _safe_export_segment(str(row.get("totp_secret") or "").strip(), delimiters=("---", "----"))
     line = "---".join([email, email_api, password, _TWOFA_EXPORT_URL])
     line = line + "----" + ("2FA:" + totp)
     return line
@@ -864,7 +915,7 @@ def _build_generic_api_code_url(email: str) -> str:
         base = ""
     if not base or not email:
         return ""
-    return f"{base}/messages?mailbox={email}"
+    return f"{base}/messages?mailbox={quote(str(email), safe='@._-')}"
 
 
 def _registered_email_line(row: dict) -> str:
@@ -933,18 +984,34 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
-def _timestamp_age_seconds(value: Any) -> float | None:
-    """Return age in seconds for naive/aware ISO timestamps, or None if invalid."""
+def _parse_utc_datetime(value: Any, *, end_of_day: bool = False) -> datetime | None:
+    """Parse an ISO timestamp as an aware UTC datetime.
+
+    Stored timestamps generated by this module include ``+00:00``.  Older
+    records may contain naive local-looking ISO values; for compatibility they
+    are interpreted as UTC, matching the historical age-check contract instead
+    of raising when compared with an aware UTC clock.
+    """
     if value is None or not str(value).strip():
         return None
+    text = str(value).strip()
+    if len(text) == 10 and text[4] == "-":
+        text += "T23:59:59.999999" if end_of_day else "T00:00:00"
     try:
-        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
-    now = datetime.now(timezone.utc)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return (now - parsed.astimezone(timezone.utc)).total_seconds()
+    return parsed.astimezone(timezone.utc)
+
+
+def _timestamp_age_seconds(value: Any) -> float | None:
+    """Return age in seconds for naive/aware ISO timestamps, or None if invalid."""
+    parsed = _parse_utc_datetime(value)
+    if parsed is None:
+        return None
+    return (datetime.now(timezone.utc) - parsed).total_seconds()
 
 
 def _is_fresh_timestamp(value: Any, stale_after: float) -> bool | None:
@@ -1449,8 +1516,8 @@ def claim_account_codex_agent(acc_id: int, trigger: str = "manual") -> bool:
             try:
                 stamp_key = "codex_agent_queued_at" if current_status == "queued" else "codex_agent_started_at"
                 stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
-                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
-                if (datetime.now() - started_at).total_seconds() < stale_after:
+                age = _timestamp_age_seconds(row.get(stamp_key))
+                if age is not None and age < stale_after:
                     return False
             except (TypeError, ValueError):
                 pass
@@ -1593,8 +1660,8 @@ def claim_account_plan_check(
             try:
                 stamp_key = "plan_check_queued_at" if current_status == "queued" else "plan_check_started_at"
                 stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
-                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
-                if (datetime.now() - started_at).total_seconds() < stale_after:
+                age = _timestamp_age_seconds(row.get(stamp_key))
+                if age is not None and age < stale_after:
                     return False
             except (TypeError, ValueError):
                 pass
@@ -1768,8 +1835,8 @@ def claim_account_payment_method_check(
             try:
                 stamp_key = "payment_method_check_queued_at" if current_status == "queued" else "payment_method_check_started_at"
                 stale_after = _PAYMENT_METHOD_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PAYMENT_METHOD_CHECK_STALE_SECONDS
-                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
-                if (datetime.now() - started_at).total_seconds() < stale_after:
+                age = _timestamp_age_seconds(row.get(stamp_key))
+                if age is not None and age < stale_after:
                     return False
                 stale = True
             except (TypeError, ValueError):
@@ -1918,8 +1985,8 @@ def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str =
             try:
                 stamp_key = "extract_link_queued_at" if current_status == "queued" else "extract_link_started_at"
                 stale_after = _EXTRACT_LINK_QUEUE_STALE_SECONDS if current_status == "queued" else _EXTRACT_LINK_STALE_SECONDS
-                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
-                if (datetime.now() - started_at).total_seconds() < stale_after:
+                age = _timestamp_age_seconds(row.get(stamp_key))
+                if age is not None and age < stale_after:
                     return False
             except (TypeError, ValueError):
                 pass
@@ -2159,22 +2226,8 @@ def _account_matches_query(row: dict, q: str | None) -> bool:
 
 
 def _parse_iso_dt(value: str | None, end_of_day: bool = False) -> datetime | None:
-    """宽松解析 ISO 日期/时间字符串；支持 YYYY-MM-DD 或完整 ISO；解析失败返回 None。
-
-    end_of_day=True 时，纯日期（YYYY-MM-DD）按当天 23:59:59.999999 解析，
-    用于 date_to 过滤（保证包含截止当天）；完整时间串原样返回。
-    """
-    if not value:
-        return None
-    text = str(value).strip()
-    try:
-        if len(text) == 10 and text[4] == "-":
-            if end_of_day:
-                return datetime.fromisoformat(text + "T23:59:59.999999")
-            return datetime.fromisoformat(text + "T00:00:00")
-        return datetime.fromisoformat(text)
-    except Exception:
-        return None
+    """宽松解析 ISO 日期/时间字符串并返回 UTC aware datetime。"""
+    return _parse_utc_datetime(value, end_of_day=end_of_day)
 
 
 def _matches_codex_status_filter(row: dict, codex_filter: str | None) -> bool:
@@ -2699,8 +2752,8 @@ def claim_account_totp_setup(acc_id: int, trigger: str = "manual") -> bool:
             try:
                 stamp_key = "totp_setup_queued_at" if current_status == "queued" else "totp_setup_started_at"
                 stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
-                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
-                if (datetime.now() - started_at).total_seconds() < stale_after:
+                age = _timestamp_age_seconds(row.get(stamp_key))
+                if age is not None and age < stale_after:
                     return False
             except (TypeError, ValueError):
                 pass
@@ -2791,8 +2844,8 @@ def claim_account_live_check(acc_id: int, trigger: str = "manual") -> bool:
             try:
                 stamp_key = "live_check_queued_at" if row.get("live_check_status") == "queued" else "live_check_started_at"
                 stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if row.get("live_check_status") == "queued" else _PLAN_CHECK_STALE_SECONDS
-                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
-                if (datetime.now() - started_at).total_seconds() < stale_after:
+                age = _timestamp_age_seconds(row.get(stamp_key))
+                if age is not None and age < stale_after:
                     return False
             except (TypeError, ValueError):
                 pass
@@ -3983,6 +4036,7 @@ def _migrate_legacy_sqlite() -> dict:
     summary = {"sqlite_accounts_imported": 0, "sqlite_outlook_imported": 0, "sqlite_outlook_skipped": 0}
     if not _LEGACY_SQLITE.exists():
         return summary
+    conn: sqlite3.Connection | None = None
     try:
         conn = sqlite3.connect(str(_LEGACY_SQLITE))
         conn.row_factory = sqlite3.Row
@@ -4022,9 +4076,10 @@ def _migrate_legacy_sqlite() -> dict:
                     extra=json.loads(row["extra_json"]) if row["extra_json"] else None,
                 )
                 summary["sqlite_accounts_imported"] += 1
-        conn.close()
     except Exception as exc:
         summary["sqlite_error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        _close_sqlite_connection(conn)
     return summary
 
 

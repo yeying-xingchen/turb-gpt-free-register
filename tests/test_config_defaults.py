@@ -120,6 +120,28 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         )
         self.assertTrue(config_editor._coerce_raw_value("", True, "bool"))
 
+    def test_proxy_secret_fields_are_registered_and_masked_updates_preserve_existing_values(self):
+        fields = {field["key"]: field for field in config_editor.EDITABLE_FIELDS}
+        for key in (
+            "GENERIC_API_PROXY", "PROXY_POOL", "PROXY_POOL_UPSTREAM_PROXY", "PLAN_CHECK_PROXY",
+            "PLAN_CHECK_UPSTREAM_PROXY", "PAY153_ENTRY_PROXIES", "PAY153_EXIT_PROXIES",
+            "CLOAK_LICENSE_KEY", "MOMO_ACTIVATION_PAYMENT_CDK", "MOMO_ACTIVATION_ENTRY_PROXIES",
+            "SUB2API_PROXY_KEY",
+        ):
+            self.assertTrue(fields[key].get("secret"), key)
+            self.assertIn(key, env_loader.SECRET_ENV_KEYS, key)
+        with patch.object(env_loader, "write_env_values") as write_env, patch.object(env_loader, "load_env"):
+            result = config_editor.update_config({"PROXY_POOL_UPSTREAM_PROXY": ""})
+        self.assertEqual(result["updated"], [])
+        write_env.assert_not_called()
+
+    def test_clear_secret_sentinel_writes_explicit_empty_value(self):
+        with patch.object(env_loader, "write_env_values", return_value=["CLOAK_LICENSE_KEY"]) as write_env, \
+                patch.object(env_loader, "load_env"):
+            result = config_editor.update_config({"CLOAK_LICENSE_KEY": "__CLEAR_SECRET__"})
+        self.assertEqual(result["updated"], ["CLOAK_LICENSE_KEY"])
+        write_env.assert_called_once_with({"CLOAK_LICENSE_KEY": ""})
+
     def test_webui_exposes_browser_data_saver_settings(self):
         fields = {field["key"]: field for field in config_editor.EDITABLE_FIELDS}
         self.assertEqual(fields["BROWSER_DATA_SAVER_MODE"]["type"], "bool")

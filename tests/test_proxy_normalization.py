@@ -29,6 +29,16 @@ class ProxyNormalizationTests(unittest.TestCase):
             "http://user:pa%40ss@host.example:8080",
         )
 
+    def test_standard_url_with_numeric_password_component_is_not_legacy(self):
+        self.assertEqual(
+            normalize_proxy_url("http://user:8080:foo@host.example:8080"),
+            "http://user:8080%3Afoo@host.example:8080",
+        )
+        self.assertEqual(
+            normalize_proxy_url("http://user:1234:foo@host.example:8080"),
+            "http://user:1234%3Afoo@host.example:8080",
+        )
+
     def test_credentials_are_encoded_once(self):
         self.assertEqual(
             normalize_proxy_url("host.example:8080:u ser:p@ss:#=:%"),
@@ -37,6 +47,14 @@ class ProxyNormalizationTests(unittest.TestCase):
         self.assertEqual(
             normalize_proxy_url("host.example:8080:user:p@ss:with:colon"),
             "http://user:p%40ss%3Awith%3Acolon@host.example:8080",
+        )
+        self.assertEqual(
+            normalize_proxy_url("host.example:8080:user:p@ss"),
+            "http://user:p%40ss@host.example:8080",
+        )
+        self.assertEqual(
+            normalize_proxy_url("host.example:8080:user:1234"),
+            "http://user:1234@host.example:8080",
         )
 
     def test_bracketed_ipv6_and_zone_id_are_supported(self):

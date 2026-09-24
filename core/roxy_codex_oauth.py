@@ -13,7 +13,7 @@ from core.email_provider import wait_for_otp
 from core.humanize import delay as human_delay
 from core import sms_provider
 from core.openai_auth import AccountUnusableError, detect_account_unusable_response_body
-from core.roxybrowser_client import RoxyBrowserClient
+from core.roxybrowser_client import RoxyBrowserClient, _redact_sensitive, _redact_text
 from core import codex_oauth as _codex_proto
 from core.roxy_registration import (
     _build_driver,
@@ -64,22 +64,34 @@ class _CodexLogger:
         self._base = base
 
     def _msg(self, msg):
-        return str(msg).replace("[Codex][Browser]", _codex_prefix())
+        return _redact_text(str(msg).replace("[Codex][Browser]", _codex_prefix()))
+
+    @staticmethod
+    def _args(args):
+        def safe(value):
+            if isinstance(value, dict):
+                return _redact_sensitive(value)
+            if isinstance(value, (list, tuple)):
+                return type(value)(safe(item) for item in value)
+            if isinstance(value, str):
+                return _redact_text(value)
+            return value
+        return tuple(safe(item) for item in args)
 
     def debug(self, msg, *args, **kwargs):
-        return self._base.debug(self._msg(msg), *args, **kwargs)
+        return self._base.debug(self._msg(msg), *self._args(args), **kwargs)
 
     def info(self, msg, *args, **kwargs):
-        return self._base.info(self._msg(msg), *args, **kwargs)
+        return self._base.info(self._msg(msg), *self._args(args), **kwargs)
 
     def warning(self, msg, *args, **kwargs):
-        return self._base.warning(self._msg(msg), *args, **kwargs)
+        return self._base.warning(self._msg(msg), *self._args(args), **kwargs)
 
     def error(self, msg, *args, **kwargs):
-        return self._base.error(self._msg(msg), *args, **kwargs)
+        return self._base.error(self._msg(msg), *self._args(args), **kwargs)
 
     def exception(self, msg, *args, **kwargs):
-        return self._base.exception(self._msg(msg), *args, **kwargs)
+        return self._base.exception(self._msg(msg), *self._args(args), **kwargs)
 
     def __getattr__(self, name):
         return getattr(self._base, name)
@@ -1496,19 +1508,25 @@ def _run_roxy_codex_oauth_once(
         if not code_verifier:
             raise RuntimeError("[Codex][Browser] local 模式缺少 code_verifier")
         session = proto.BrowserSession(proxy=proxy, fingerprint_seed=f"account:{email.lower()}")
-        token_resp = proto.exchange_codex_token(session, code, code_verifier)
-        id_claims = proto._parse_id_token(token_resp.get("id_token", ""))
-        effective_email = id_claims.get("email") or email
-        storage = proto.build_codex_storage(token_resp, id_claims)
-        path = proto.save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""))
-        return proto._codex_result(
-            status="success",
-            ok=True,
-            email=effective_email,
-            file_path=str(path),
-            callback_url=callback_url,
-            message=f"{_codex_driver_name()} plan={id_claims.get('plan_type') or 'unknown'}",
-        )
+        try:
+            token_resp = proto.exchange_codex_token(session, code, code_verifier)
+            id_claims = proto._parse_id_token(token_resp.get("id_token", ""))
+            effective_email = id_claims.get("email") or email
+            storage = proto.build_codex_storage(token_resp, id_claims)
+            path = proto.save_codex_credential(storage, effective_email, id_claims.get("plan_type", ""))
+            return proto._codex_result(
+                status="success",
+                ok=True,
+                email=effective_email,
+                file_path=str(path),
+                callback_url=callback_url,
+                message=f"{_codex_driver_name()} plan={id_claims.get('plan_type') or 'unknown'}",
+            )
+        finally:
+            try:
+                session.close()
+            except Exception:
+                pass
     except AccountUnusableError as exc:
         logger.warning("[Codex][Browser] 账号已废：%s，%s", email, exc.error_code)
         return proto._codex_result(
@@ -1528,8 +1546,17 @@ def _run_roxy_codex_oauth_once(
                 driver.quit()
             except Exception:
                 pass
-        if owns_driver and client and not bool(_roxy_cfg.ROXY_KEEP_BROWSER_OPEN):
-            client.cleanup_profile(opened)
+        if owns_driver and client:
+            keep_open = bool(_roxy_cfg.ROXY_KEEP_BROWSER_OPEN)
+            try:
+                if not keep_open:
+                    client.cleanup_profile(opened)
+            except Exception as exc:
+                logger.debug("[Codex][Browser] 清理 Roxy profile 失败：%s", _redact_text(exc))
+            finally:
+                # The browser/relay may intentionally remain for debugging, but
+                # the requests.Session must not leak from a Codex run.
+                client.close(close_relay=not keep_open)
         try:
             _CODEX_BROWSER_KIND.reset(browser_kind_token)
         except Exception:

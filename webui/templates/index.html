@@ -5145,11 +5145,11 @@ async function doImportAccounts() {
   } finally { if (submit) submit.disabled = false; }
 }
 
-async function fetchAccountSecrets(ids, field) {
+async function fetchAccountSecrets(ids, field, confirmSensitive = false) {
   const r = await api('/api/accounts/secret-bulk', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({account_ids: ids, field}),
+    body: JSON.stringify({account_ids: ids, field, ...(confirmSensitive ? {confirm_sensitive: true} : {})}),
   });
   return (r.values || []).map(x => x.value).filter(Boolean);
 }
@@ -5587,9 +5587,10 @@ async function downloadSelectedAccountTxt() {
 async function downloadSelectedAccountFullExport() {
   const ids = Array.from(ACCOUNT_SELECTED).map(Number);
   if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!confirm(`完整导出包含账号登录凭据、Token 等敏感信息，确定继续下载选中的 ${ids.length} 个账号吗？`)) return;
   let lines = [];
   try {
-    lines = await fetchAccountSecrets(ids, 'full_export');
+    lines = await fetchAccountSecrets(ids, 'full_export', true);
   } catch(err) { showToast('生成完整导出失败: ' + err.message); return; }
   if (!lines.length) { showToast('选中账号没有可导出内容'); return; }
   const now = new Date();
@@ -5609,9 +5610,10 @@ async function downloadSelectedAccountFullExport() {
 async function copySelectedAccountFullExport() {
   const ids = Array.from(ACCOUNT_SELECTED).map(Number);
   if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!confirm(`完整导出包含账号登录凭据、Token 等敏感信息，确定复制选中的 ${ids.length} 个账号吗？`)) return;
   let lines = [];
   try {
-    lines = await fetchAccountSecrets(ids, 'full_export');
+    lines = await fetchAccountSecrets(ids, 'full_export', true);
   } catch(err) { showToast('复制完整导出失败: ' + err.message); return; }
   if (!lines.length) { showToast('选中账号没有可复制内容'); return; }
   copyText(lines.join('\n'));
@@ -5621,9 +5623,10 @@ async function copySelectedAccountFullExport() {
 async function copySelectedAccountLoginCredentials() {
   const ids = Array.from(ACCOUNT_SELECTED).map(Number);
   if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!confirm(`登录凭据包含密码和 2FA 密钥，确定复制选中的 ${ids.length} 个账号吗？`)) return;
   let lines = [];
   try {
-    lines = await fetchAccountSecrets(ids, 'login_credentials');
+    lines = await fetchAccountSecrets(ids, 'login_credentials', true);
   } catch(err) { showToast('复制登录凭据失败: ' + err.message); return; }
   if (!lines.length) { showToast('选中账号没有可复制的登录凭据'); return; }
   copyText(lines.join('\n'));
@@ -7505,20 +7508,34 @@ function renderConfigRecommendedLinks(f) {
   if (!items) return '';
   return `<div class="config-recommendations" role="note"><span class="config-recommendations-title">推荐家宽</span>${items}</div>`;
 }
+function renderLiveCheckDriverFieldV2(f, fv) {
+  const current = String(fv == null ? 'auto' : fv).trim().toLowerCase() || 'auto';
+  const choices = [
+    ['auto', '自动（协议优先，边缘失败切 Playwright）'],
+    ['protocol', '纯协议'],
+    ['playwright', 'Playwright 浏览器'],
+  ];
+  return `<select data-key="${attrEsc(f.key)}" aria-label="${attrEsc(f.label)}">${choices.map(([value, label]) => `<option value="${value}"${value === current ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select>`;
+}
 function renderConfigPlainFieldV2(f) {
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   let control = '';
-  if (f.type === 'int') {
+  if (f.key === 'LIVE_CHECK_DRIVER') {
+    control = renderLiveCheckDriverFieldV2(f, fv);
+  } else if (f.type === 'int') {
     control = `<input type="number" data-key="${attrEsc(f.key)}" value="${attrEsc(fv == null ? '' : fv)}">`;
   } else if (f.type === 'float') {
     control = `<input type="number" step="0.1" data-key="${attrEsc(f.key)}" value="${attrEsc(fv == null ? '' : fv)}">`;
   } else if (f.type === 'list_str_multiline') {
-    control = `<textarea data-key="${attrEsc(f.key)}" placeholder="每行一条，可留空">${attrEsc((fv || []).join('\n'))}</textarea>`;
+    control = `<textarea data-key="${attrEsc(f.key)}" data-secret="${f.secret ? '1' : '0'}" placeholder="${f.secret ? (f.secret_configured ? '已配置，输入新值替换；留空保持不变' : '每行一条，可留空') : '每行一条，可留空'}">${attrEsc((f.secret ? [] : (fv || [])).join('\n'))}</textarea>`;
   } else {
-    const shown = isPlaceholderEmpty(fv) ? '' : fv;
+    const shown = f.secret ? '' : (isPlaceholderEmpty(fv) ? '' : fv);
     const inputType = f.secret ? 'password' : 'text';
-    const ph = f.secret ? '保存在 .env，可留空' : '可留空';
-    control = `<input type="${inputType}" data-key="${attrEsc(f.key)}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
+    const ph = f.secret ? (f.secret_configured ? '已配置，输入新值替换；留空保持不变' : '保存在 .env，可留空') : '可留空';
+    control = `<input type="${inputType}" data-key="${attrEsc(f.key)}" data-secret="${f.secret ? '1' : '0'}" value="${attrEsc(shown)}" placeholder="${ph}" autocomplete="off" spellcheck="false">`;
+  }
+  if (f.secret) {
+    control += ` <button type="button" class="btn config-secret-clear" data-clear-secret="${attrEsc(f.key)}" title="清除已保存的 Secret；留空仍会保留原值">清除 Secret</button>`;
   }
   const field = `
     <label class="fld">
@@ -7680,9 +7697,9 @@ function bindCloudMailToolsV2() {
 }
 function _configValueV2(key) {
   const root = document.querySelector(`#configSectionsV2 [data-key="${CSS.escape(key)}"]`);
-  if (root) return root.value;
+  if (root && !root.dataset.secret) return root.value;
   const f = CONFIG.find(x => x.key === key);
-  return f ? String(f.value ?? '') : '';
+  return f && !f.secret ? String(f.value ?? '') : '';
 }
 async function genCloudMailTokenV2() {
   const btn = $('#btnGenCloudMailTokenV2');
@@ -7697,7 +7714,8 @@ async function genCloudMailTokenV2() {
       body: JSON.stringify({
         api_base: _configValueV2('CLOUDMAIL_API_BASE').trim(),
         admin_email: _configValueV2('CLOUDMAIL_ADMIN_EMAIL').trim(),
-        password: _configValueV2('CLOUDMAIL_PASSWORD').trim(),
+        // Secret inputs stay masked; backend falls back to the process config.
+        password: '',
         path: _configValueV2('CLOUDMAIL_TOKEN_PATH').trim() || '/api/public/genToken',
       }),
     });
@@ -7723,8 +7741,10 @@ async function loadCloudMailDomainsV2() {
       body: JSON.stringify({
         api_base: _configValueV2('CLOUDMAIL_API_BASE').trim(),
         admin_email: _configValueV2('CLOUDMAIL_ADMIN_EMAIL').trim(),
-        password: _configValueV2('CLOUDMAIL_PASSWORD').trim(),
-        token: _configValueV2('CLOUDMAIL_AUTH_TOKEN').trim(),
+        // Masked secrets are not fetched into the browser; backend fallback
+        // uses the process configuration without persisting it to .env.
+        password: '',
+        token: '',
       }),
     });
     const domains = Array.isArray(r.domains) ? r.domains : [];
@@ -7902,6 +7922,19 @@ function bindConfigLayoutV2() {
   if (layout && !layout.dataset.epBound) {
     layout.dataset.epBound = '1';
     layout.addEventListener('click', (e) => {
+      const clearSecret = e.target.closest('[data-clear-secret]');
+      if (clearSecret) {
+        e.preventDefault();
+        e.stopPropagation();
+        const key = clearSecret.dataset.clearSecret;
+        const input = layout.querySelector(`[data-key="${CSS.escape(key)}"]`);
+        if (input) {
+          input.value = '';
+          input.dataset.secretClear = '1';
+          CONFIG_PENDING_UPDATES[key] = '__CLEAR_SECRET__';
+        }
+        return;
+      }
       const codexTab = e.target.closest('[data-codex-section-v2]');
       if (codexTab) {
         e.preventDefault();
@@ -7968,7 +8001,7 @@ function bindConfigLayoutV2() {
 
 async function loadConfig() {
   try {
-    CONFIG = await api('/api/config');
+    CONFIG = await api('/api/config/templates');
     renderConfigLayoutV2();
     bindConfigLayoutV2();
     markTabLoaded('config');
@@ -8040,6 +8073,7 @@ async function saveRoxyWorkspaceSelection() {
 
 function readConfigElementValue(el, f) {
   if (!f) return undefined;
+  if (f.secret && el.dataset.secretClear === '1') return '__CLEAR_SECRET__';
   if (f.type === 'list_str_multiline') return el.value.split('\n').map(s=>s.trim()).filter(Boolean);
   if (f.type === 'bool') {
     if (el.type === 'checkbox') return !!el.checked;
@@ -8063,6 +8097,7 @@ function trackConfigFieldChange(e) {
   if (!el || !el.closest('#tab-config')) return;
   const f = CONFIG.find(x => x.key === el.dataset.key);
   if (!f) return;
+  if (f.secret && el.dataset.secretClear === '1' && el.value) delete el.dataset.secretClear;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
   if (f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER') renderRegistrationDriverCard();
 }

@@ -15,6 +15,7 @@ from core.browser_traffic import PlaywrightTrafficTracker
 from core.cloakbrowser_driver import build_cloak_driver
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
+from config.proxy import redact_proxy_url
 
 # 复用 Roxy 注册流程里已维护好的页面操作函数。
 from core.roxy_registration import (  # noqa: F401
@@ -165,15 +166,21 @@ def run_cloak_registration(
         # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
         post_register_dwell(email, label="Cloak注册")
         if traffic_tracker is not None:
-            network_traffic = traffic_tracker.stop()
+            try:
+                network_traffic = traffic_tracker.stop()
+            except Exception as exc:
+                logger.debug("[Cloak注册] 停止浏览器流量统计失败：%s", str(exc)[:180])
         if data_saver is not None:
-            data_saver.stop()
+            try:
+                data_saver.stop()
+            except Exception as exc:
+                logger.debug("[Cloak注册] 停止省流量拦截失败：%s", str(exc)[:180])
         account_id = save_account_data(
             email=email,
             access_token=access_token,
             totp_secret=totp_secret,
             email_source=resolve_email_source(email),
-            proxy_used=((opened.raw or {}).get("proxy_pool_target") if opened else None) or proxy or None,
+            proxy_used=(redact_proxy_url(proxy) if proxy else None),
             batch_dir=batch_dir,
             extra={
                 "user": session_info.get("user"),
@@ -203,8 +210,11 @@ def run_cloak_registration(
             except Exception:
                 pass
         if data_saver is not None:
-            data_saver.stop()
-        logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, exc)
+            try:
+                data_saver.stop()
+            except Exception as stop_exc:
+                logger.debug("[Cloak注册] 失败路径停止省流量拦截失败：%s", str(stop_exc)[:180])
+        logger.error("[Cloak注册] 失败：%s: %s", type(exc).__name__, str(exc)[:300])
         logger.debug("[Cloak注册] 失败详情", exc_info=True)
         try:
             if email:
@@ -222,12 +232,15 @@ def run_cloak_registration(
         if traffic_tracker is not None:
             try:
                 traffic_tracker.stop()
-            except Exception:
-                pass
+            except Exception as stop_exc:
+                logger.debug("[Cloak注册] 最终停止浏览器流量统计失败：%s", str(stop_exc)[:180])
         if data_saver is not None:
-            data_saver.stop()
+            try:
+                data_saver.stop()
+            except Exception as stop_exc:
+                logger.debug("[Cloak注册] 最终停止省流量拦截失败：%s", str(stop_exc)[:180])
         if driver and not bool(_cfg.CLOAK_KEEP_BROWSER_OPEN):
             try:
                 driver.quit()
-            except Exception:
-                pass
+            except Exception as quit_exc:
+                logger.debug("[Cloak注册] 关闭浏览器失败：%s", str(quit_exc)[:180])

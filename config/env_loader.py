@@ -24,6 +24,8 @@ EXPLICIT_EMPTY_LIST_ENV_KEYS = {
     "PAYMENT_METHOD_CHECK_PROXIES",
     "DJB_PROXIES",
     "DJB_EXIT_PROXIES",
+    "PAY153_ENTRY_PROXIES",
+    "PAY153_EXIT_PROXIES",
     "MOMO_ACTIVATION_ENTRY_PROXIES",
 }
 
@@ -33,8 +35,11 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "WEBUI_SESSION_SECRET": "WebUI Session Cookie 签名密钥",
     "BROWSER_USE_API_KEY": "Browser Use Cloud API Key",
     "SKYVERN_API_KEY": "Skyvern API Key",
+    "CLOAK_LICENSE_KEY": "CloakBrowser License Key",
     "ROXY_API_TOKEN": "RoxyBrowser 本地 API Token",
+    "PROXY_POOL": "代理池（可能包含认证信息）",
     "PLAN_CHECK_PROXY": "套餐查询专用代理（可能包含认证信息）",
+    "GENERIC_API_PROXY": "通用邮箱 API 代理（可能包含认证信息）",
     "PLAN_CHECK_UPSTREAM_PROXY": "套餐查询本地上游代理地址（用于代理链）",
     "PROXY_POOL_UPSTREAM_PROXY": "代理池本地上游代理地址（用于代理链）",
     "PAYMENT_METHOD_CHECK_PROXY": "支付方式检测代理（可能包含认证信息）",
@@ -57,12 +62,17 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "DJB_PROXIES": "DJB 建单代理池（可能包含认证信息）",
     "DJB_EXIT_PROXIES": "DJB 出口/账单代理池（可能包含认证信息）",
     "PAY153_INTERNAL_KEY": "pay153-checkout-link 内部请求密钥（X-Pay153-Internal-Key）",
+    "PAY153_ENTRY_PROXIES": "pay153 入口代理池（可能包含认证信息）",
+    "PAY153_EXIT_PROXIES": "pay153 出口代理池（可能包含认证信息）",
     "SUB2API_API_KEY": "sub2api 管理接口 API Key",
+    "SUB2API_PROXY_KEY": "sub2api 代理键",
     "SUB2API_API_TOKEN": "sub2api 管理接口鉴权 Token（旧配置名，兼容）",
     "SMS_API_KEY": "接码平台 API Key（如 GrizzlySMS）",
     "SMSBOWER_API_KEY": "SMSBower API Key",
     "L_ADMIN_AUTH_CODE": "本地 L 接码服务 ADMIN_AUTH_CODE",
     "H_ADMIN_AUTH_CODE": "本地 H 接码服务 ADMIN_AUTH_CODE",
+    "MOMO_ACTIVATION_PAYMENT_CDK": "MoMo 自动支付 CDK",
+    "MOMO_ACTIVATION_ENTRY_PROXIES": "MoMo 入口代理池（可能包含认证信息）",
 }
 
 

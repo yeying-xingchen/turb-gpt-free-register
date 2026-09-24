@@ -33,6 +33,32 @@ class CloudMailWebUiTests(unittest.TestCase):
         self.assertEqual(updates["CLOUDMAIL_ADMIN_EMAIL"], "admin@example.com")
         self.assertEqual(updates["CLOUDMAIL_PASSWORD"], "pass-123")
         self.assertEqual(updates["CLOUDMAIL_TOKEN_PATH"], "/api/public/genToken")
+        self.assertNotIn("token", r.get_json())
+        self.assertEqual(r.headers.get("Cache-Control"), "no-store, max-age=0")
+
+    @patch("config.email.CLOUDMAIL_PASSWORD", "process-only-password")
+    @patch("config.reload_all")
+    @patch("config.env_loader.write_env_values")
+    @patch("core.cloudmail_client.requests.post")
+    def test_gen_token_uses_process_fallback_without_persisting_it(self, post, write_env_values, reload_all):
+        response = post.return_value
+        response.status_code = 200
+        response.json.return_value = {"code": 200, "data": {"token": "token-process"}}
+        write_env_values.return_value = ["CLOUDMAIL_AUTH_TOKEN"]
+
+        r = self.client.post("/api/cloudmail/gen-token", json={
+            "api_base": "https://mail.example.com",
+            "admin_email": "admin@example.com",
+            "password": "",
+            "path": "/api/public/genToken",
+        })
+
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(post.call_args.kwargs["json"]["password"], "process-only-password")
+        updates = write_env_values.call_args.args[0]
+        self.assertNotIn("CLOUDMAIL_PASSWORD", updates)
+        self.assertEqual(updates["CLOUDMAIL_AUTH_TOKEN"], "token-process")
+        self.assertNotIn("token-process", r.get_data(as_text=True))
 
 
 if __name__ == "__main__":

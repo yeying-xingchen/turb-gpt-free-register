@@ -183,51 +183,79 @@ class BrowserSession:
             self.react_container_key = "__reactContainer$" + uuid.uuid4().hex[:11]
         self.react_resources_key = "__reactResources$" + self.react_container_key.split("$", 1)[1]
 
-        # 创建 curl_cffi 会话
-        self.session = Session(impersonate=IMPERSONATE)
+        # 创建 curl_cffi 会话。代理池 relay 由本对象拥有；若底层 session
+        # 初始化失败，必须立即释放 relay，避免构造失败的任务泄漏本地监听端口。
+        try:
+            self.session = Session(impersonate=IMPERSONATE)
+        except BaseException:
+            relay, self._proxy_pool_relay = self._proxy_pool_relay, None
+            if relay is not None:
+                try:
+                    relay.close()
+                except BaseException:
+                    pass
+            raise
 
-        # 设置代理
-        if transport_proxy:
-            self.session.proxies = {
-                "http": transport_proxy,
-                "https": transport_proxy,
-            }
+        # Session 已经创建后，任何后续初始化失败都必须同时释放 curl session
+        # 和本对象拥有的代理池 relay。否则例如 GeoIP/代理质量检查失败时，
+        # relay 的本地监听端口会一直存活到进程退出。
+        try:
+            # 设置代理
+            if transport_proxy:
+                self.session.proxies = {
+                    "http": transport_proxy,
+                    "https": transport_proxy,
+                }
 
-        # 设置超时
-        self.session.timeout = REQUEST_TIMEOUT
+            # 设置超时
+            self.session.timeout = REQUEST_TIMEOUT
 
-        # 会话级熔断：收到 403/429 后停止继续打后续接口，避免异常状态下扩大误伤。
-        self.blocked_until = 0.0
-        self.blocked_reason = ""
+            # 会话级熔断：收到 403/429 后停止继续打后续接口，避免异常状态下扩大误伤。
+            self.blocked_until = 0.0
+            self.blocked_reason = ""
 
-        # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
-        # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
-        self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
-        self._enforce_proxy_quality()
-        if browser_profile:
-            self.browser_profile = dict(browser_profile)
-        else:
-            self.browser_profile = dict(_seeded_browser_profile(self.fingerprint_seed, self.exit_geo))
-        self.browser_profile["react_listening_key"] = self.react_listening_key
-        self.browser_profile["react_container_key"] = self.react_container_key
-        self.browser_profile["react_resources_key"] = self.react_resources_key
-        issues = validate_browser_profile(self.browser_profile)
-        if issues:
-            logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
+            # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
+            # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
+            self.exit_geo = self._detect_exit_geo() if detect_exit_geo else {}
+            self._enforce_proxy_quality()
+            if browser_profile:
+                self.browser_profile = dict(browser_profile)
+            else:
+                self.browser_profile = dict(_seeded_browser_profile(self.fingerprint_seed, self.exit_geo))
+            self.browser_profile["react_listening_key"] = self.react_listening_key
+            self.browser_profile["react_container_key"] = self.react_container_key
+            self.browser_profile["react_resources_key"] = self.react_resources_key
+            issues = validate_browser_profile(self.browser_profile)
+            if issues:
+                logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
 
-        # 让 HTTP Cookie、OAuth 参数 ext-oai-did、Sentinel 里的 id 三者一致。
-        # 浏览器里 oai-did 通常会作为一方 Cookie 存在；协议层主动补齐可减少同一会话内
-        # “头部/参数/JS 指纹有设备 ID，但 Cookie Jar 为空”的不一致。
-        for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
-            self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
-        # 参考真实前端会话：语言不仅体现在 Accept-Language/oai-language，也写入
-        # 同一个 Cookie Jar，避免代理为 JP 但 Cookie 仍泄漏默认地区。
-        locale = self.navigator_language()
-        for domain in ("chatgpt.com", "auth.openai.com"):
-            self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
+            # 让 HTTP Cookie、OAuth 参数 ext-oai-did、Sentinel 里的 id 三者一致。
+            # 浏览器里 oai-did 通常会作为一方 Cookie 存在；协议层主动补齐可减少同一会话内
+            # “头部/参数/JS 指纹有设备 ID，但 Cookie Jar 为空”的不一致。
+            for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
+                self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
+            # 参考真实前端会话：语言不仅体现在 Accept-Language/oai-language，也写入
+            # 同一个 Cookie Jar，避免代理为 JP 但 Cookie 仍泄漏默认地区。
+            locale = self.navigator_language()
+            for domain in ("chatgpt.com", "auth.openai.com"):
+                self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
 
-        # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
-        self._cf_cookie_seen = self.cf_cookie_snapshot()
+            # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
+            self._cf_cookie_seen = self.cf_cookie_snapshot()
+        except BaseException:
+            # Cleanup is best effort: never mask the initialization exception with a
+            # close failure from curl-cffi or the local relay.
+            try:
+                self.session.close()
+            except BaseException:
+                pass
+            relay, self._proxy_pool_relay = self._proxy_pool_relay, None
+            if relay is not None:
+                try:
+                    relay.close()
+                except BaseException:
+                    pass
+            raise
 
     def cf_cookie_snapshot(self) -> dict:
         """返回当前 CookieJar 中的 Cloudflare 关键 Cookie 摘要，便于确认同 IP/同会话连续性。"""

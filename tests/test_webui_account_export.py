@@ -84,6 +84,32 @@ class WebUiAccountExportTests(unittest.TestCase):
                 self.assertNotIn("AT-ONE-SECRET", response.get_data(as_text=True))
                 self.assertNotIn("TOTP-ONE-SECRET", response.get_data(as_text=True))
 
+    def test_secret_bulk_allows_template_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with patch.multiple(db, **self._storage_patches(root)):
+                client = self._client(root)
+                for field in ("login_credentials", "full_export"):
+                    denied = client.post(
+                        "/api/accounts/secret-bulk",
+                        json={"account_ids": [1], "field": field},
+                        headers={"X-Auth-Code": "test-auth"},
+                    )
+                    self.assertEqual(denied.status_code, 400, field)
+                    self.assertIn("confirm", denied.get_json()["error"])
+                    response = client.post(
+                        "/api/accounts/secret-bulk",
+                        json={"account_ids": [1], "field": field, "confirm_sensitive": True},
+                        headers={"X-Auth-Code": "test-auth"},
+                    )
+                    self.assertEqual(response.status_code, 200, field)
+                    body = response.get_json()
+                    self.assertEqual(body["field"], field)
+                    self.assertEqual(body["count"], 1)
+                    self.assertEqual(len(body["values"]), 1)
+                    self.assertNotIn("AT-ONE-SECRET", response.get_data(as_text=True))
+                    self.assertEqual(response.headers.get("Cache-Control"), "no-store, max-age=0")
+
     def test_export_email_password_and_2fa_without_at(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

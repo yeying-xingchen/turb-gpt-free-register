@@ -2,6 +2,7 @@ curl_cffi>=0.15.0
 pyotp>=2.9.0
 flask>=3.0.0
 requests>=2.31.0
+PySocks>=1.7.1
 pycryptodome>=3.23.0
 selenium>=4.20.0
 websocket-client>=1.8.0

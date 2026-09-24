@@ -79,13 +79,35 @@ def _endpoint_looks_standard(endpoint: str) -> bool:
     return endpoint.count(":") <= 1
 
 
+def _endpoint_has_explicit_port(endpoint: str) -> bool:
+    """Return whether an authority suffix has a syntactically valid port."""
+    endpoint = str(endpoint or "")
+    if endpoint.startswith("["):
+        close = endpoint.find("]")
+        if close <= 1 or not endpoint[close + 1 :].startswith(":"):
+            return False
+        return _valid_proxy_port_text(endpoint[close + 2 :])
+    if endpoint.count(":") != 1:
+        return False
+    host, port = endpoint.rsplit(":", 1)
+    return bool(host) and _valid_proxy_port_text(port)
+
+
+def _valid_proxy_port_text(value: str | None) -> bool:
+    return bool(re.fullmatch(r"[0-9]+", str(value or ""))) and 1 <= int(value) <= 65535
+
+
+def _looks_like_forward_legacy_authority(authority: str) -> bool:
+    """判断明确的 host:port:user:password 旧式 authority。"""
+    if str(authority or "").startswith("["):
+        return False
+    fields = str(authority or "").split(":", 3)
+    return len(fields) == 4 and bool(fields[0]) and _valid_proxy_port_text(fields[1]) and bool(fields[2])
+
+
 def _looks_like_legacy_authority(authority: str) -> bool:
-    """判断旧式 host:port:user:password authority（密码可含 @）。"""
+    """判断旧式 host:port:user:password 或 user:password:host:port。"""
     authority = str(authority or "")
-
-    def valid_port(value: str) -> bool:
-        return bool(re.fullmatch(r"[0-9]+", str(value or ""))) and 1 <= int(value) <= 65535
-
     if authority.startswith("["):
         close = authority.find("]")
         if close <= 1:
@@ -94,15 +116,13 @@ def _looks_like_legacy_authority(authority: str) -> bool:
         if not suffix.startswith(":"):
             return False
         fields = suffix[1:].split(":", 2)
-        return len(fields) == 3 and valid_port(fields[0]) and bool(fields[1])
-    fields = authority.split(":", 3)
-    # 旧格式的 host/port/user 是前三个字段；最后字段是 password，不能
-    # 因为其中含 @ 就把整个值误当成标准 URL userinfo。
-    if len(fields) == 4 and bool(fields[0]) and valid_port(fields[1]) and bool(fields[2]):
+        return len(fields) == 3 and _valid_proxy_port_text(fields[0]) and bool(fields[1])
+    if _looks_like_forward_legacy_authority(authority):
         return True
     # 另一种常见格式是 user:password:host:port；当第二段不像端口、
     # 最后一段是端口时按该格式解释，避免把 @/空格密码拆坏。
-    return len(fields) == 4 and bool(fields[0]) and bool(fields[1]) and bool(fields[2]) and valid_port(fields[3])
+    fields = authority.split(":", 3)
+    return len(fields) == 4 and bool(fields[0]) and bool(fields[1]) and bool(fields[2]) and _valid_proxy_port_text(fields[3])
 
 
 def _parse_proxy_endpoint(
@@ -192,6 +212,9 @@ def _parse_proxy_authority(
             and bool(reverse[1])
             and bool(reverse[2])
             and re.fullmatch(r"[0-9]+", reverse[3] or "")
+            # Prefer the unambiguous host:port:user:password form. Otherwise
+            # values such as host:8080:user:1234 would be incorrectly reversed.
+            and not _looks_like_forward_legacy_authority(authority)
         ):
             # Also accept user:password:host:port, used by some proxy vendors.
             host, port, _, _ = _parse_proxy_endpoint(
@@ -237,13 +260,26 @@ def normalize_proxy_url(value: str | None, default_scheme: str = "http") -> str:
         authority = text
 
     endpoint = authority.rsplit("@", 1)[-1]
-    # 只要最后一个 @ 后确实是标准 host:port，就优先按 URL userinfo
-    # 解析；这样标准 URL 中未转义的 password 冒号也不会被误判为旧格式。
-    # 若 @ 出现在旧式 password 内，@ 后通常不是 host:port，则回到 legacy
-    # 解析并保留 password 中剩余的冒号/@。
-    if "@" in authority and _endpoint_looks_standard(endpoint):
+    # A final ``@host[:port]`` is unambiguous URL userinfo, even when an
+    # earlier user/password component happens to look like host:port.  This
+    # prevents credentials such as ``user:8080:foo@host:8080`` from being
+    # mistaken for the legacy ``host:port:user:password`` form.
+    if "@" in authority and (
+        match is not None
+        or _endpoint_has_explicit_port(endpoint)
+        or (
+            # A scheme-less ``user:password@host:port`` is standard URL
+            # userinfo.  If the suffix has no explicit port, let legacy
+            # parsing handle the ambiguous ``host:port:user:p@ss`` form.
+            _endpoint_looks_standard(endpoint)
+            and not _looks_like_forward_legacy_authority(authority)
+        )
+    ):
         legacy = False
     else:
+        # Legacy passwords may contain an unescaped '@'; in that case the
+        # suffix is not a standard endpoint and the old parser remains the
+        # appropriate fallback.
         legacy = _looks_like_legacy_authority(authority) or not _endpoint_looks_standard(endpoint)
     host, port, username, password = _parse_proxy_authority(authority, legacy=legacy)
     auth = ""
