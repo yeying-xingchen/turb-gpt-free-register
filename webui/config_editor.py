@@ -904,6 +904,10 @@ EDITABLE_FIELDS = [
         "label": "sub2 API Key", "help": "sub2api 管理接口 API Key；请求头使用 x-api-key；为空则不带鉴权头", "storage": "env", "secret": True,
     },
     {
+        "key": "SUB2API_API_TOKEN", "file": "sub2api.py", "type": "str", "group": "Codex",
+        "label": "sub2 API Token（兼容）", "help": "兼容旧版 sub2api 管理接口 Token；仅保存在 .env，不会在配置列表明文返回", "storage": "env", "secret": True,
+    },
+    {
         "key": "SUB2API_API_TIMEOUT", "file": "sub2api.py", "type": "int", "group": "Codex",
         "label": "sub2 超时", "help": "sub2api 请求超时秒数",
     },
@@ -914,6 +918,10 @@ EDITABLE_FIELDS = [
     {
         "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
         "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key；仅保存在 .env，不会在配置列表明文返回", "storage": "env", "secret": True,
+    },
+    {
+        "key": "SUB2_CODEX_API_TOKEN", "file": "sub2api.py", "type": "str", "group": "Codex",
+        "label": "sub2 Codex API Token（兼容）", "help": "兼容旧版 Codex sub2 对接 Token；仅保存在 .env，不会在配置列表明文返回", "storage": "env", "secret": True,
     },
     # ---- 接码平台 ----
     # ---- Codex：基础 / CPA / sub2api 配置 ----

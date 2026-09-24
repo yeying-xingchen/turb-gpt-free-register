@@ -99,10 +99,11 @@ def load_env(*, override: bool = False) -> Path:
     之前确实由 `.env` 加载，则 WebUI 写入空值时会清掉旧的 dotenv 值。这样既保留
     process-only fallback，也不破坏非空 `.env` 的热加载和显式清除。
     """
-    global _LOADED, _DOTENV_APPLIED_SECRET_VALUES, _DOTENV_APPLIED_ENV_PATH
+    global _LOADED, _DOTENV_APPLIED_SECRET_VALUES, _DOTENV_APPLIED_ENV_PATH, _SUPPRESSED_PROCESS_SECRET_KEYS
     file_values = read_env_file() if _ENV_PATH.exists() else {}
     if _DOTENV_APPLIED_ENV_PATH != _ENV_PATH:
         _DOTENV_APPLIED_SECRET_VALUES = {}
+        _SUPPRESSED_PROCESS_SECRET_KEYS = set()
         _DOTENV_APPLIED_ENV_PATH = _ENV_PATH
     previous_dotenv = dict(_DOTENV_APPLIED_SECRET_VALUES)
     before_values = {key: os.environ.get(key) for key in SECRET_ENV_KEYS}

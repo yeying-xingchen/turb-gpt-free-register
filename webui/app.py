@@ -530,6 +530,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             request.path == "/api/accounts/secret-bulk"
             or request.path.startswith("/api/accounts/") and request.path.endswith("/secret")
             or request.path.startswith("/api/codex/download")
+            or request.path == "/api/codex"
             or request.path in {"/api/accounts/export", "/api/cloudmail/gen-token", "/api/cloudmail/domains"}
         ):
             response.headers["Cache-Control"] = "no-store, max-age=0"
