@@ -62,6 +62,50 @@ def _safe_public_url(value: object) -> str:
     return urlunparse((parsed.scheme, netloc, parsed.path or "", "", "", ""))
 
 
+_EXTRACT_LINK_SENSITIVE_RESULT_KEYS = frozenset({
+    "code", "cardcode", "cdk", "cdkcode", "provider", "providername",
+    "token", "accesstoken", "refreshtoken", "apikey", "authorization", "secret",
+})
+
+
+def _redact_extract_link_result(value: object, *, secrets: tuple[str, ...] = ()) -> object:
+    """Remove credential-like keys and known CDK values from provider payloads."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            normalized = "".join(ch.lower() for ch in str(key) if ch.isalnum())
+            if normalized in _EXTRACT_LINK_SENSITIVE_RESULT_KEYS:
+                continue
+            out[key] = _redact_extract_link_result(item, secrets=secrets)
+        return out
+    if isinstance(value, list):
+        return [_redact_extract_link_result(item, secrets=secrets) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_extract_link_result(item, secrets=secrets) for item in value]
+    if isinstance(value, str):
+        redacted = value
+        for secret in secrets:
+            if secret:
+                redacted = redacted.replace(secret, "[redacted]")
+        return redacted
+    return value
+
+
+def _safe_sub2_upload_result(result: object) -> dict:
+    """Keep only non-sensitive upload metadata; never expose upstream response bodies."""
+    if not isinstance(result, dict):
+        return {}
+    safe = {}
+    for key in ("ok", "uploaded", "status_code", "payload_mode", "total"):
+        if key in result:
+            safe[key] = result[key]
+    if result.get("url"):
+        safe["url"] = _safe_public_url(result.get("url"))
+    if result.get("email"):
+        safe["email"] = result.get("email")
+    return safe
+
+
 _POOL_SOURCE_VALUES = frozenset(("all", "outlook", "generic_api", "imap", "cloudflare_domain"))
 
 
@@ -531,8 +575,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             or request.path.startswith("/api/accounts/") and request.path.endswith("/secret")
             or request.path.startswith("/api/codex/download")
             or request.path == "/api/codex"
+            or request.path.endswith("/codex-agent/upload-sub2")
             or request.path in {
                 "/api/accounts/export",
+                "/api/accounts/codex-agent/upload-sub2-bulk",
                 "/api/cloudmail/gen-token",
                 "/api/cloudmail/domains",
                 "/api/extract-link/cdk",
@@ -1682,17 +1728,35 @@ def create_app(auth_code: str | None = None) -> Flask:
             "queue": payment_method_service.queue_settings(),
         }), 202
 
-    @app.get("/api/extract-link/cdk")
+    @app.route("/api/extract-link/cdk", methods=("GET", "POST"))
     def api_extract_link_cdk():
-        """查询当前配置或传入 CDK 的剩余次数/服务状态。"""
-        code = (request.args.get("code") or "").strip() or None
+        """查询提链服务状态；临时 CDK 仅允许放在 POST JSON body 中。"""
+        if request.method == "GET":
+            # A CDK in a URL is copied into browser history, proxy logs and
+            # referrer headers.  GET remains available for the configured CDK,
+            # but callers must use POST for a one-off code.
+            if "code" in request.args:
+                return jsonify({
+                    "ok": False,
+                    "error": "临时 CDK 请通过 POST JSON body 提交；GET 仅使用服务器配置",
+                }), 400
+            code = None
+        else:
+            data = request.get_json(silent=True) or {}
+            if not isinstance(data, dict):
+                data = {}
+            code = str(data.get("code") or "").strip() or None
         try:
             result = extract_link_service.query_cdk(cdk=code)
-            if isinstance(result, dict) and str(result.get("backend") or "") == "djbnb":
-                result = {k: v for k, v in result.items() if k not in {"code", "cardCode"}}
-            return jsonify({"ok": True, **result})
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+            safe = _redact_extract_link_result(result, secrets=(code,) if code else ())
+            if isinstance(safe, dict):
+                return jsonify({"ok": True, **safe})
+            return jsonify({"ok": True, "result": safe})
+        except Exception:
+            return jsonify({
+                "ok": False,
+                "error": "查询提链服务失败，请检查配置或服务响应",
+            }), 400
 
     @app.get("/api/extract-link/djbnb/meta")
     def api_extract_link_djbnb_meta():
@@ -2119,9 +2183,20 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
         try:
             result = _upload_account_codex_agent_to_sub2(acc)
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
-        return jsonify({"ok": True, "account_id": acc_id, "email": acc.get("email"), "result": result})
+        except Exception:
+            # Do not echo or log the upstream exception: it may contain an
+            # authorization header, token, or response body.
+            logger.warning("Codex Agent sub2 上传失败: account_id=%s", acc_id)
+            return jsonify({
+                "ok": False,
+                "error": "上传到 sub2api 失败，请检查配置或服务响应",
+            }), 400
+        return jsonify({
+            "ok": True,
+            "account_id": acc_id,
+            "email": acc.get("email"),
+            "result": _safe_sub2_upload_result(result),
+        })
 
     @app.post("/api/accounts/codex-agent/upload-sub2-bulk")
     def api_accounts_codex_agent_upload_sub2_bulk():
@@ -2154,9 +2229,22 @@ def create_app(auth_code: str | None = None) -> Flask:
                 continue
             try:
                 result = _upload_account_codex_agent_to_sub2(acc)
-                uploaded.append({"id": acc_id, "email": email, "url": result.get("url"), "status_code": result.get("status_code")})
-            except Exception as exc:
-                failed.append({"id": acc_id, "email": email, "error": f"{type(exc).__name__}: {exc}"})
+                safe_result = _safe_sub2_upload_result(result)
+                uploaded.append({
+                    "id": acc_id,
+                    "email": email,
+                    "url": safe_result.get("url"),
+                    "status_code": safe_result.get("status_code"),
+                })
+            except Exception:
+                # Keep upstream response bodies and authorization details out
+                # of both the API response and application logs.
+                logger.warning("Codex Agent sub2 批量上传失败: account_id=%s", acc_id)
+                failed.append({
+                    "id": acc_id,
+                    "email": email,
+                    "error": "上传到 sub2api 失败，请检查配置或服务响应",
+                })
         return jsonify({
             "ok": True,
             "uploaded": uploaded,
