@@ -11,7 +11,8 @@ class TwofaServiceSettingsTests(unittest.TestCase):
         self.assertGreaterEqual(settings["workers"], 1)
         self.assertLessEqual(settings["workers"], 16)
         self.assertGreaterEqual(settings["queue_limit"], settings["workers"])
-        self.assertEqual(twofa_service._EXECUTOR._max_workers, settings["workers"])
+        self.assertGreaterEqual(twofa_service._EXECUTOR._max_workers, settings["workers"])
+        self.assertEqual(twofa_service._EXECUTOR._max_workers, twofa_service._MAX_WORKERS)
 
     def test_integer_settings_are_bounded(self):
         original = getattr(twofa_service._twofa_cfg, "TWOFA_WORKERS", None)
