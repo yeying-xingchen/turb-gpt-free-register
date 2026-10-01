@@ -54,8 +54,8 @@ OTP_MAX_WAIT = 90
 OTP_SETTLE_SECONDS = 5
 
 # 通用 API 取码专用代理；不读取代理池，也不套用代理池上游链式。
-# 你的本地接口代理直接填写 http://127.0.0.1:7897；留空则直连。
-GENERIC_API_PROXY: str = "http://127.0.0.1:7897"
+# 需要时填写例如 http://127.0.0.1:7897；留空则直连。
+GENERIC_API_PROXY: str = ""
 
 # 通用 IMAP 邮箱默认收件箱目录；服务器、端口和凭证随邮箱素材导入。
 IMAP_MAILBOX = "INBOX"

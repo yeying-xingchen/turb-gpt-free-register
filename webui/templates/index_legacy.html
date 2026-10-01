@@ -362,6 +362,8 @@
       min-height: 30px; width: auto; border: 1px solid var(--line); border-radius: 6px;
       padding: 4px 8px; font: inherit; font-size: 12px; margin-top: 0;
     }
+    .pager-bar .pager-goto { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:12px; white-space:nowrap; }
+    .pager-bar .pager-goto input { width:58px; padding:6px 7px; border:1px solid var(--line); border-radius:7px; text-align:center; background:var(--surface); color:var(--text); }
     .config-tabs {
       display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 14px;
       padding-bottom: 12px; border-bottom: 1px solid var(--line);
@@ -869,7 +871,12 @@ function _renderPager(id, total) {
     <button onclick="pagerGo('${id}',1)"${p.page >= totalPages ? ' disabled' : ''}>下一页 →</button>
     <select onchange="pagerSetSize('${id}',this.value)">${sizes.map(s =>
       `<option value="${s}"${p.size === s ? ' selected' : ''}>${s} 条/页</option>`
-    ).join('')}</select>`;
+    ).join('')}</select>
+    ${id === 'accounts' ? `<label class="pager-goto">前往
+      <input type="number" min="1" max="${totalPages}" value="${p.page}" inputmode="numeric"
+        onkeydown="if(event.key==='Enter'){pagerJumpTo('${id}',this.value,${totalPages});event.preventDefault();}">
+      页 <button type="button" onclick="pagerJumpTo('${id}',this.previousElementSibling.value,${totalPages})">跳转</button>
+    </label>` : ''}`;
 }
 
 function _reloadPagedList(id) {
@@ -877,6 +884,14 @@ function _reloadPagedList(id) {
 }
 function pagerGo(id, dir) {
   PAGERS[id].page = Math.max(1, PAGERS[id].page + dir);
+  _reloadPagedList(id);
+}
+function pagerJumpTo(id, value, totalPages) {
+  const p = PAGERS[id];
+  if (!p) return;
+  const requested = parseInt(value, 10);
+  if (!Number.isFinite(requested)) return;
+  p.page = Math.max(1, Math.min(requested, Math.max(1, Number(totalPages) || 1)));
   _reloadPagedList(id);
 }
 function pagerSetSize(id, val) {

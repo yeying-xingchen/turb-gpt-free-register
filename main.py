@@ -16,6 +16,7 @@ from config import twofa as _twofa_cfg
 from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
+from config import register as _register_cfg
 from core.session import BrowserSession
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
@@ -77,6 +78,14 @@ def configure_logging(verbose: bool = False) -> None:
 def _is_success(result: dict) -> bool:
     """判断单次注册结果是否成功，集中收敛批量统计规则。"""
     return isinstance(result, dict) and bool(result.get("success"))
+
+
+def _protocol_registration_fingerprint_seed(email: str) -> str | None:
+    """按配置决定协议注册是否跨任务复用同邮箱指纹。"""
+    if not bool(getattr(_register_cfg, "PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL", False)):
+        return None
+    identity = str(email or "").strip().lower()
+    return f"registration:{identity}" if identity else None
 
 
 def _finalize_registration_session(
@@ -251,7 +260,14 @@ def run_registration(
             on_email_acquired(email)
 
     # 创建浏览器会话（proxy=None 时自动从 config.PROXY_POOL 随机抽一个）
-    session = BrowserSession(proxy=proxy)
+    fingerprint_seed = _protocol_registration_fingerprint_seed(email)
+    reuse_fingerprint = fingerprint_seed is not None
+    # 单个 BrowserSession 生命周期内始终复用同一指纹；是否跨任务按邮箱
+    # 稳定复用由 PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL 控制。
+    session = BrowserSession(
+        proxy=proxy,
+        fingerprint_seed=fingerprint_seed,
+    )
 
     # 从代理 URL 中抽取 sid 段做日志，避免把账号密码完整打印
     proxy_label = "无"
@@ -270,8 +286,26 @@ def run_registration(
         birthday = generate_random_birthday()
 
     logger.info(f"[注册] 开始：{email}，代理={proxy_label}")
+    logger.info(
+        "[指纹] 生命周期模式：%s",
+        "同邮箱保持" if reuse_fingerprint else "每次任务重新创建",
+    )
     logger.info(f"[注册] 本次随机生日: {birthday}")
-    logger.debug(f"[注册] 设备ID={session.device_id}，会话日志ID={session.auth_session_logging_id}")
+    fp = session.fingerprint_summary()
+    logger.info(
+        "[指纹] 协议注册统一上下文: device_id=%s oai_session_id=%s auth_session_logging_id=%s "
+        "ua=%s lang=%s tz=%s(%s) screen=%sx%s@%s cpu=%s mem=%s geo=%s:%s",
+        session.device_id[:12] + "...",
+        session.oai_session_id[:12] + "...",
+        session.auth_session_logging_id[:12] + "...",
+        BrowserSession._short_value(fp.get("user_agent"), 72),
+        fp.get("accept_language"),
+        fp.get("timezone_iana"),
+        fp.get("timezone_offset_minutes"),
+        fp.get("screen_width"), fp.get("screen_height"), fp.get("device_pixel_ratio"),
+        fp.get("hardware_concurrency"), fp.get("device_memory"),
+        fp.get("geo_country") or "?", fp.get("geo_city") or "?",
+    )
 
     create_acknowledged = False
     registration_password = None
