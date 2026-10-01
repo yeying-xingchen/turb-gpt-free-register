@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>账号兑换</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fb; color: #172033; }
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 15% 10%, #e0eaff 0, transparent 34%), #f5f7fb; }
+    .card { width: min(560px, 100%); padding: 38px; border: 1px solid #e2e8f0; border-radius: 22px; background: #fff; box-shadow: 0 24px 70px rgba(15, 23, 42, .10); }
+    .brand { display: inline-flex; align-items: center; gap: 10px; color: #3b66f5; font-size: 13px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .brand-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 10px; color: #fff; background: linear-gradient(135deg, #3b66f5, #7c3aed); font-weight: 900; }
+    h1 { margin: 22px 0 10px; color: #0f172a; font-size: clamp(28px, 6vw, 40px); letter-spacing: -.04em; }
+    .desc { margin: 0; color: #64748b; line-height: 1.7; font-size: 14px; }
+    .field { display: grid; gap: 9px; margin-top: 28px; color: #334155; font-size: 13px; font-weight: 800; }
+    input { width: 100%; min-height: 52px; border: 1px solid #dbe3ee; border-radius: 12px; padding: 0 16px; color: #0f172a; background: #fbfdff; font: 600 16px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .08em; outline: none; }
+    input:focus { border-color: #3b66f5; box-shadow: 0 0 0 4px rgba(59, 102, 245, .12); }
+    button { width: 100%; min-height: 50px; margin-top: 16px; border: 0; border-radius: 12px; color: #fff; background: #3b66f5; font: 800 15px inherit; cursor: pointer; }
+    button:hover { background: #2f55d4; }
+    button:disabled { cursor: wait; opacity: .62; }
+    .hint { margin-top: 16px; color: #94a3b8; font-size: 12px; line-height: 1.6; }
+    .result { display: none; margin-top: 20px; padding: 14px 16px; border: 1px solid #bbf7d0; border-radius: 12px; color: #166534; background: #f0fdf4; font-size: 13px; line-height: 1.6; }
+    .result.show { display: block; }
+    .result.error { border-color: #fecaca; color: #b91c1c; background: #fef2f2; }
+    .download { display: inline-block; margin-top: 8px; color: #1d4ed8; font-weight: 800; text-decoration: none; }
+    .footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 26px; color: #94a3b8; font-size: 12px; }
+    .footer a { color: #64748b; text-decoration: none; }
+    .footer a:hover { color: #3b66f5; }
+    .stock { margin-top: 22px; padding: 14px 16px; border: 1px solid #dbeafe; border-radius: 14px; background: #eff6ff; }
+    .stock-title { color: #1e40af; font-size: 13px; font-weight: 800; }
+    .stock-list { display: grid; gap: 8px; margin-top: 10px; }
+    .stock-row { display: flex; justify-content: space-between; gap: 16px; color: #334155; font-size: 13px; }
+    .stock-row strong { color: #1d4ed8; }
+    .stock-empty { color: #64748b; font-size: 12px; line-height: 1.5; }
+    @media (max-width: 520px) { .card { padding: 28px 22px; } }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="brand"><span class="brand-mark">✓</span><span>ACCOUNT INVENTORY</span></div>
+    <h1>兑换账号</h1>
+    <p class="desc">输入管理员发放的 CDK，系统会从对应分组库存中分配账号，并生成登录凭据文件供下载。每个 CDK 只能使用到生成时设定的名额。</p>
+    <form id="redeemForm" novalidate>
+      <label class="field" for="cdk">兑换 CDK
+        <input id="cdk" name="cdk" type="text" placeholder="CDK-XXXXXXXXXXXXXXXXXXXX" autocomplete="off" spellcheck="false" maxlength="80" required>
+      </label>
+      <button id="submit" type="submit">立即兑换并下载</button>
+    </form>
+    <div id="result" class="result" role="status" aria-live="polite"></div>
+    <section class="stock" aria-label="公开库存">
+      <div class="stock-title">公开库存</div>
+      <div id="publicStockList" class="stock-list"><div class="stock-empty">库存加载中…</div></div>
+    </section>
+    <p class="hint">登录凭据格式为：邮箱---密码---2FA 密钥。兑换完成后下载链接只能使用一次。页面只显示管理员公开的分组库存。</p>
+    <div class="footer"><span>请妥善保管下载文件</span><a href="/login">管理员入口</a></div>
+  </main>
+  <script>
+    const form = document.getElementById('redeemForm');
+    const input = document.getElementById('cdk');
+    const button = document.getElementById('submit');
+    const result = document.getElementById('result');
+    const stockList = document.getElementById('publicStockList');
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    async function loadPublicStock() {
+      try {
+        const response = await fetch('/api/redeem/public-stock', {headers: {'Accept': 'application/json'}});
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error || '库存暂时不可用');
+        const groups = Array.isArray(body.groups) ? body.groups : [];
+        stockList.innerHTML = groups.length
+          ? groups.map(group => `<div class="stock-row"><span>${escapeHtml(group.group_name)}</span><strong>${Number(group.redeemable || 0)} 个可兑换</strong></div>`).join('')
+          : '<div class="stock-empty">暂无公开展示的分组库存</div>';
+      } catch (error) {
+        stockList.innerHTML = '<div class="stock-empty">库存暂时无法加载，可直接输入 CDK 兑换。</div>';
+      }
+    }
+    loadPublicStock();
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const cdk = input.value.trim();
+      if (!cdk) { input.focus(); return; }
+      button.disabled = true;
+      button.textContent = '兑换处理中…';
+      result.className = 'result';
+      result.textContent = '';
+      try {
+        const response = await fetch('/api/redeem', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+          body: JSON.stringify({cdk}),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error || `兑换失败（${response.status}）`);
+        result.className = 'result show';
+        result.innerHTML = `${body.message || '兑换成功'}；CDK 剩余 ${Number(body.remaining || 0)} 个名额。<br><a class="download" href="${body.download_url}">如果没有自动下载，点击这里下载凭据</a>`;
+        input.value = '';
+        window.location.assign(body.download_url);
+      } catch (error) {
+        result.className = 'result show error';
+        result.textContent = error.message || '兑换失败，请稍后重试';
+      } finally {
+        button.disabled = false;
+        button.textContent = '立即兑换并下载';
+      }
+    });
+  </script>
+</body>
+</html>

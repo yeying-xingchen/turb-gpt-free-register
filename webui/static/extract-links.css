@@ -1,0 +1,6 @@
+/* Supporting styles for the extract-link controls used by the modern console. */
+.extract-link-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
+.extract-link-cell .el-row-detail { flex-basis: 100%; color: #667085; font-size: 12px; white-space: normal; }
+.extract-link-error { flex-basis: 100%; color: #c2413a; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.extract-link-btn { display: inline-flex; align-items: center; min-height: 26px; padding: 0 10px; border: 1px solid #b9dfc9; border-radius: 999px; background: #f0fbf5; color: #166534; font-size: 12px; font-weight: 700; cursor: pointer; }
+.extract-link-btn:hover { background: #e3f5ea; }

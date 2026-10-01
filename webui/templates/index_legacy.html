@@ -265,9 +265,13 @@
       overflow-wrap: anywhere; word-break: break-word; line-height: 1.35;
     }
     .accounts-table .account-email-history,
+    .accounts-table .account-email-group,
     .accounts-table .account-email-user,
-    .accounts-table .account-email-status { margin-top: 2px; font-size: 11px; }
+    .accounts-table .account-email-status {
+      margin-top: 2px; font-size: 11px;
+    }
     .accounts-table .account-email-history { color: var(--muted); }
+    .accounts-table .account-email-group { color: #2563eb; }
     .accounts-table .account-email-user { color: #475467; }
     .accounts-table .account-email-status { color: #b54708; }
     .accounts-table .mono { font-size: 11px; }
@@ -450,6 +454,7 @@
       <p class="meta">本地 Web 控制台 · 数据更新于 <span id="updatedAt">-</span></p>
       <div class="header-links">
         <a href="https://t.me/+gu_cvEKq_vcyZWRl" target="_blank" rel="noopener noreferrer">TG 交流群</a>
+         <a href="/redeem" target="_blank" rel="noopener noreferrer">公开兑换页</a>
         <a href="/?ui=modern" title="切换到新版侧边栏 UI">切换新 UI</a>
         <form method="post" action="/logout"><button type="submit">退出</button></form>
       </div>
@@ -470,6 +475,7 @@
     <button data-tab="accounts">账号</button>
     <button data-tab="codex">Codex 授权</button>
     <button data-tab="outlook">邮箱池</button>
+    <button data-tab="redeem">兑换管理</button>
     <button data-tab="config">配置</button>
   </div>
 </nav>
@@ -583,6 +589,12 @@
                 <option value="failed">设置失败</option>
               </select>
             </label>
+            <label class="inline-num" title="只显示指定分组的账号">
+              分组
+              <select id="groupFilter" style="width:auto;min-height:auto;">
+                <option value="">全部</option>
+              </select>
+            </label>
             <button class="btn" id="btnRefreshAccounts" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
           </div>
         </div>
@@ -604,6 +616,7 @@
             <button class="btn primary" id="btnSetupSelectedTotp" disabled title="给选中的账号批量开启 2FA，并在完成后写回 TOTP 密钥">批量开2FA</button>
             <button class="btn primary" id="btnChangeSelectedEmails" disabled title="为选中的账号从指定来源领取新邮箱并换绑">批量换邮箱</button>
             <button class="btn good" id="btnNoteSelectedAccounts" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
+            <button class="btn primary" id="btnGroupSelectedAccounts" disabled title="把选中的账号移动到指定分组">设置分组</button>
             <button class="btn good" id="btnCopySelectedLines" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
             <button class="btn good" id="btnCopySelectedTokens" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
             <button class="btn good" id="btnDownloadSelectedTxt" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
@@ -652,6 +665,24 @@
         </h3>
         <div class="log" id="emailChangeLogContent">加载中…</div>
       </div>
+    </section>
+  </div>
+
+  <!-- ============ Plus 兑换 ============ -->
+  <div id="tab-redeem" class="hidden">
+    <section class="card">
+      <div class="head"><h2>Plus 兑换管理</h2><p>生成 CDK 后发给用户；兑换会从已知 Plus 库存中一次性分配登录凭据。</p></div>
+      <div class="body">
+        <div class="row">
+          <label class="fld">兑换数量<input id="redeemQuantity" type="number" min="1" max="1000" value="1"></label>
+          <label class="fld">有效期（天）<input id="redeemExpiresDays" type="number" min="0" max="3650" value="7"><span class="hint">0 表示永不过期</span></label>
+          <label class="fld">备注<input id="redeemNote" type="text" maxlength="200" placeholder="活动批次"></label>
+          <div class="action-cell"><button class="btn primary" id="btnCreateRedeem">生成 CDK</button><button class="btn" id="btnRefreshRedeem">刷新</button><a class="btn" href="/redeem" target="_blank" rel="noopener noreferrer">公开兑换页</a></div>
+        </div>
+        <div id="redeemCreated" class="banner info hidden"></div>
+        <div id="redeemStock" class="muted" style="font-size:12px;margin:10px 0;"></div>
+      </div>
+      <div class="table-wrap"><table class="accounts-table"><thead><tr><th>CDK</th><th>名额</th><th>状态</th><th>兑换情况</th><th>对应账号</th><th>有效期</th><th>备注</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="redeemCodesBody"></tbody></table></div>
     </section>
   </div>
 
@@ -868,6 +899,7 @@ function isPlaceholderEmpty(v) {
   return !s || ['-', '—', '无', '空', 'none', 'null', 'n/a', 'na'].includes(s.toLowerCase());
 }
 function short(v, n=40) { const s = v || ''; return s.length > n ? s.slice(0,n)+'…' : s; }
+function formatDateTime(v) { if (!v) return '-'; const d = new Date(String(v).replace(' ', 'T')); return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString(); }
 function formatTraffic(t) {
   if (!t || !t.available) return '-';
   const n = (v) => Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : 0;
@@ -907,16 +939,63 @@ function debounce(fn, wait=250) {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
 }
 
+async function loadRedeemCodes() {
+  const body = $('#redeemCodesBody');
+  if (!body) return;
+  try {
+    const r = await api('/api/redeem/codes?limit=all');
+    const stock = r.stock || {};
+    $('#redeemStock').textContent = `已知 Plus 账号 ${Number(stock.known_plus || 0)} 个；可兑换库存 ${Number(stock.available || 0)} 个（需要有登录密码且未被领取）；共 ${(r.items || []).length} 个 CDK`;
+    const statusMap = {active:'可用', exhausted:'已用完', expired:'已过期', revoked:'已停用'};
+    body.innerHTML = (r.items || []).map(item => {
+      const claims = Array.isArray(item.redeemed_accounts) ? item.redeemed_accounts : [];
+      const redemption = claims.length ? `已兑换 ${claims.length} / ${Number(item.quantity || 0)}` : '未兑换';
+      const accounts = claims.length ? claims.map(account => {
+        const email = String(account.email || '').trim() || `账号 #${Number(account.account_id || 0)}`;
+        return `<div title="${esc(`账号 ID：${Number(account.account_id || 0)}；兑换时间：${account.claimed_at ? formatDateTime(account.claimed_at) : '-'}`)}">${esc(email)}</div>`;
+      }).join('') : '<span class="muted">—</span>';
+      const action = item.status === 'active' ? `<button class="btn danger" data-redeem-revoke="${esc(item.id)}">停用</button>` : '<span class="muted">—</span>';
+      return `<tr><td class="mono">${esc(item.code)} ${cbtn('复制', item.code, 'btn')}</td><td>${Number(item.redeemed_count || 0)} / ${Number(item.quantity || 0)}（余 ${Number(item.remaining || 0)}）</td><td>${esc(statusMap[item.status] || item.status || '-')}</td><td>${esc(redemption)}</td><td>${accounts}</td><td>${esc(item.expires_at ? formatDateTime(item.expires_at) : '永不过期')}</td><td>${esc(item.note || '-')}</td><td>${esc(formatDateTime(item.created_at))}</td><td>${action}</td></tr>`;
+    }).join('') || '<tr><td colspan="9" class="muted">暂无兑换 CDK</td></tr>';
+  } catch (e) { body.innerHTML = `<tr><td colspan="9" class="muted">加载失败：${esc(e.message)}</td></tr>`; }
+}
+async function createRedeemCode() {
+  const quantity = Number($('#redeemQuantity').value || 1);
+  const expiresInDays = Number($('#redeemExpiresDays').value || 0);
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) { showToast('兑换数量需在 1~1000 之间'); return; }
+  if (!Number.isInteger(expiresInDays) || expiresInDays < 0 || expiresInDays > 3650) { showToast('有效期需在 0~3650 天之间'); return; }
+  const btn = $('#btnCreateRedeem'); btn.disabled = true;
+  try {
+    const r = await api('/api/redeem/codes', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({quantity, expires_in_days:expiresInDays, note:$('#redeemNote').value.trim()})});
+    const item = r.item || {};
+    const panel = $('#redeemCreated'); panel.classList.remove('hidden'); panel.innerHTML = `已生成 CDK：<span class="mono">${esc(item.code || '')}</span> ${cbtn('复制 CDK', item.code, 'btn good')}<br><span class="muted">${Number(item.quantity || quantity)} 个名额，${item.expires_at ? '过期时间：' + esc(formatDateTime(item.expires_at)) : '永不过期'}。</span>`;
+    $('#redeemNote').value = '';
+    showToast('CDK 已生成'); loadRedeemCodes();
+  } catch (e) { showToast('生成 CDK 失败：' + e.message); }
+  finally { btn.disabled = false; }
+}
+$('#btnCreateRedeem').addEventListener('click', createRedeemCode);
+$('#btnRefreshRedeem').addEventListener('click', loadRedeemCodes);
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-redeem-revoke]');
+  if (!btn) return;
+  const id = Number(btn.dataset.redeemRevoke || 0);
+  if (!id || !confirm('确定停用这个 CDK 吗？')) return;
+  try { await api(`/api/redeem/codes/${id}/revoke`, {method:'POST'}); showToast('CDK 已停用'); loadRedeemCodes(); }
+  catch (err) { showToast('停用失败：' + err.message); }
+});
+
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','outlook','config'];
+  const allowed = ['register','accounts','codex','outlook','redeem','config'];
   if (!allowed.includes(tab)) tab = 'register';
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
   if (persist) localStorage.setItem('gpt_console_active_tab', tab);
-  if (tab === 'accounts') loadAccounts();
+  if (tab === 'accounts') { loadAccountGroups(); loadAccounts(); }
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
+   if (tab === 'redeem') loadRedeemCodes();
   if (tab === 'config') loadConfig();
   if (tab === 'register') refreshJobs();
 }
@@ -1300,6 +1379,28 @@ async function pollLog() {
 let accountsLoading = false;
 let planStatusLoading = false;
 let planStatusRevision = '';
+let ACCOUNT_GROUPS = [];
+function accountGroupOptions(selected = '') {
+  const names = (ACCOUNT_GROUPS || []).map(group => String(group.group_name || '')).filter(Boolean);
+  if (!names.includes('默认分组')) names.unshift('默认分组');
+  return names.map(name => `<option value="${esc(name)}"${name === selected ? ' selected' : ''}>${esc(name)}</option>`).join('');
+}
+function renderAccountGroupFilter() {
+  const filter = $('#groupFilter');
+  if (!filter) return;
+  const current = filter.value || '';
+  filter.innerHTML = '<option value="">全部</option>' + accountGroupOptions(current);
+  filter.value = current;
+}
+async function loadAccountGroups() {
+  try {
+    const r = await api('/api/account-groups');
+    ACCOUNT_GROUPS = r.groups || [];
+    renderAccountGroupFilter();
+  } catch (err) {
+    console.warn('加载账号分组失败', err);
+  }
+}
 function getCodexBulkWorkers() {
   const el = document.getElementById('codexBulkWorkers');
   return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
@@ -1310,6 +1411,10 @@ function getAccountsCodexFilter() {
 }
 function getAccountsTotpFilter() {
   const el = $('#totpStatusFilter');
+  return (el ? el.value : '').trim();
+}
+function getAccountsGroupFilter() {
+  const el = $('#groupFilter');
   return (el ? el.value : '').trim();
 }
 function getAccountsPlanFilter() {
@@ -1330,9 +1435,10 @@ async function loadAccounts() {
     const plan = getAccountsPlanFilter();
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
+    const group = getAccountsGroupFilter();
     const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}`);
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&q=${encodeURIComponent(q)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -1349,9 +1455,10 @@ async function pollAccountPlanStatuses() {
     const plan = getAccountsPlanFilter();
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
+    const group = getAccountsGroupFilter();
     const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&q=${encodeURIComponent(q)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -1639,7 +1746,7 @@ function renderAccounts() {
     <tr>
       <td><input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''}></td>
       <td class="muted">#${esc(r.id)}</td>
-      <td class="account-email-cell" title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}"><div class="main-cell">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>${r.original_email ? `<div class="account-email-history">原邮箱: ${esc(r.original_email)}</div>` : ''}<div class="account-email-user">${esc(r.user_name || '-')}</div>${['queued','running'].includes(r.email_change_status) ? '<div class="account-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? '<div class="account-email-status">换绑失败</div>' : '')}</td>
+      <td class="account-email-cell" title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}"><div class="main-cell">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>${r.original_email ? `<div class="account-email-history">原邮箱: ${esc(r.original_email)}</div>` : ''}<div class="account-email-group">分组：${esc(r.group_name || '默认分组')}</div><div class="account-email-user">${esc(r.user_name || '-')}</div>${['queued','running'].includes(r.email_change_status) ? '<div class="account-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? '<div class="account-email-status">换绑失败</div>' : '')}</td>
       <td>${esc(r.email_source || '-')}</td>
       <td><span class="mono" title="列表仅显示预览，完整 Token 请点复制">${r.has_access_token ? '有Token' : '<span class="muted">无Token</span>'}</span>${_liveStatusSub(r)}</td>
       <td>${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="muted">-</span>'}</td>
@@ -1673,6 +1780,7 @@ function updateAccountSelectionUi(pageRows = null) {
   const copySelectedTokensBtn = $('#btnCopySelectedTokens');
   const downloadTxtBtn = $('#btnDownloadSelectedTxt');
   const noteSelectedBtn = $('#btnNoteSelectedAccounts');
+  const groupSelectedBtn = $('#btnGroupSelectedAccounts');
   const archiveSelectedBtn = $('#btnArchiveSelectedAccounts');
   const setupTotpBtn = $('#btnSetupSelectedTotp');
   const changeEmailsBtn = $('#btnChangeSelectedEmails');
@@ -1687,6 +1795,7 @@ function updateAccountSelectionUi(pageRows = null) {
   if (copySelectedTokensBtn) copySelectedTokensBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (downloadTxtBtn) downloadTxtBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (noteSelectedBtn) noteSelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
+  if (groupSelectedBtn) groupSelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (setupTotpBtn) setupTotpBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (changeEmailsBtn) changeEmailsBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (archiveSelectedBtn) {
@@ -2067,6 +2176,7 @@ $('#btnCopySelectedLines').addEventListener('click', copySelectedAccountLines);
 $('#btnCopySelectedTokens').addEventListener('click', copySelectedAccountTokens);
 $('#btnDownloadSelectedTxt').addEventListener('click', downloadSelectedAccountTxt);
 $('#btnNoteSelectedAccounts').addEventListener('click', noteSelectedAccounts);
+$('#btnGroupSelectedAccounts').addEventListener('click', groupSelectedAccounts);
 $('#btnSetupSelectedTotp').addEventListener('click', setupSelectedTotp);
 $('#btnChangeSelectedEmails').addEventListener('click', () => changeAccountEmails(Array.from(ACCOUNT_SELECTED)));
 $('#btnExtractSelectedLinks').addEventListener('click', extractSelectedLinks);
@@ -2792,6 +2902,36 @@ async function noteSelectedAccounts() {
   }
 }
 
+async function groupSelectedAccounts() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  const names = (ACCOUNT_GROUPS || []).map(group => group.group_name).filter(Boolean);
+  const current = names[0] || '默认分组';
+  const input = prompt(`把选中的 ${ids.length} 个账号移动到哪个分组？\n\n现有分组：${names.join('、') || '默认分组'}\n输入新名称会创建新分组。`, current);
+  if (input === null) return;
+  const name = String(input || '').trim();
+  if (!name) { showToast('分组名不能为空'); return; }
+  if (name.length > 60) { showToast('分组名最长 60 个字符'); return; }
+  const btn = $('#btnGroupSelectedAccounts');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/api/accounts/group-bulk', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({account_ids: ids, group_name: name}),
+    });
+    ACCOUNT_GROUPS = r.groups || [];
+    renderAccountGroupFilter();
+    showToast(`已移动 ${r.updated_count || 0} 个账号到「${name}」`);
+    await loadAccounts();
+  } catch (err) {
+    showToast('设置分组失败: ' + err.message);
+    updateAccountSelectionUi();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 
 async function stopSelectedCodex() {
   const ids = Array.from(ACCOUNT_SELECTED);
@@ -2860,6 +3000,7 @@ async function retrySelectedCodex() {
 $('#qAccounts').addEventListener('input', debounce(() => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); }, 250));
 $('#codexStatusFilter').addEventListener('change', () => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); });
 $('#totpStatusFilter').addEventListener('change', () => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); });
+$('#groupFilter').addEventListener('change', () => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); });
 $('#copyAllTokens').addEventListener('click', async () => {
   const ids = ACCOUNTS.filter(r => r.has_access_token).map(r => Number(r.id));
   if (!ids.length) { showToast('当前页没有 Token'); return; }
@@ -3827,6 +3968,8 @@ jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidd
 setInterval(loadSummary, 30000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 10000);
 </script>
+<link rel="stylesheet" href="{{ ui_asset_url('extract-links.css') }}">
+<script src="{{ ui_asset_url('extract-links.js') }}"></script>
 {% include 'promo_details.html' %}
 </body>
 </html>

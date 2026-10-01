@@ -89,14 +89,15 @@ EMAIL_SOURCE = "outlook,generic_api,imap"
 - 动态调整注册线程数，提交后新任务立即使用最新值。
 - 批量补跑 Codex，补跑线程数每次提交即时生效。
 - 管理账号、邮箱池、Codex 凭证；账号页支持单个/批量换绑邮箱并指定新邮箱来源，换绑后同时展示原邮箱与当前邮箱，支持查看换绑日志，并自动查活刷新 AT。
+- 账号查活优先使用已保存的密码，并按服务端实际要求完成邮箱 OTP / MFA；支持 TOTP Base32 密钥和 `otpauth://totp/` URI，动态码临近过期时等待下一窗口，明确无效时最多重试一次。没有密码和 2FA 的旧记录仍可使用已有 AT 的邮箱重认证链。只有完成 Web 登录并取得新 AT 才标记正常；密码错误、验证码错误、限流或网络阻断记为查活失败，明确停用/删除/封禁才标记废号。遇到手机号验证或资料补全会提示先处理。登录状态分流与 TOTP 处理参考 [reauth-web](https://github.com/boji1334/reauth-web)，保留本项目的 ChatGPT Web Session/AT 用途。
 - 邮箱池导入默认不创建账号；勾选“导入后默认视为注册成功账号”后，会将邮箱池标记为已用并同步显示在账号页，可直接批量补跑 Codex。
 - Roxy/Cloak 浏览器注册完成后统计整个浏览器会话的上传、下载和总流量，任务列表与账号扩展信息均会保存结果；Browser Use/Skyvern 云端浏览器不启用本地流量监听、资源拦截或 JS 覆盖率采集。
 - 配置页支持热加载，保存后无需重启。
-- Roxy 团队/项目可在配置页获取并保存。
+- 支持 Plus 兑换：管理员在「兑换管理」生成带数量/有效期的 CDK，用户访问 `/redeem` 输入 CDK 后，从已知 Plus 库存中一次性领取登录凭据并下载 TXT；同一账号只会发放一次，库存不足时不会扣减 CDK。
 
 ### 数据存储
 
-- 账号、邮箱库、任务及 Codex 凭证运行时统一存储在项目根目录 `turb.sqlite3`，按业务拆分为 `accounts`、`email_pool`（邮箱库）、`registration_jobs`、`codex_accounts` 和 `codex_agent_accounts` 五张表。
+- 账号、邮箱库、任务、Codex 凭证及兑换数据运行时统一存储在项目根目录 `turb.sqlite3`，按业务拆分为 `accounts`、`email_pool`、`registration_jobs`、`codex_accounts`、`codex_agent_accounts`、`redeem_codes` 和 `redeem_claims` 表。
 - 数据库启用 WAL、超时等待和常用字段索引，WebUI 的账号、套餐状态、邮箱库、Codex 和任务分页直接执行 SQLite `COUNT(*) + LIMIT/OFFSET`，不再先读取全量数据后由 Python 切片。
 - 首次启动会自动把现有 JSON/历史 SQLite 数据迁移到新数据库；迁移完成后不再读写账号、任务、邮箱池和 Codex 凭证 JSON/TXT 文件。
 - `turb.sqlite3*` 属于运行时数据，已加入 `.gitignore`，请纳入备份策略。
@@ -246,7 +247,7 @@ WebUI 配置页保存这些字段时会写入 `.env`（不是 config 源码）�
 
 ### WebUI 授权码
 
-WebUI 启动后，除 `/login` 外所有页面和 `/api/*` 接口都会校验授权码。推荐在 `.env` 中配置：
+WebUI 启动后，管理页面和管理 `/api/*` 接口都会校验授权码；公开兑换页 `/redeem`、兑换接口 `/api/redeem` 及一次性凭据下载链接除外。推荐在 `.env` 中配置：
 
 ```dotenv
 WEBUI_AUTH_CODE=你的授权码
@@ -642,6 +643,7 @@ WebUI 页面说明：
 | 账号 | 查看账号、复制 token、补跑 Codex、批量删除账号 |
 | Codex 授权 | 查看/下载/删除 SQLite 中的 Codex 凭证 |
 | 邮箱池 | 导入邮箱、筛选来源、标记可用/失败、删除邮箱 |
+| 兑换管理 | 生成带数量/有效期的 CDK、查看 Plus 可兑换库存、停用未使用 CDK；公开页为 `/redeem` |
 | 配置 | 修改运行配置并热加载，含 Roxy、Codex、邮箱、代理、人工节奏等 |
 
 ### 线程数说明

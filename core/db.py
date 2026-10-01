@@ -6,11 +6,14 @@ SQLite 持久化层（JSON/TXT 仅用于首次迁移）。
 """
 import hashlib
 import json
+import secrets
 import sqlite3
+import string
 import threading
+import unicodedata
 import uuid
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +80,8 @@ def _sqlite_conn() -> sqlite3.Connection:
     _ensure_storage()
     conn = sqlite3.connect(str(_active_sqlite_path()), timeout=30)
     conn.row_factory = sqlite3.Row
+    # Use the same Unicode whitespace handling and exact identity as Python.
+    conn.create_function("account_group_name", 1, lambda value: _account_group_name({"group_name": value}), deterministic=True)
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -155,18 +160,91 @@ def _ensure_sqlite() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS redeem_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                redeemed_count INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',
+                expires_at TEXT,
+                note TEXT NOT NULL DEFAULT '',
+                account_group TEXT,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS redeem_claims (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code_id INTEGER NOT NULL,
+                account_id INTEGER NOT NULL UNIQUE,
+                email TEXT NOT NULL DEFAULT '',
+                claimed_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(code_id, account_id)
+            );
+            CREATE TABLE IF NOT EXISTS account_groups (
+                group_name TEXT PRIMARY KEY,
+                redeem_prefix TEXT NOT NULL DEFAULT '',
+                public_stock INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS extract_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                provider_type TEXT NOT NULL DEFAULT 'extract',
+                api_base TEXT NOT NULL DEFAULT '',
+                default_link_type TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS extract_provider_cdks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_id INTEGER NOT NULL,
+                cdk TEXT NOT NULL,
+                memo TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(provider_id, cdk)
+            );
         """)
         for table in {"accounts", "email_pool", "registration_jobs"}:
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_status ON {table}(status, id DESC)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_archived ON {table}(archived, id DESC)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_email ON {table}(email COLLATE NOCASE)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_created ON {table}(created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_registration_jobs_id ON registration_jobs(id)")
+        conn.execute("""CREATE INDEX IF NOT EXISTS idx_registration_jobs_successful_retry
+            ON registration_jobs(COALESCE(CAST(json_extract(payload, '$.root_job_id') AS INTEGER), 0), id DESC)
+            WHERE status='success'""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_email_pool_source_status ON email_pool(source, status, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_accounts_archived ON codex_accounts(archived, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_accounts_email ON codex_accounts(email COLLATE NOCASE)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_accounts_created ON codex_accounts(created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_agent_accounts_email ON codex_agent_accounts(email COLLATE NOCASE)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_agent_accounts_updated ON codex_agent_accounts(updated_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_redeem_codes_status ON redeem_codes(status, id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_redeem_codes_created ON redeem_codes(created_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_redeem_claims_code ON redeem_claims(code_id, id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_redeem_claims_account ON redeem_claims(account_id)")
+        _group_columns = {r[1].lower() for r in conn.execute("PRAGMA table_info(account_groups)").fetchall()}
+        for _column, _definition in (
+            ("redeem_prefix", "TEXT NOT NULL DEFAULT ''"),
+            ("public_stock", "INTEGER NOT NULL DEFAULT 0"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if _column not in _group_columns:
+                conn.execute(f"ALTER TABLE account_groups ADD COLUMN {_column} {_definition}")
+        _redeem_columns = {r[1].lower() for r in conn.execute("PRAGMA table_info(redeem_codes)").fetchall()}
+        if "account_group" not in _redeem_columns:
+            conn.execute("ALTER TABLE redeem_codes ADD COLUMN account_group TEXT")
+        conn.execute(
+            "INSERT OR IGNORE INTO account_groups(group_name,redeem_prefix,public_stock,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (DEFAULT_ACCOUNT_GROUP, "", 0, _now(), _now()),
+        )
         migration_done = conn.execute(
             "SELECT 1 FROM storage_meta WHERE key='legacy_import_completed' LIMIT 1"
         ).fetchone()
@@ -354,6 +432,10 @@ def _save_collection(collection: str, rows: list[dict]) -> None:
                 conn.execute(f"DELETE FROM {table}")
             for pos, raw in enumerate(rows, 1):
                 row = dict(raw)
+                if table == "accounts":
+                    # 老账号 payload 里没有 group_name；落库时补默认分组，
+                    # 保证 SQL 侧按分组过滤能命中这些行。
+                    row["group_name"] = _account_group_name(row)
                 rid = int(row.get("id") or pos)
                 row["id"] = rid
                 if table == "email_pool" and conn.execute("SELECT 1 FROM email_pool WHERE id=?", (rid,)).fetchone():
@@ -447,10 +529,11 @@ def _account_filter_sql(
     plan_filter: str | None = None,
     codex_filter: str | None = None,
     totp_filter: str | None = None,
+    group_filter: str | None = None,
 ) -> tuple[list[str], list[Any]]:
-    """把账号列表的套餐、Codex、2FA 过滤条件下推到 SQLite。
+    """把账号列表的套餐、Codex、2FA、分组过滤条件下推到 SQLite。
 
-    套餐、Codex、2FA 状态仍保存在账号 payload 中，因此这里使用 SQLite JSON1
+    套餐、Codex、2FA、分组状态仍保存在账号 payload 中，因此这里使用 SQLite JSON1
     直接过滤，而不是先把整张 accounts 表反序列化到 Python 再切页。
     """
     where: list[str] = []
@@ -458,6 +541,10 @@ def _account_filter_sql(
     plan = str(plan_filter or "").strip().lower()
     codex = str(codex_filter or "").strip().lower()
     totp = str(totp_filter or "").strip().lower()
+    if group_filter is not None and group_filter != "":
+        wanted = _validate_account_group_name(group_filter)
+        where.append("account_group_name(json_extract(payload, '$.group_name')) = ? COLLATE BINARY")
+        params.append(wanted)
 
     plan_expr = (
         "lower(COALESCE(NULLIF(CAST(json_extract(payload, '$.current_plan_type') AS TEXT), ''), "
@@ -813,10 +900,29 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
+DEFAULT_ACCOUNT_GROUP = "默认分组"
+
+
+def _account_group_name(row: dict) -> str:
+    value = str(row.get("group_name") or "").strip()
+    return value or DEFAULT_ACCOUNT_GROUP
+
+
+def _validate_account_group_name(value: object) -> str:
+    """New names are trimmed, case-sensitive Unicode identities, never aliases."""
+    if not isinstance(value, str) or any(unicodedata.category(ch) in {"Cc", "Cf", "Cs"} for ch in value):
+        raise ValueError("分组名称必须是字符串，且不能包含控制字符")
+    name = value.strip()
+    if not name or len(name) > 60:
+        raise ValueError("分组名称不能为空，且不能超过 60 个字符")
+    return name
+
+
 def _decorate_account(row: dict) -> dict:
     out = dict(row)
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
+    out["group_name"] = _account_group_name(out)
     plan_status = out.get("plan_check_status")
     if plan_status in {"queued", "running"}:
         try:
@@ -1049,6 +1155,358 @@ def _row_to_dict(row: dict | None) -> dict | None:
 
 
 # ============================================================
+# Plus 账号兑换
+# ============================================================
+
+class RedeemError(RuntimeError):
+    """兑换失败，带有可直接返回给 API 的错误码和 HTTP 状态。"""
+
+    def __init__(self, message: str, *, code: str = "redeem_failed", status: int = 400):
+        super().__init__(message)
+        self.code = code
+        self.status = int(status)
+
+
+_REDEEM_CODE_ALPHABET = string.ascii_uppercase + string.digits
+
+
+def _normalize_redeem_code(value: object) -> str:
+    return "".join(str(value or "").split()).strip().upper()
+
+
+def _redeem_plan(row: dict) -> str:
+    return str(row.get("current_plan_type") or row.get("plan_type") or "").strip().lower()
+
+
+def _redeem_credentials(row: dict) -> dict | None:
+    """把有 ChatGPT 登录密码、未归档、未废号的账号放入兑换库存（不限制套餐）。"""
+    email = str(row.get("email") or "").strip()
+    password = _extract_registration_password(row)
+    if not email or not password:
+        return None
+    if bool(row.get("archived")) or str(row.get("live_check_status") or "").lower() == "deactivated":
+        return None
+    plan = _redeem_plan(row)
+    return {
+        "account_id": int(row.get("id") or 0),
+        "email": email,
+        "password": password,
+        "totp_secret": str(row.get("totp_secret") or "").strip(),
+        "plan": str(row.get("current_plan_type") or row.get("plan_type") or "").strip(),
+        "expires_at": row.get("plan_expires_at") or row.get("expires_at") or row.get("plan_renews_at") or "",
+        "group_name": _account_group_name(row),
+    }
+
+
+def _redeem_candidate_rows(conn: sqlite3.Connection, group_name: str | None = None) -> list[dict]:
+    plan_expr = (
+        "lower(COALESCE(NULLIF(CAST(a.payload ->> '$.current_plan_type' AS TEXT), ''), "
+        "CAST(a.payload ->> '$.plan_type' AS TEXT), ''))"
+    )
+    group_expr = "account_group_name(json_extract(a.payload, '$.group_name'))"
+    wanted_group = _account_group_name({"group_name": group_name}) if group_name else None
+    # JSON ->> 在 SQLite JSON1 中返回已解码的标量；旧 SQLite 不支持时由下面的
+    # Python 计划判断兜底，避免兑换功能影响已有数据库启动。
+    try:
+        if wanted_group:
+            # 指定分组：从该分组取“有登录密码”的账号（不限 Plus）。
+            rows = conn.execute(
+                "SELECT a.id, a.email, a.archived, a.payload FROM accounts AS a "
+                "LEFT JOIN redeem_claims AS c ON c.account_id = a.id "
+                f"WHERE c.id IS NULL AND a.archived=0 AND {group_expr}=? "
+                "ORDER BY a.id ASC",
+                (wanted_group,),
+            ).fetchall()
+        else:
+            # 未指定分组：兼容旧的 Plus 库存逻辑。
+            rows = conn.execute(
+                "SELECT a.id, a.email, a.archived, a.payload FROM accounts AS a "
+                "LEFT JOIN redeem_claims AS c ON c.account_id = a.id "
+                f"WHERE c.id IS NULL AND a.archived=0 AND {plan_expr} LIKE '%plus%' "
+                f"AND {plan_expr} NOT LIKE '%free%' ORDER BY a.id ASC"
+            ).fetchall()
+    except sqlite3.OperationalError:
+        rows = conn.execute(
+            "SELECT a.id, a.email, a.archived, a.payload FROM accounts AS a "
+            "LEFT JOIN redeem_claims AS c ON c.account_id = a.id "
+            "WHERE c.id IS NULL AND a.archived=0 ORDER BY a.id ASC"
+        ).fetchall()
+
+    result: list[dict] = []
+    for raw in rows:
+        try:
+            payload = json.loads(raw["payload"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("id", int(raw["id"]))
+        payload.setdefault("email", str(raw["email"] or ""))
+        payload.setdefault("archived", bool(raw["archived"]))
+        item = _redeem_credentials(payload)
+        if not item:
+            continue
+        if wanted_group and item["group_name"].casefold() != wanted_group.casefold():
+            continue
+        if not wanted_group:
+            legacy_plan = str(item.get("plan") or "").strip().lower()
+            if "plus" not in legacy_plan or "free" in legacy_plan:
+                continue
+        result.append(item)
+    return result
+
+
+def _redeem_expired(expires_at: object) -> bool:
+    if not str(expires_at or "").strip():
+        return False
+    parsed = _parse_iso_dt(str(expires_at))
+    if parsed is None:
+        return False
+    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+    return now >= parsed
+
+
+def _redeem_row_value(row: sqlite3.Row | dict, key: str) -> object:
+    """sqlite3.Row 缺列会抛 IndexError，dict 缺键会抛 KeyError；统一按空值处理。"""
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _redeem_public_code(row: sqlite3.Row | dict) -> dict:
+    quantity = max(1, int(row["quantity"] or 1))
+    redeemed = max(0, int(row["redeemed_count"] or 0))
+    raw_status = str(row["status"] or "active").strip().lower()
+    if raw_status == "active" and redeemed >= quantity:
+        status = "exhausted"
+    elif raw_status == "active" and _redeem_expired(row["expires_at"]):
+        status = "expired"
+    else:
+        status = raw_status
+    account_group = str(_redeem_row_value(row, "account_group") or "").strip()
+    return {
+        "id": int(row["id"]),
+        "code": str(row["code"]),
+        "quantity": quantity,
+        "redeemed_count": redeemed,
+        "remaining": max(0, quantity - redeemed),
+        "status": status,
+        "expires_at": row["expires_at"] or "",
+        "note": row["note"] or "",
+        "account_group": account_group,
+        "created_at": row["created_at"] or "",
+        "updated_at": row["updated_at"] or "",
+    }
+
+
+def create_redeem_code(*, quantity: int = 1, expires_at: str | None = None, note: str = "", account_group: str = "") -> dict:
+    try:
+        quantity = int(quantity)
+    except (TypeError, ValueError) as exc:
+        raise RedeemError("兑换数量必须是整数", code="invalid_quantity") from exc
+    if quantity < 1 or quantity > 1000:
+        raise RedeemError("兑换数量需在 1~1000 之间", code="invalid_quantity")
+
+    raw_group = str(account_group or "")
+    if not raw_group.strip():
+        raise RedeemError("创建 CDK 时必须指定兑换分组", code="group_required")
+    try:
+        group = _validate_account_group_name(raw_group)
+    except ValueError as exc:
+        raise RedeemError(str(exc), code="invalid_group") from exc
+
+    expiry = str(expires_at or "").strip()
+    if expiry:
+        parsed = _parse_iso_dt(expiry)
+        if parsed is None:
+            raise RedeemError("过期时间格式无效，请使用 ISO 时间", code="invalid_expiry")
+        now_dt = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+        if parsed <= now_dt:
+            raise RedeemError("过期时间必须晚于当前时间", code="invalid_expiry")
+        expiry = parsed.isoformat(timespec="seconds")
+    note = str(note or "").strip()[:200]
+    now = _now()
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        prefix = ""
+        try:
+            meta = _group_meta_rows(conn).get(_normalize_group_key(group))
+            if not meta:
+                raise RedeemError(f"分组「{group}」不存在，请先创建分组", code="group_not_found")
+            group = str(meta.get("group_name") or group)
+            prefix = _normalize_redeem_prefix(meta.get("redeem_prefix") or "")
+        except RedeemError:
+            raise
+        except sqlite3.Error:
+            raise RedeemError("分组信息暂时不可用，请稍后重试", code="group_unavailable", status=503)
+        for _ in range(30):
+            if prefix:
+                code = f"{prefix}-{''.join(secrets.choice(_REDEEM_CODE_ALPHABET) for _ in range(16))}"
+            else:
+                code = "CDK-" + "".join(secrets.choice(_REDEEM_CODE_ALPHABET) for _ in range(20))
+            try:
+                conn.execute(
+                    "INSERT INTO redeem_codes(code,quantity,redeemed_count,status,expires_at,note,account_group,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (code, quantity, 0, "active", expiry or None, note, group, now, now),
+                )
+                conn.commit()
+                row = conn.execute("SELECT * FROM redeem_codes WHERE code=?", (code,)).fetchone()
+                return _redeem_public_code(row)
+            except sqlite3.IntegrityError:
+                conn.rollback()
+        raise RedeemError("生成兑换码失败，请重试", code="code_generation_failed", status=503)
+
+
+def list_redeem_codes(*, limit: int | None = 200) -> list[dict]:
+    """列出 CDK，并附带每个 CDK 已领取的账号快照。"""
+    _ensure_sqlite()
+    with closing(_sqlite_conn()) as conn:
+        if limit is None:
+            rows = conn.execute("SELECT * FROM redeem_codes ORDER BY id DESC").fetchall()
+        else:
+            limit = max(1, min(1000, int(limit or 200)))
+            rows = conn.execute("SELECT * FROM redeem_codes ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        if not rows:
+            return []
+
+        code_ids = [int(row["id"]) for row in rows]
+        placeholders = ",".join("?" for _ in code_ids)
+        claim_rows = conn.execute(
+            "SELECT id, code_id, account_id, email, claimed_at "
+            f"FROM redeem_claims WHERE code_id IN ({placeholders}) ORDER BY code_id ASC, id ASC",
+            code_ids,
+        ).fetchall()
+
+    claims_by_code: dict[int, list[dict]] = {code_id: [] for code_id in code_ids}
+    for claim in claim_rows:
+        claims_by_code[int(claim["code_id"])].append({
+            "id": int(claim["id"]),
+            "account_id": int(claim["account_id"]),
+            "email": str(claim["email"] or ""),
+            "claimed_at": str(claim["claimed_at"] or ""),
+        })
+
+    result = []
+    for row in rows:
+        item = _redeem_public_code(row)
+        redeemed_accounts = claims_by_code.get(int(row["id"]), [])
+        item["redeemed_accounts"] = redeemed_accounts
+        item["is_redeemed"] = bool(redeemed_accounts)
+        result.append(item)
+    return result
+
+
+def redeem_stock_summary(group_name: str | None = None) -> dict:
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        candidates = _redeem_candidate_rows(conn, group_name=group_name)
+        total_plus = 0
+        try:
+            raw_rows = conn.execute("SELECT payload FROM accounts WHERE archived=0").fetchall()
+            for raw in raw_rows:
+                try:
+                    payload = json.loads(raw["payload"] or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                if isinstance(payload, dict):
+                    plan = _redeem_plan(payload)
+                    group_ok = not group_name or _account_group_name(payload).casefold() == _account_group_name({"group_name": group_name}).casefold()
+                    if group_ok and "plus" in plan and "free" not in plan:
+                        total_plus += 1
+        except sqlite3.Error:
+            total_plus = len(candidates)
+    return {"available": len(candidates), "known_plus": total_plus}
+
+
+def revoke_redeem_code(code_id: int) -> dict | None:
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        row = conn.execute("SELECT * FROM redeem_codes WHERE id=?", (int(code_id),)).fetchone()
+        if not row:
+            return None
+        public = _redeem_public_code(row)
+        if public["status"] == "active":
+            now = _now()
+            conn.execute("UPDATE redeem_codes SET status='revoked', updated_at=? WHERE id=?", (now, int(code_id)))
+            conn.commit()
+            row = conn.execute("SELECT * FROM redeem_codes WHERE id=?", (int(code_id),)).fetchone()
+            return _redeem_public_code(row)
+        return public
+
+
+def redeem_plus_accounts(code: str) -> dict:
+    normalized = _normalize_redeem_code(code)
+    if not normalized or len(normalized) > 80:
+        raise RedeemError("请输入有效的 CDK", code="invalid_code")
+
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM redeem_codes WHERE code=?", (normalized,)).fetchone()
+            if not row:
+                raise RedeemError("CDK 不存在或输入错误", code="code_not_found", status=404)
+            public = _redeem_public_code(row)
+            if public["status"] == "revoked":
+                raise RedeemError("该 CDK 已被停用", code="code_revoked", status=410)
+            if public["status"] == "expired":
+                raise RedeemError("该 CDK 已过期", code="code_expired", status=410)
+            if public["status"] == "exhausted":
+                raise RedeemError("该 CDK 已兑换完毕", code="code_exhausted", status=410)
+
+            quantity = public["remaining"]
+            group_name = public.get("account_group") or ""
+            candidates = _redeem_candidate_rows(conn, group_name=group_name or None)
+            if len(candidates) < quantity:
+                label = f"分组「{group_name}」" if group_name else "Plus"
+                raise RedeemError(
+                    f"{label} 库存不足：该 CDK 需要 {quantity} 个，当前只有 {len(candidates)} 个可兑换账号",
+                    code="insufficient_stock",
+                    status=409,
+                )
+
+            selected = candidates[:quantity]
+            now = _now()
+            for item in selected:
+                conn.execute(
+                    "INSERT INTO redeem_claims(code_id,account_id,email,claimed_at) VALUES(?,?,?,?)",
+                    (int(row["id"]), int(item["account_id"]), item["email"], now),
+                )
+            new_count = int(row["redeemed_count"] or 0) + len(selected)
+            new_status = "exhausted" if new_count >= int(row["quantity"] or 1) else "active"
+            conn.execute(
+                "UPDATE redeem_codes SET redeemed_count=?, status=?, updated_at=? WHERE id=?",
+                (new_count, new_status, now, int(row["id"])),
+            )
+            conn.commit()
+            lines = [
+                f"{item['email']}---{item['password']}---{item['totp_secret']}"
+                for item in selected
+            ]
+            return {
+                "code_id": int(row["id"]),
+                "count": len(selected),
+                "remaining": max(0, int(row["quantity"] or 1) - new_count),
+                "group_name": group_name,
+                "lines": lines,
+                "accounts": [
+                    {
+                        "account_id": int(item["account_id"]),
+                        "email": item["email"],
+                        "plan": item["plan"],
+                        "expires_at": item["expires_at"],
+                    }
+                    for item in selected
+                ],
+            }
+        except Exception:
+            conn.rollback()
+            raise
+
+
+# ============================================================
 # registered_accounts
 # ============================================================
 
@@ -1082,11 +1540,13 @@ def insert_account(
                 "id": row_id,
                 "email": email,
                 "created_at": _now(),
+                "group_name": DEFAULT_ACCOUNT_GROUP,
             }
             accounts.append(row)
         else:
             row = existing
             row_id = int(row["id"])
+            row.setdefault("group_name", DEFAULT_ACCOUNT_GROUP)
 
         row.update({
             "access_token": access_token,
@@ -1400,6 +1860,22 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
                 row["billing_currency"] = result.get("billing_currency")
             if result.get("is_delinquent") is not None:
                 row["is_delinquent"] = bool(result.get("is_delinquent"))
+            # 订阅接口会用 null 表示当前没有对应时间；按 key 写入可以清掉
+            # 上一次查询遗留的挽留期，避免账号恢复正常后仍显示旧日期。
+            for _k in (
+                "subscription_active_start",
+                "subscription_active_until",
+                "subscription_became_delinquent_at",
+                "subscription_grace_period_end_at",
+                "subscription_billing_currency",
+                "subscription_billing_period",
+                "subscription_plan_type",
+                "subscription_checked_at",
+                "subscription_http_status",
+                "subscription_error",
+            ):
+                if _k in result:
+                    row[_k] = result.get(_k)
             for _k in (
                 "discount_type",
                 "discount_amount",
@@ -1435,7 +1911,10 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
         return True
 
 
-def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str = "pix") -> bool:
+def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str = "pix", *,
+                           provider_id: int | None = None, provider_type: str | None = None,
+                           provider_name: str | None = None, cdk_id: int | None = None,
+                           cdk_suffix: str | None = None) -> bool:
     """原子占用账号提链任务；已有未超时任务时返回 False。"""
     with _LOCK:
         accounts = _load_accounts()
@@ -1443,10 +1922,12 @@ def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str =
         if row is None:
             return False
         current_status = row.get("extract_link_status")
-        if current_status in {"queued", "running"}:
+        active_statuses = {"queued", "running", "awaiting_blik", "unknown", "interrupted"}
+        if current_status in active_statuses:
             try:
                 stamp_key = "extract_link_queued_at" if current_status == "queued" else "extract_link_started_at"
-                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                is_lumen = str(row.get("extract_link_provider_type") or "").lower() == "lumen"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else (3600 if is_lumen else _PLAN_CHECK_STALE_SECONDS)
                 started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
                 if (datetime.now() - started_at).total_seconds() < stale_after:
                     return False
@@ -1462,6 +1943,28 @@ def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str =
         row["extract_link_completed_at"] = None
         row["extract_link_error"] = None
         row["extract_link_message"] = "已入队"
+        row["extract_link_awaiting_blik"] = False
+        row["extract_link_task_id"] = None
+        if provider_id is not None:
+            row["extract_link_provider_id"] = int(provider_id)
+        else:
+            row.pop("extract_link_provider_id", None)
+        if provider_type is not None:
+            row["extract_link_provider_type"] = str(provider_type).lower()
+        else:
+            row.pop("extract_link_provider_type", None)
+        if provider_name is not None:
+            row["extract_link_provider_name"] = str(provider_name)[:120]
+        else:
+            row.pop("extract_link_provider_name", None)
+        if cdk_id is not None:
+            row["extract_link_cdk_id"] = int(cdk_id)
+        else:
+            row.pop("extract_link_cdk_id", None)
+        if cdk_suffix is not None:
+            row["extract_link_cdk_suffix"] = str(cdk_suffix)[:12]
+        else:
+            row.pop("extract_link_cdk_suffix", None)
         row["updated_at"] = now
         _save_accounts(accounts)
         return True
@@ -1496,15 +1999,36 @@ def update_account_extract(acc_id: int, result: dict | None = None) -> bool:
         row["extract_link_status"] = status
         row["extract_link_ok"] = ok
         row["extract_link_checked_at"] = result.get("checked_at") or _now()
-        if status in {"success", "failed", "stopped"}:
+        if status in {"success", "failed", "stopped", "unknown", "interrupted"}:
             row["extract_link_completed_at"] = _now()
-        row["extract_link_error"] = None if ok or status == "running" else result.get("error")
+        row["extract_link_error"] = None if ok or status in {"running", "awaiting_blik", "queued"} else result.get("error")
         if result.get("message") is not None:
             row["extract_link_message"] = result.get("message")
         if result.get("job_id") is not None:
             row["extract_link_job_id"] = result.get("job_id")
+        if result.get("task_id") is not None:
+            row["extract_link_task_id"] = result.get("task_id")
         if result.get("link_type") is not None:
             row["extract_link_type"] = result.get("link_type")
+        if result.get("provider_id") is not None:
+            row["extract_link_provider_id"] = int(result.get("provider_id"))
+        if result.get("provider_type") is not None:
+            row["extract_link_provider_type"] = str(result.get("provider_type")).lower()
+        if result.get("provider_name") is not None:
+            row["extract_link_provider_name"] = str(result.get("provider_name"))[:120]
+        if result.get("cdk_id") is not None:
+            row["extract_link_cdk_id"] = int(result.get("cdk_id"))
+        if result.get("cdk_suffix") is not None:
+            row["extract_link_cdk_suffix"] = str(result.get("cdk_suffix"))[:12]
+        if result.get("awaiting_blik") is not None:
+            row["extract_link_awaiting_blik"] = bool(result.get("awaiting_blik"))
+        if result.get("payment_status") is not None:
+            row["extract_link_payment_status"] = str(result.get("payment_status"))[:80]
+        if result.get("progress") is not None:
+            try:
+                row["extract_link_progress"] = max(0, min(100, int(result.get("progress"))))
+            except (TypeError, ValueError):
+                pass
         if result.get("cdk_remaining") is not None:
             row["extract_link_cdk_remaining"] = result.get("cdk_remaining")
         payload = result.get("result") if isinstance(result.get("result"), dict) else {}
@@ -1516,6 +2040,8 @@ def update_account_extract(acc_id: int, result: dict | None = None) -> bool:
             row["extract_link_payment_method"] = payload.get("payment_method")
             row["extract_link_payment_link_type"] = payload.get("payment_link_type")
             row["extract_link_expires_at"] = payload.get("expires_at")
+            if payload.get("payment_status") is not None:
+                row["extract_link_payment_status"] = str(payload.get("payment_status"))[:80]
             if payload.get("cdk_remaining") is not None:
                 row["extract_link_cdk_remaining"] = payload.get("cdk_remaining")
             row["extract_link_result_json"] = json.dumps(payload, ensure_ascii=False)
@@ -1531,11 +2057,13 @@ def recover_interrupted_extract_links() -> int:
         recovered = 0
         now = _now()
         for row in accounts:
-            if row.get("extract_link_status") not in {"queued", "running"}:
+            if row.get("extract_link_status") not in {"queued", "running", "awaiting_blik", "unknown", "interrupted"}:
                 continue
-            row["extract_link_status"] = "failed"
+            row["extract_link_status"] = "interrupted"
             row["extract_link_ok"] = False
-            row["extract_link_error"] = "WebUI 重启导致提链任务中断，请重新提链"
+            row["extract_link_awaiting_blik"] = False
+            row["extract_link_error"] = "WebUI 重启导致提链任务中断；请先刷新/核对原任务，不要直接重提"
+            row["extract_link_message"] = "任务中断，需核对受理状态"
             row["extract_link_completed_at"] = now
             row["updated_at"] = now
             recovered += 1
@@ -1563,6 +2091,8 @@ def _parse_iso_dt(value: str | None, end_of_day: bool = False) -> datetime | Non
     if not value:
         return None
     text = str(value).strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
     try:
         if len(text) == 10 and text[4] == "-":
             if end_of_day:
@@ -1613,6 +2143,7 @@ def _filtered_decorated_accounts(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    group_filter: str | None = None,
 ) -> list[dict]:
     rows = _load_accounts()
     if archived in (True, "1", "true", "yes", "only"):
@@ -1626,6 +2157,9 @@ def _filtered_decorated_accounts(
     decorated = [r for r in decorated if _matches_codex_status_filter(r, codex_filter)]
     decorated = [r for r in decorated if _matches_totp_status_filter(r, totp_filter)]
     decorated = [r for r in decorated if _account_matches_query(r, q)]
+    if group_filter:
+        wanted = _account_group_name({"group_name": group_filter})
+        decorated = [r for r in decorated if (r.get("group_name") or "").casefold() == wanted.casefold()]
     # 按创建时间筛选（date_from/date_to 为 ISO 字符串或 YYYY-MM-DD）
     if date_from or date_to:
         d_from = _parse_iso_dt(date_from)
@@ -1655,10 +2189,11 @@ def list_account_plan_check_statuses(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    group_filter: str | None = None,
 ) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
-        "id", "email", "archived",
+        "id", "email", "archived", "group_name",
         "plan_type", "current_plan_type", "plus_trial_eligible",
         "eligible_promo_campaigns", "plus_trial_discount_percentage",
         "plan_check_status", "plan_check_ok", "plan_check_error",
@@ -1668,7 +2203,11 @@ def list_account_plan_check_statuses(
         "live_check_proxy_used", "live_check_fingerprint_text",
         "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
-        "discount_expires_at", "discount_promo_campaign_id",
+        "discount_expires_at", "discount_promo_campaign_id", "is_delinquent",
+        "subscription_active_start", "subscription_active_until",
+        "subscription_became_delinquent_at", "subscription_grace_period_end_at",
+        "subscription_billing_currency", "subscription_billing_period", "subscription_plan_type",
+        "subscription_checked_at", "subscription_http_status", "subscription_error",
         "extract_link_status", "extract_link_ok", "extract_link_type",
         "extract_link_message", "extract_link_error",
         "extract_link_long_url", "extract_link_copy_paste",
@@ -1691,6 +2230,7 @@ def list_account_plan_check_statuses(
             plan_filter=plan_filter,
             codex_filter=codex_filter,
             totp_filter=totp_filter,
+            group_filter=group_filter,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",
@@ -1736,6 +2276,10 @@ def list_account_plan_check_statuses(
                     "plan_type": row.get("plan_type"),
                     "plus_trial_eligible": row.get("plus_trial_eligible"),
                     "eligible_promo_campaigns": row.get("eligible_promo_campaigns"),
+                    "is_delinquent": row.get("is_delinquent"),
+                    "subscription_became_delinquent_at": row.get("subscription_became_delinquent_at"),
+                    "subscription_grace_period_end_at": row.get("subscription_grace_period_end_at"),
+                    "subscription_error": row.get("subscription_error"),
                     "extract_link_status": row.get("extract_link_status"),
                     "codex_status": row.get("codex_status"),
                     "codex_agent_status": row.get("codex_agent_status"),
@@ -1750,6 +2294,7 @@ def list_account_plan_check_statuses(
                     "email": row.get("email"),
                     "original_email": row.get("original_email"),
                     "email_source": row.get("email_source"),
+                    "group_name": _account_group_name(row),
                     "email_change_status": row.get("email_change_status"),
                     "email_change_error": row.get("email_change_error"),
                 }
@@ -1773,6 +2318,7 @@ def list_accounts(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    group_filter: str | None = None,
 ) -> list[dict]:
     # 非分页兼容接口也走同一条 SQL 分页路径，避免 limit=500 时先读取整张表。
     result = list_accounts_page(
@@ -1785,8 +2331,45 @@ def list_accounts(
         date_from=date_from,
         date_to=date_to,
         totp_filter=totp_filter,
+        group_filter=group_filter,
     )
     return result["items"]
+
+
+def find_accounts_by_emails(
+    emails: list[str],
+    *,
+    archived: str | bool | None = False,
+    plan_filter: str | None = None,
+    codex_filter: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    totp_filter: str | None = None,
+    group_filter: str | None = None,
+) -> list[dict]:
+    """按当前账号筛选条件精确匹配邮箱，返回已装饰的账号列表。"""
+    targets = {
+        str(email or "").strip().casefold()
+        for email in (emails or [])
+        if str(email or "").strip()
+    }
+    if not targets:
+        return []
+
+    rows = _filtered_decorated_accounts(
+        archived=archived,
+        plan_filter=plan_filter,
+        codex_filter=codex_filter,
+        date_from=date_from,
+        date_to=date_to,
+        totp_filter=totp_filter,
+        group_filter=group_filter,
+    )
+    return [
+        row for row in rows
+        if str(row.get("email") or "").strip().casefold() in targets
+        or str(row.get("original_email") or "").strip().casefold() in targets
+    ]
 
 
 def list_accounts_page(
@@ -1799,6 +2382,7 @@ def list_accounts_page(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    group_filter: str | None = None,
 ) -> dict:
     with _LOCK:
         limit = max(1, int(limit))
@@ -1807,6 +2391,7 @@ def list_accounts_page(
             plan_filter=plan_filter,
             codex_filter=codex_filter,
             totp_filter=totp_filter,
+            group_filter=group_filter,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",
@@ -1825,14 +2410,24 @@ def list_accounts_page(
 
 def get_account(acc_id: int) -> dict | None:
     with _LOCK:
-        row = next((r for r in _load_accounts() if int(r.get("id") or 0) == int(acc_id)), None)
-        return _decorate_account(row) if row else None
+        _ensure_sqlite()
+        with closing(_sqlite_conn()) as conn:
+            row = conn.execute("SELECT payload FROM accounts WHERE id=? LIMIT 1", (int(acc_id),)).fetchone()
+        return _decorate_account(json.loads(row["payload"])) if row else None
 
 
 def get_account_by_email(email: str) -> dict | None:
     with _LOCK:
-        row = _find_by_email(_load_accounts(), email)
-        return _decorate_account(row) if row else None
+        _ensure_sqlite()
+        with closing(_sqlite_conn()) as conn:
+            # Preserve Python's Unicode lower() and earliest-ID behavior without
+            # loading or decoding every account's tokens and metadata.
+            conn.create_function("email_lower", 1, lambda value: (value or "").lower(), deterministic=True)
+            row = conn.execute(
+                "SELECT payload FROM accounts WHERE email_lower(email)=? ORDER BY id LIMIT 1",
+                ((email or "").lower(),),
+            ).fetchone()
+        return _decorate_account(json.loads(row["payload"])) if row else None
 
 
 def update_account_note(acc_id: int, note: str) -> bool:
@@ -1978,7 +2573,8 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
                 row["plan_type"] = account.get("planType")
             if session.get("expires"):
                 row["expires_at"] = session.get("expires")
-            row["live_check_proxy_used"] = result.get("proxy_used") or row.get("live_check_proxy_used")
+            if "proxy_used" in result:
+                row["live_check_proxy_used"] = result.get("proxy_used")
             row["live_check_fingerprint_text"] = result.get("fingerprint_text") or row.get("live_check_fingerprint_text")
             if result.get("fingerprint"):
                 row["live_check_fingerprint"] = result.get("fingerprint")
@@ -2176,6 +2772,282 @@ def update_accounts_note(account_ids: list[int] | None, note: str) -> tuple[list
     return updated, skipped
 
 
+def update_accounts_group(account_ids: list[int] | None, group_name: str) -> tuple[list[dict], list[dict]]:
+    """
+    批量设置已注册账号的分组。
+    返回 (updated, skipped)，updated 元素含 id/email/group_name。
+    """
+    ids = {int(x) for x in (account_ids or []) if str(x).strip().lstrip("-").isdigit()}
+    try:
+        name = _validate_account_group_name(str(group_name or ""))
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    updated: list[dict] = []
+    skipped: list[dict] = []
+    with _LOCK:
+        rows = _load_accounts()
+        seen_ids: set[int] = set()
+        now = _now()
+        for row in rows:
+            row_id = int(row.get("id") or 0)
+            if row_id not in ids:
+                continue
+            row["group_name"] = name
+            row["updated_at"] = now
+            updated.append({"id": row_id, "email": row.get("email"), "group_name": name})
+            seen_ids.add(row_id)
+        for item in ids - seen_ids:
+            skipped.append({"id": item, "reason": "账号不存在"})
+        if updated:
+            _save_accounts(rows)
+            update_account_group_meta(name)
+    return updated, skipped
+
+
+def _group_meta_rows(conn: sqlite3.Connection) -> dict[str, dict]:
+    """读取分组元数据（前缀、是否公开展示库存），key 为 casefold 后的分组名。"""
+    try:
+        rows = conn.execute("SELECT * FROM account_groups").fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[str, dict] = {}
+    for raw in rows:
+        name = _account_group_name({"group_name": raw["group_name"]})
+        out[_normalize_group_key(name)] = {
+            "group_name": name,
+            "redeem_prefix": str(raw["redeem_prefix"] or "").strip(),
+            "public_stock": bool(raw["public_stock"]),
+        }
+    return out
+
+
+def _upsert_group_meta(
+    conn: sqlite3.Connection,
+    group_name: str,
+    *,
+    redeem_prefix: str | None = None,
+    public_stock: bool | None = None,
+) -> dict:
+    name = _validate_account_group_name(str(group_name or ""))
+    now = _now()
+    conn.execute(
+        "INSERT INTO account_groups(group_name,redeem_prefix,public_stock,created_at,updated_at) "
+        "VALUES(?,?,?,?,?) ON CONFLICT(group_name) DO NOTHING",
+        (name, "", 0, now, now),
+    )
+    if redeem_prefix is not None:
+        conn.execute(
+            "UPDATE account_groups SET redeem_prefix=?, updated_at=? WHERE group_name=?",
+            (_normalize_redeem_prefix(redeem_prefix), now, name),
+        )
+    if public_stock is not None:
+        conn.execute(
+            "UPDATE account_groups SET public_stock=?, updated_at=? WHERE group_name=?",
+            (1 if public_stock else 0, now, name),
+        )
+    row = conn.execute("SELECT * FROM account_groups WHERE group_name=?", (name,)).fetchone()
+    return {
+        "group_name": name,
+        "redeem_prefix": str(row["redeem_prefix"] or "").strip() if row else "",
+        "public_stock": bool(row["public_stock"]) if row else False,
+    }
+
+
+def _normalize_redeem_prefix(value: object) -> str:
+    """CDK 前缀允许 ASCII 字母、数字、短横线，最长 16 位；空值表示使用默认 CDK 前缀。"""
+    prefix = str(value or "").strip().upper()
+    if len(prefix) > 16:
+        raise ValueError("CDK 前缀最长 16 个字符")
+    if any(ch not in (string.ascii_uppercase + string.digits + "-") for ch in prefix):
+        raise ValueError("CDK 前缀只能包含字母、数字和短横线")
+    return prefix
+
+
+def update_account_group_meta(
+    group_name: str,
+    *,
+    redeem_prefix: str | None = None,
+    public_stock: bool | None = None,
+) -> dict:
+    """设置分组元数据：CDK 前缀、是否在公开页展示该分组库存。"""
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        with conn:
+            return _upsert_group_meta(conn, group_name, redeem_prefix=redeem_prefix, public_stock=public_stock)
+
+
+def list_account_groups(*, public_only: bool = False) -> list[dict]:
+    """按账号 group_name 聚合统计：账号数、可兑换数（有登录密码、未归档、未废号）。
+
+    public_only=True 时只返回管理员标记为公开展示库存的分组。
+    """
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        rows = conn.execute("SELECT id, payload, archived FROM accounts").fetchall()
+        claimed_ids = {int(row["account_id"]) for row in conn.execute("SELECT account_id FROM redeem_claims")}
+        meta_map = _group_meta_rows(conn)
+    counters: dict[str, dict] = {}
+    for raw in rows:
+        try:
+            payload = json.loads(raw["payload"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload.setdefault("id", int(raw["id"]))
+        payload.setdefault("archived", bool(raw["archived"]))
+        group = _account_group_name(payload)
+        entry = counters.setdefault(group, {"group_name": group, "total": 0, "redeemable": 0})
+        entry["total"] += 1
+        if int(raw["id"]) not in claimed_ids and _redeem_credentials(payload):
+            entry["redeemable"] += 1
+
+    out: list[dict] = []
+    for entry in counters.values():
+        meta = meta_map.get(_normalize_group_key(entry["group_name"])) or {}
+        entry["redeem_prefix"] = str(meta.get("redeem_prefix") or "")
+        entry["public_stock"] = bool(meta.get("public_stock"))
+        out.append(entry)
+    # 元数据里存在、但当前没有账号的分组也要展示，便于提前配置前缀。
+    known = {_normalize_group_key(x["group_name"]) for x in out}
+    for key, meta in meta_map.items():
+        if key in known:
+            continue
+        out.append({
+            "group_name": meta["group_name"],
+            "total": 0,
+            "redeemable": 0,
+            "redeem_prefix": str(meta.get("redeem_prefix") or ""),
+            "public_stock": bool(meta.get("public_stock")),
+        })
+    if public_only:
+        out = [x for x in out if x["public_stock"]]
+    return sorted(out, key=lambda x: (x["group_name"] != DEFAULT_ACCOUNT_GROUP, x["group_name"]))
+
+
+def rename_account_group(old_name: str, new_name: str) -> tuple[int, str]:
+    """原子重命名分组，并同步账号与未领取 CDK 的分组绑定。"""
+    try:
+        old = _validate_account_group_name(str(old_name or ""))
+        new = _validate_account_group_name(str(new_name or ""))
+    except ValueError as exc:
+        raise RedeemError(str(exc), code="invalid_group") from exc
+    if old == DEFAULT_ACCOUNT_GROUP:
+        raise RedeemError("默认分组不能重命名", code="default_group_protected")
+    if _normalize_group_key(old) == _normalize_group_key(new):
+        return 0, old
+
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            metas = conn.execute("SELECT * FROM account_groups").fetchall()
+            source_meta = next((row for row in metas if _normalize_group_key(row["group_name"]) == _normalize_group_key(old)), None)
+            target_exists = next((row for row in metas if _normalize_group_key(row["group_name"]) == _normalize_group_key(new)), None)
+            account_rows = conn.execute("SELECT id, payload FROM accounts").fetchall()
+            matching = []
+            for row in account_rows:
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                if isinstance(payload, dict) and _normalize_group_key(_account_group_name(payload)) == _normalize_group_key(old):
+                    matching.append((row, payload))
+            if source_meta is None and not matching:
+                raise RedeemError(f"分组「{old}」不存在", code="group_not_found")
+            if target_exists:
+                raise RedeemError(f"分组「{new}」已存在", code="group_exists")
+
+            now = _now()
+            if source_meta is not None:
+                conn.execute(
+                    "UPDATE account_groups SET group_name=?, updated_at=? WHERE group_name=?",
+                    (new, now, source_meta["group_name"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO account_groups(group_name,redeem_prefix,public_stock,created_at,updated_at) VALUES(?,?,?,?,?)",
+                    (new, "", 0, now, now),
+                )
+            for row, payload in matching:
+                payload["group_name"] = new
+                payload["updated_at"] = now
+                conn.execute(
+                    "UPDATE accounts SET payload=?, updated_at=? WHERE id=?",
+                    (json.dumps(payload, ensure_ascii=False), now, int(row["id"])),
+                )
+            code_rows = conn.execute("SELECT id, account_group FROM redeem_codes WHERE account_group IS NOT NULL").fetchall()
+            for code_row in code_rows:
+                if _normalize_group_key(str(code_row["account_group"] or "")) == _normalize_group_key(old):
+                    conn.execute("UPDATE redeem_codes SET account_group=?, updated_at=? WHERE id=?", (new, now, int(code_row["id"])))
+            conn.commit()
+            return len(matching), new
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def delete_account_group(group_name: str, *, merge_to: str | None = None) -> tuple[int, str]:
+    """删除非默认分组；有有效未耗尽 CDK 时拒绝，账号移入目标分组。"""
+    try:
+        target = _validate_account_group_name(str(group_name or ""))
+        destination = _validate_account_group_name(str(merge_to or DEFAULT_ACCOUNT_GROUP))
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
+    if target == DEFAULT_ACCOUNT_GROUP:
+        raise ValueError("默认分组不能删除")
+    if _normalize_group_key(target) == _normalize_group_key(destination):
+        raise ValueError("目标分组不能与要删除的分组相同")
+
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            metas = conn.execute("SELECT * FROM account_groups").fetchall()
+            source_meta = next((row for row in metas if _normalize_group_key(row["group_name"]) == _normalize_group_key(target)), None)
+            account_rows = conn.execute("SELECT id, payload FROM accounts").fetchall()
+            matching = []
+            for row in account_rows:
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                if isinstance(payload, dict) and _normalize_group_key(_account_group_name(payload)) == _normalize_group_key(target):
+                    matching.append((row, payload))
+            if source_meta is None and not matching:
+                raise ValueError(f"分组「{target}」不存在")
+
+            for code_row in conn.execute("SELECT id, account_group, status, redeemed_count, quantity, expires_at FROM redeem_codes WHERE account_group IS NOT NULL").fetchall():
+                if _normalize_group_key(str(code_row["account_group"] or "")) != _normalize_group_key(target):
+                    continue
+                status = str(code_row["status"] or "active").lower()
+                if status == "active" and int(code_row["redeemed_count"] or 0) < int(code_row["quantity"] or 1) and not _redeem_expired(code_row["expires_at"]):
+                    raise ValueError("该分组仍有有效 CDK，请先停用或耗尽后再删除")
+
+            now = _now()
+            destination_exists = next((row for row in metas if _normalize_group_key(row["group_name"]) == _normalize_group_key(destination)), None)
+            if not destination_exists:
+                conn.execute(
+                    "INSERT INTO account_groups(group_name,redeem_prefix,public_stock,created_at,updated_at) VALUES(?,?,?,?,?)",
+                    (destination, "", 0, now, now),
+                )
+            for row, payload in matching:
+                payload["group_name"] = destination
+                payload["updated_at"] = now
+                conn.execute("UPDATE accounts SET payload=?, updated_at=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), now, int(row["id"])))
+            if source_meta is not None:
+                conn.execute("DELETE FROM account_groups WHERE group_name=?", (source_meta["group_name"],))
+            conn.commit()
+            return len(matching), destination
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def _normalize_group_key(value: str) -> str:
+    return str(value or "").strip().casefold()
+
+
 def archive_account(acc_id: int, archived: bool = True) -> bool:
     """归档/取消归档单个已注册账号。归档不会删除 token，只影响默认账号列表查询。"""
     with _LOCK:
@@ -2284,6 +3156,64 @@ def delete_accounts(account_ids: list[int] | None = None, emails: list[str] | No
                 conn.executemany("DELETE FROM codex_agent_accounts WHERE account_id=?", [(x["id"],) for x in deleted])
                 conn.commit()
     return deleted, skipped
+
+
+def import_existing_accounts(records: list[dict]) -> tuple[int, list[dict]]:
+    """直接导入已有账号，不要求邮箱池素材。
+
+    records 元素：{email, password, totp_secret, access_token}。
+    password 是 ChatGPT 账号密码，存入 extra_json.registration_password；
+    返回 (新增数, 跳过详情)。邮箱按大小写不敏感去重。
+    """
+    with _LOCK:
+        accounts = _load_accounts()
+        inserted = 0
+        skipped: list[dict] = []
+        seen_emails: set[str] = set()
+
+        for raw in records:
+            email = str(raw.get("email") or "").strip()
+            password = str(raw.get("password") or "").strip()
+            totp_secret = str(raw.get("totp_secret") or raw.get("totp") or "").strip()
+            access_token = str(raw.get("access_token") or raw.get("token") or "").strip()
+            email_key = email.casefold()
+            public_item = {"email": email} if email else {}
+
+            if not email or not password or not totp_secret or not access_token:
+                skipped.append({**public_item, "reason": "邮箱、密码、2FA 和 AT 都不能为空"})
+                continue
+            if email_key in seen_emails:
+                skipped.append({"email": email, "reason": "本次内容中邮箱重复"})
+                continue
+            seen_emails.add(email_key)
+            if _find_by_email(accounts, email):
+                skipped.append({"email": email, "reason": "账号已存在"})
+                continue
+
+            now = _now()
+            account = {
+                "id": _next_id(accounts),
+                "email": email,
+                "created_at": now,
+                "updated_at": now,
+                "access_token": access_token,
+                "totp_secret": totp_secret,
+                "user_name": "Imported Account",
+                "email_source": "imported",
+                "extra_json": json.dumps({
+                    "imported_existing_account": True,
+                    "registration_password": password,
+                }, ensure_ascii=False),
+                "codex_status": "",
+                "original_email_line": email,
+            }
+            account["copy_line"] = _account_line(account)
+            accounts.append(account)
+            inserted += 1
+
+        if inserted:
+            _save_accounts(accounts)
+        return inserted, skipped
 
 
 # ============================================================
@@ -3080,6 +4010,9 @@ def _new_job_row(
         "email": email,
         "status": "pending",
         "error_message": None,
+        "progress": 0,
+        "stage": "等待执行",
+        "progress_message": "任务已创建，等待执行",
         "log_file": log_file,
         "started_at": None,
         "completed_at": None,
@@ -3117,7 +4050,7 @@ def create_retry_job(
             raise ValueError(f"当前状态不支持重试：{source.get('status')}")
 
         root_id = int(source.get("root_job_id") or source.get("id"))
-        active_states = {"pending", "running", "stopping"}
+        active_states = {"pending", "running", "paused", "stopping"}
         active = next((
             r for r in rows
             if int(r.get("id") or 0) != int(source_job_id)
@@ -3160,6 +4093,9 @@ def update_job(
     completed_at: str | None = None,
     account_id: int | None = None,
     network_traffic: dict | None = None,
+    progress: int | None = None,
+    stage: str | None = None,
+    progress_message: str | None = None,
 ) -> None:
     with _LOCK:
         rows = _load_jobs()
@@ -3180,12 +4116,32 @@ def update_job(
             row["account_id"] = account_id
         if network_traffic is not None:
             row["network_traffic"] = dict(network_traffic)
+        if progress is not None:
+            row["progress"] = max(0, min(100, int(progress)))
+        if stage is not None:
+            row["stage"] = str(stage)
+        if progress_message is not None:
+            row["progress_message"] = str(progress_message)
         _save_jobs(rows)
 
 
 def list_jobs(limit: int = 100) -> list[dict]:
     with _LOCK:
         return [dict(r) for r in _query_collection("jobs", limit=limit)]
+
+
+def list_active_jobs(limit: int = 1000) -> list[dict]:
+    """按最新任务优先返回仍需用户关注的任务。"""
+    with _LOCK:
+        _ensure_sqlite()
+        with closing(_sqlite_conn()) as conn:
+            rows = conn.execute(
+                "SELECT payload FROM registration_jobs "
+                "WHERE status IN ('pending', 'running', 'paused', 'stopping') "
+                "ORDER BY id DESC LIMIT ?",
+                (max(1, min(5000, int(limit))),),
+            )
+            return [json.loads(row["payload"]) for row in rows]
 
 
 def list_jobs_page(limit: int = 50, offset: int = 0) -> dict:
@@ -3215,33 +4171,36 @@ def job_status_counts() -> dict:
                 "SELECT status, COUNT(*) AS n FROM registration_jobs GROUP BY status"
             )
         }
-    counts["active"] = sum(int(counts.get(status, 0) or 0) for status in ("pending", "running", "stopping"))
+    counts["active"] = sum(int(counts.get(status, 0) or 0) for status in ("pending", "running", "paused", "stopping"))
     return counts
 
 
 def get_job(job_id: int) -> dict | None:
     with _LOCK:
-        row = next((r for r in _load_jobs() if int(r.get("id") or 0) == int(job_id)), None)
-        return dict(row) if row else None
+        _ensure_sqlite()
+        with closing(_sqlite_conn()) as conn:
+            row = conn.execute(
+                "SELECT payload FROM registration_jobs WHERE id=? LIMIT 1", (int(job_id),)
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
 
 
 def get_successful_retry_for_job(job_id: int) -> dict | None:
     """返回同一任务链中已成功的其他重试任务，用于保留原任务历史状态并阻止重复重试。"""
     with _LOCK:
-        rows = _load_jobs()
-        source = next((r for r in rows if int(r.get("id") or 0) == int(job_id)), None)
+        source = get_job(job_id)
         if source is None:
             return None
         root_id = int(source.get("root_job_id") or source.get("id") or 0)
-        matches = [
-            r for r in rows
-            if int(r.get("id") or 0) != int(job_id)
-            and int(r.get("root_job_id") or 0) == root_id
-            and r.get("status") == "success"
-        ]
-        if not matches:
-            return None
-        return dict(max(matches, key=lambda r: int(r.get("id") or 0)))
+        with closing(_sqlite_conn()) as conn:
+            row = conn.execute(
+                """SELECT payload FROM registration_jobs
+                   WHERE status='success'
+                     AND COALESCE(CAST(json_extract(payload, '$.root_job_id') AS INTEGER), 0)=?
+                     AND id != ? ORDER BY id DESC LIMIT 1""",
+                (root_id, int(job_id)),
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
 
 
 def delete_job(job_id: int, *, delete_log: bool = True, allow_running: bool = False) -> bool:
@@ -3254,7 +4213,7 @@ def delete_job(job_id: int, *, delete_log: bool = True, allow_running: bool = Fa
         idx = next((i for i, r in enumerate(rows) if int(r.get("id") or 0) == int(job_id)), None)
         if idx is None:
             return False
-        if not allow_running and rows[idx].get("status") in ("running", "stopping"):
+        if not allow_running and rows[idx].get("status") in ("running", "paused", "stopping"):
             return False
         row = rows.pop(idx)
         _save_jobs(rows)

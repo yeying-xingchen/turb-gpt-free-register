@@ -65,6 +65,10 @@ class _DummyQueueSlot:
 class AccountLivenessTests(unittest.TestCase):
     def setUp(self):
         _DummyBrowserSession.created = []
+        for name in ("_account_registration_password", "_account_totp_secret"):
+            patcher = patch.object(liveness, name, return_value="")
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_preflight_preserves_explicit_direct_route_and_skips_providers(self):
         with patch.object(liveness, "BrowserSession", _DummyBrowserSession), \
@@ -233,10 +237,11 @@ class AccountLivenessTests(unittest.TestCase):
         slot = _DummyQueueSlot()
         failed = {"ok": False, "status": "failed", "error": "HTTP Error 403: blocked"}
         success = {"ok": True, "status": "live", "access_token": "new-token"}
+        persisted = []
         with patch.object(live_service, "_QUEUE_SLOTS", slot), \
              patch.object(live_service.db, "mark_account_live_check_running", return_value=True), \
              patch.object(live_service.db, "get_account", return_value={"email_source": "remail"}), \
-             patch.object(live_service.db, "update_account_liveness"), \
+             patch.object(live_service.db, "update_account_liveness", side_effect=lambda acc_id, result: persisted.append((acc_id, dict(result)))) as update, \
              patch.object(live_service, "_append_log"), \
              patch.object(live_service, "resolve_plan_check_route", return_value={
                  "proxy": "socks5://proxy.example:1080",
@@ -260,7 +265,48 @@ class AccountLivenessTests(unittest.TestCase):
             check.call_args_list[0].kwargs["fingerprint_state"],
             check.call_args_list[1].kwargs["fingerprint_state"],
         )
+        self.assertEqual(result["network_route"], "direct")
+        self.assertIsNone(result["proxy_used"])
+        self.assertIsNone(result["upstream_proxy_used"])
+        self.assertIn("403", result["proxy_fallback_reason"])
+        update.assert_called_once_with(1, result)
+        self.assertEqual(persisted, [(1, result)])
         self.assertTrue(slot.released)
+
+    def test_direct_success_clears_previous_proxy_record(self):
+        row = {"id": 1, "email": "user@example.com", "live_check_proxy_used": "old-proxy"}
+        with patch.object(liveness.db, "_load_accounts", return_value=[row]), \
+             patch.object(liveness.db, "_save_accounts"):
+            liveness.db.update_account_liveness(1, {
+                "ok": True, "access_token": "new-token", "proxy_used": None,
+            })
+        self.assertIsNone(row["live_check_proxy_used"])
+        self.assertEqual(row["access_token"], "new-token")
+
+    def test_credential_and_transient_errors_never_mark_account_dead(self):
+        for status, code, expected in (
+            (401, "invalid_username_or_password", "密码"),
+            (401, "invalid_otp", "验证码"),
+            (403, "", "认证请求被拒绝"),
+            (429, "rate_limit_exceeded", "限流"),
+        ):
+            with self.subTest(status=status, code=code):
+                error = RuntimeError("HTTP failure")
+                error.response = SimpleNamespace(
+                    status_code=status, text='{"error":{"code":"' + code + '"}}',
+                )
+                result = liveness._failure_result(error, "now")
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["http_status"], status)
+                self.assertIn(expected, result["error"])
+                self.assertEqual(result["retryable"], status in {403, 429})
+
+    def test_dead_account_http_response_is_not_retried(self):
+        error = RuntimeError("HTTP 403")
+        error.response = SimpleNamespace(
+            status_code=403, text='{"error":{"code":"account_deactivated"}}',
+        )
+        self.assertFalse(liveness._is_retryable_network_error(error))
 
 
 if __name__ == "__main__":

@@ -7,24 +7,27 @@ Flask 本地控制台。
     core.registration_service   —— 线程池批量注册 + 任务日志
     webui.config_editor         —— 安全读写 config/*.py
 
-所有接口返回 JSON；前端是单文件 templates/index.html（原生 JS + fetch）。
+所有接口返回 JSON；前端使用 Jinja 模板及可缓存的原生 JS/CSS 静态资源。
 默认绑定 127.0.0.1，仅本地访问。
 """
 import logging
-import gzip
 import json
 import threading
 import time
 import uuid
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
-from flask import Flask, Response, jsonify, make_response, render_template, request
+from flask import Flask, Response, jsonify, make_response, render_template, request, url_for
 import pyotp
 
 from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service
 from webui.auth import init_auth, register_auth_routes
+from webui.assets import init_ui_assets
 from core import registration_service as svc
+from core.account_import import parse_existing_account_text
 from webui import config_editor
+from webui.extract_routes import register_extract_routes
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +116,7 @@ def _compact_account_for_list(row: dict) -> dict:
 
     # 这些是列表固定列直接展示字段。
     for key in (
-        "user_name", "email_source", "original_email", "note", "archived", "created_at",
+        "user_name", "email_source", "original_email", "note", "group_name", "archived", "created_at",
         "plan_type", "current_plan_type", "plus_trial_eligible",
         "eligible_promo_campaigns", "plus_trial_discount_percentage",
         "plan_check_status", "codex_status", "codex_agent_status",
@@ -131,6 +134,11 @@ def _compact_account_for_list(row: dict) -> dict:
         "plan_check_error", "plan_expires_at", "plan_renews_at", "renews_at",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
+        "is_delinquent",
+        "subscription_active_start", "subscription_active_until",
+        "subscription_became_delinquent_at", "subscription_grace_period_end_at",
+        "subscription_billing_currency", "subscription_billing_period", "subscription_plan_type",
+        "subscription_checked_at", "subscription_http_status", "subscription_error",
         "token_expired", "token_expires_at",
         # 查活状态。
         "live_check_status", "live_check_error", "live_checked_at",
@@ -211,7 +219,8 @@ def _compact_job_for_list(row: dict) -> dict:
         "status": row.get("status"),
     }
     for key in (
-        "parent_job_id", "retry_attempt", "email", "started_at", "completed_at",
+        "job_type", "parent_job_id", "retry_attempt", "email", "started_at", "completed_at", "created_at",
+        "progress", "stage", "progress_message",
         "display_status", "retryable", "retry_action", "retry_label",
         "manual_otp_required",
     ):
@@ -234,8 +243,42 @@ def _job_status_counts(rows: list[dict]) -> dict:
     for row in rows:
         status = str(row.get("status") or "unknown")
         counts[status] = counts.get(status, 0) + 1
-    counts["active"] = sum(int(counts.get(s, 0) or 0) for s in ("pending", "running", "stopping"))
+    counts["active"] = sum(int(counts.get(s, 0) or 0) for s in ("pending", "running", "paused", "stopping"))
     return counts
+
+
+def _enqueue_plan_checks_after_redeem(accounts: list[dict]) -> None:
+    """交易发货后异步补查套餐：只入队，不阻塞兑换响应，失败静默。
+
+    accounts 元素来自 db.redeem_plus_accounts 返回的 {"email", ...}。
+    兑换发货不依赖套餐结果（先发货），查套餐只作为后续状态刷新。
+    """
+    if not accounts:
+        return
+    try:
+        for acc in accounts:
+            email = str(acc.get("email") or "").strip()
+            account_id = int(acc.get("account_id") or 0)
+            row = db.get_account(account_id) if account_id else None
+            if not row and email:
+                row = db.get_account_by_email(email)
+            if not row:
+                continue
+            email = str(row.get("email") or email).strip()
+            access_token = str(row.get("access_token") or "").strip()
+            if not access_token:
+                continue
+            try:
+                plan_check_service.enqueue_account_plan_check(
+                    account_id=int(row.get("id") or 0),
+                    email=email,
+                    access_token=access_token,
+                    trigger="redeem_after_ship",
+                )
+            except Exception:
+                logger.warning("兑换后查套餐入队失败: %s", email, exc_info=True)
+    except Exception:
+        logger.exception("兑换后查套餐失败")
 
 
 def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, running_fn=None) -> dict:
@@ -256,36 +299,15 @@ def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, runni
 
 def create_app(auth_code: str | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates")
+    app.config["AUTH_PUBLIC_ENDPOINTS"] = {
+        "public_redeem_page",
+        "api_redeem",
+        "public_redeem_download",
+        "api_redeem_public_stock",
+    }
     _prepared_downloads: dict[str, dict] = {}
 
-    @app.after_request
-    def _compress_json_response(response: Response):
-        """默认对 JSON API 响应启用 gzip，减少本地前端拉取大列表的传输体积。"""
-        accept_encoding = (request.headers.get("Accept-Encoding") or "").lower()
-        # 默认开启 gzip：浏览器会自动带 gzip；本地脚本未带 Accept-Encoding 时也压缩。
-        # 只有客户端明确声明 identity 且没有 gzip 时，才按明文返回。
-        gzip_allowed = ("gzip" in accept_encoding) or (not accept_encoding)
-        if (
-            response.direct_passthrough
-            or response.headers.get("Content-Encoding")
-            or not gzip_allowed
-        ):
-            return response
-        mimetype = (response.mimetype or "").lower()
-        if mimetype != "application/json":
-            return response
-        data = response.get_data()
-        if not data or len(data) < 1024:
-            return response
-        compressed = gzip.compress(data, compresslevel=6)
-        if len(compressed) >= len(data):
-            return response
-        response.set_data(compressed)
-        response.headers["Content-Encoding"] = "gzip"
-        response.headers["Content-Length"] = str(len(compressed))
-        vary = response.headers.get("Vary")
-        response.headers["Vary"] = "Accept-Encoding" if not vary else f"{vary}, Accept-Encoding"
-        return response
+    init_ui_assets(app)
 
     def _put_prepared_download(content: bytes, filename: str, mimetype: str = "application/zip") -> str:
         now = time.time()
@@ -302,11 +324,10 @@ def create_app(auth_code: str | None = None) -> Flask:
         }
         return download_id
 
-    @app.get("/api/downloads/<download_id>")
-    def api_prepared_download(download_id: str):
+    def _take_prepared_download(download_id: str):
         item = _prepared_downloads.pop(str(download_id or ""), None)
         if not item:
-            return jsonify({"ok": False, "error": "下载已过期或不存在，请重新生成"}), 404
+            return None
         content = item.get("content") or b""
         filename = item.get("filename") or "download.zip"
         mimetype = item.get("mimetype") or "application/octet-stream"
@@ -323,8 +344,23 @@ def create_app(auth_code: str | None = None) -> Flask:
             },
         )
 
+    @app.get("/api/downloads/<download_id>")
+    def api_prepared_download(download_id: str):
+        item = _take_prepared_download(download_id)
+        if item is None:
+            return jsonify({"ok": False, "error": "下载已过期或不存在，请重新生成"}), 404
+        return item
+
+    @app.get("/api/redeem/download/<download_id>", endpoint="public_redeem_download")
+    def api_public_redeem_download(download_id: str):
+        item = _take_prepared_download(download_id)
+        if item is None:
+            return jsonify({"ok": False, "error": "下载已过期或不存在，请重新兑换"}), 404
+        return item
+
     init_auth(app, auth_code=auth_code)
     register_auth_routes(app)
+    register_extract_routes(app)
     recovered_plan_checks = db.recover_interrupted_plan_checks()
     if recovered_plan_checks:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的套餐查询状态", recovered_plan_checks)
@@ -363,9 +399,178 @@ def create_app(auth_code: str | None = None) -> Flask:
             resp.set_cookie("ui_mode", ui_mode, max_age=60 * 60 * 24 * 365, samesite="Lax")
         return resp
 
+    @app.get("/redeem", endpoint="public_redeem_page")
+    def public_redeem_page():
+        return render_template("redeem.html")
+
+    @app.post("/api/redeem", endpoint="api_redeem")
+    def api_redeem():
+        data = request.get_json(silent=True) or {}
+        code = str(data.get("cdk") or data.get("code") or "").strip()
+        if not code:
+            return jsonify({"ok": False, "error": "请输入 CDK"}), 400
+        try:
+            result = db.redeem_plus_accounts(code)
+        except db.RedeemError as exc:
+            return jsonify({"ok": False, "code": exc.code, "error": str(exc)}), exc.status
+        except Exception:
+            logger.exception("公开兑换失败")
+            return jsonify({"ok": False, "error": "兑换服务暂时不可用，请稍后重试"}), 500
+
+        lines = [
+            f"# ChatGPT 登录凭据（分组：{result.get('group_name') or '默认分组'}）",
+            "# 格式：邮箱---密码---2FA密钥（没有 2FA 时最后一段为空）",
+            *result["lines"],
+            "",
+        ]
+        content = "\n".join(lines).encode("utf-8")
+        filename = f"chatgpt-credentials-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        download_id = _put_prepared_download(content, filename, "text/plain")
+        response = jsonify({
+            "ok": True,
+            "count": result["count"],
+            "remaining": result["remaining"],
+            "group_name": result.get("group_name") or "",
+            "download_url": url_for("public_redeem_download", download_id=download_id),
+            "filename": filename,
+            "message": f"兑换成功，已准备 {result['count']} 个登录凭据",
+        })
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+
+        # 发货优先：库存已扣减、凭据已生成，这里再异步补查套餐，不阻塞公开兑换响应。
+        _enqueue_plan_checks_after_redeem(result.get("accounts") or [])
+        return response
+
     # ----------------------------------------------------------
-    # 统计概览
+    # Plus 兑换管理（管理员）
     # ----------------------------------------------------------
+    @app.get("/api/redeem/codes")
+    def api_redeem_codes():
+        raw_limit = str(request.args.get("limit", "200") or "").strip().lower()
+        if raw_limit in {"", "all", "全部"}:
+            limit = None
+        else:
+            try:
+                limit = max(1, min(1000, int(raw_limit)))
+            except (TypeError, ValueError):
+                limit = 200
+        group = str(request.args.get("group") or "").strip() or None
+        return jsonify({
+            "ok": True,
+            "items": db.list_redeem_codes(limit=limit),
+            "stock": db.redeem_stock_summary(group_name=group),
+            "groups": db.list_account_groups(),
+        })
+
+    @app.post("/api/redeem/codes")
+    def api_redeem_codes_create():
+        data = request.get_json(silent=True) or {}
+        try:
+            quantity = int(data.get("quantity", 1))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "兑换数量必须是整数"}), 400
+
+        account_group = str(data.get("account_group") or data.get("group") or "").strip()
+        if not account_group:
+            return jsonify({"ok": False, "error": "创建 CDK 时必须指定兑换分组"}), 400
+
+        # 永久有效：expires_at 为空、expires_in_days 为空或 0 时表示不设过期。
+        expires_at = str(data.get("expires_at") or "").strip() or None
+        expires_in_days = data.get("expires_in_days")
+        if not expires_at and expires_in_days not in (None, ""):
+            try:
+                days = int(expires_in_days)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "有效期天数必须是整数"}), 400
+            if days < 0 or days > 3650:
+                return jsonify({"ok": False, "error": "有效期需在 0~3650 天之间，0 表示永不过期"}), 400
+            if days:
+                expires_at = (datetime.now() + timedelta(days=days)).isoformat(timespec="seconds")
+
+        try:
+            item = db.create_redeem_code(
+                quantity=quantity,
+                expires_at=expires_at,
+                note=str(data.get("note") or ""),
+                account_group=account_group,
+            )
+            stock = db.redeem_stock_summary(group_name=account_group)
+        except db.RedeemError as exc:
+            return jsonify({"ok": False, "code": exc.code, "error": str(exc)}), exc.status
+        return jsonify({"ok": True, "item": item, "stock": stock, "groups": db.list_account_groups()}), 201
+
+    @app.post("/api/redeem/codes/<int:code_id>/revoke")
+    def api_redeem_code_revoke(code_id: int):
+        item = db.revoke_redeem_code(code_id)
+        if item is None:
+            return jsonify({"ok": False, "error": "兑换码不存在"}), 404
+        return jsonify({"ok": True, "item": item})
+
+    @app.get("/api/redeem/public-stock")
+    def api_redeem_public_stock():
+        """公开库存页：只返回管理员标记为公开展示的分组库存，不暴露账号明细。"""
+        groups = db.list_account_groups(public_only=True)
+        payload = [{
+            "group_name": g["group_name"],
+            "total": g["total"],
+            "redeemable": g["redeemable"],
+        } for g in groups]
+        return jsonify({"ok": True, "groups": payload})
+
+    # ----------------------------------------------------------
+    # 账号分组管理（管理员）
+    # ----------------------------------------------------------
+    @app.get("/api/account-groups")
+    def api_account_groups_list():
+        return jsonify({"ok": True, "groups": db.list_account_groups()})
+
+    @app.post("/api/account-groups/meta")
+    def api_account_group_meta_set():
+        """设置分组元数据：CDK 前缀、是否公开展示库存。Body {group_name, redeem_prefix?, public_stock?}。"""
+        data = request.get_json(silent=True) or {}
+        group_name = str(data.get("group_name") or "").strip()
+        if not group_name:
+            return jsonify({"ok": False, "error": "group_name 必填"}), 400
+        redeem_prefix = data.get("redeem_prefix")
+        public_stock = data.get("public_stock")
+        if redeem_prefix is not None and len(str(redeem_prefix).strip()) > 16:
+            return jsonify({"ok": False, "error": "CDK 前缀最长 16 个字符"}), 400
+        try:
+            meta = db.update_account_group_meta(
+                group_name,
+                redeem_prefix=str(redeem_prefix) if redeem_prefix is not None else None,
+                public_stock=(str(public_stock).strip().lower() in {"1", "true", "yes", "on"}) if isinstance(public_stock, str) else bool(public_stock) if public_stock is not None else None,
+            )
+        except (ValueError, db.RedeemError) as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "meta": meta, "groups": db.list_account_groups()})
+
+    @app.post("/api/account-groups/rename")
+    def api_account_group_rename():
+        data = request.get_json(silent=True) or {}
+        old_name = str(data.get("old_name") or "").strip()
+        new_name = str(data.get("new_name") or "").strip()
+        if not old_name or not new_name:
+            return jsonify({"ok": False, "error": "old_name/new_name 必填"}), 400
+        try:
+            count, name = db.rename_account_group(old_name, new_name)
+        except db.RedeemError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "moved": count, "group_name": name, "groups": db.list_account_groups()})
+
+    @app.post("/api/account-groups/delete")
+    def api_account_group_delete():
+        data = request.get_json(silent=True) or {}
+        group_name = str(data.get("group_name") or "").strip()
+        merge_to = str(data.get("merge_to") or "").strip() or None
+        if not group_name:
+            return jsonify({"ok": False, "error": "group_name 必填"}), 400
+        try:
+            count, destination = db.delete_account_group(group_name, merge_to=merge_to)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify({"ok": True, "moved": count, "merged_to": destination, "groups": db.list_account_groups()})
+
     @app.get("/api/summary")
     def api_summary():
         from config import email as _email_cfg
@@ -412,6 +617,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             or ""
         ).strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
+        group_filter = str(request.args.get("group", default="") or "").strip()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
         # 新分页接口：传 page/page_size 或 paged=1 时返回 {items,total,page,page_size,...}
@@ -422,11 +628,94 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter)
             result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
-        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter))
+        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter))
+
+    @app.post("/api/accounts/lookup")
+    def api_accounts_lookup():
+        """按邮箱精确查找账号，供前端批量选中。"""
+        data = request.get_json(silent=True) or {}
+        raw_emails = data.get("emails")
+        if isinstance(raw_emails, str):
+            raw_emails = (
+                raw_emails.replace(",", "\n")
+                .replace("，", "\n")
+                .replace(";", "\n")
+                .replace("；", "\n")
+                .splitlines()
+            )
+        if not isinstance(raw_emails, list):
+            return jsonify({"ok": False, "error": "emails 必须是数组"}), 400
+
+        emails = []
+        seen = set()
+        for raw in raw_emails:
+            email = str(raw or "").strip()
+            key = email.casefold()
+            if not email or key in seen:
+                continue
+            seen.add(key)
+            emails.append(email)
+        if not emails:
+            return jsonify({"ok": False, "error": "请至少输入一个邮箱"}), 400
+        if len(emails) > 5000:
+            return jsonify({"ok": False, "error": "单次最多查找 5000 个邮箱"}), 400
+
+        archived = str(data.get("archived") or "0").strip().lower()
+        plan_filter = str(data.get("plan") or "").strip().lower()
+        codex_filter = str(data.get("codex_status") or "").strip().lower()
+        totp_filter = str(data.get("totp_status") or "").strip().lower()
+        group_filter = str(data.get("group") or "").strip()
+        date_from = str(data.get("date_from") or "").strip() or None
+        date_to = str(data.get("date_to") or "").strip() or None
+        rows = db.find_accounts_by_emails(
+            emails,
+            archived=archived,
+            plan_filter=plan_filter,
+            codex_filter=codex_filter,
+            date_from=date_from,
+            date_to=date_to,
+            totp_filter=totp_filter,
+            group_filter=group_filter,
+        )
+
+        by_email = {}
+        by_original_email = {}
+        for row in rows:
+            current = str(row.get("email") or "").strip().casefold()
+            original = str(row.get("original_email") or "").strip().casefold()
+            if current and current not in by_email:
+                by_email[current] = row
+            if original and original not in by_original_email:
+                by_original_email[original] = row
+
+        matches = []
+        not_found = []
+        for requested in emails:
+            key = requested.casefold()
+            row = by_email.get(key)
+            matched_by = "email"
+            if row is None:
+                row = by_original_email.get(key)
+                matched_by = "original_email"
+            if row is None:
+                not_found.append(requested)
+                continue
+            item = _compact_account_for_list(row)
+            item["requested_email"] = requested
+            item["matched_by"] = matched_by
+            matches.append(item)
+
+        return jsonify({
+            "ok": True,
+            "matches": matches,
+            "matched_count": len(matches),
+            "not_found": not_found,
+            "not_found_count": len(not_found),
+        })
 
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
@@ -442,6 +731,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             or ""
         ).strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
+        group_filter = str(request.args.get("group", default="") or "").strip()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
         page_arg = request.args.get("page", default=None, type=int)
@@ -450,13 +740,46 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 
+
+    @app.post("/api/accounts/import")
+    def api_accounts_import():
+        """导入已有账号：邮箱---密码---2FA---AT，每行一个账号。"""
+        data = request.get_json(silent=True) or {}
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return jsonify({"ok": False, "error": "请先粘贴已有账号内容"}), 400
+        if len(text.encode("utf-8")) > 10 * 1024 * 1024:
+            return jsonify({"ok": False, "error": "单次导入内容不能超过 10 MiB"}), 400
+
+        records, parse_errors = parse_existing_account_text(text, max_lines=5000)
+        if not records:
+            return jsonify({
+                "ok": False,
+                "error": "未解析到有效账号行，请使用：邮箱---密码---2FA---AT",
+                "parsed": 0,
+                "inserted": 0,
+                "skipped": len(parse_errors),
+                "errors": parse_errors,
+            }), 400
+
+        inserted, skipped_details = db.import_existing_accounts(records)
+        details = parse_errors + skipped_details
+        return jsonify({
+            "ok": True,
+            "parsed": len(records),
+            "inserted": inserted,
+            "skipped": len(details),
+            "errors": parse_errors,
+            "skipped_details": skipped_details,
+            "details": details,
+        })
 
     @app.get("/api/accounts/<int:acc_id>/secret")
     def api_account_secret(acc_id: int):
@@ -819,6 +1142,49 @@ def create_app(auth_code: str | None = None) -> Flask:
             "skipped_count": len(skipped),
         })
 
+    @app.post("/api/accounts/group-bulk")
+    def api_accounts_group_bulk():
+        """批量设置账号分组。Body {account_ids: [...], group_name: "..."}。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        group_name = str(data.get("group_name") or "").strip()
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 5000:
+            return jsonify({"ok": False, "error": "单次最多设置分组 5000 个账号"}), 400
+        if not group_name:
+            return jsonify({"ok": False, "error": "group_name 必填"}), 400
+        if len(group_name) > 60:
+            return jsonify({"ok": False, "error": "分组名最长 60 个字符"}), 400
+
+        account_ids = []
+        skipped = []
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            account_ids.append(acc_id)
+        try:
+            updated, db_skipped = db.update_accounts_group(account_ids=account_ids, group_name=group_name)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        skipped.extend(db_skipped)
+        return jsonify({
+            "ok": True,
+            "updated": updated,
+            "updated_count": len(updated),
+            "group_name": group_name,
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+            "groups": db.list_account_groups(),
+        })
+
     @app.post("/api/accounts/check-live-bulk")
     def api_accounts_check_live_bulk():
         """批量查活：加入后台队列；协议 BrowserSession 指纹环境重新登录并刷新最新 AT。"""
@@ -992,10 +1358,14 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/extract-link/cdk")
     def api_extract_link_cdk():
-        """查询当前配置或传入 CDK 的剩余次数。"""
+        """查询当前或指定服务商的 CDK 信息；旧版 query 参数保持兼容。"""
         code = (request.args.get("code") or "").strip() or None
+        provider_raw = request.args.get("provider_id")
+        cdk_raw = request.args.get("cdk_id")
         try:
-            return jsonify({"ok": True, **extract_link_service.query_cdk(cdk=code)})
+            provider_id = int(provider_raw) if provider_raw not in (None, "") else None
+            cdk_id = int(cdk_raw) if cdk_raw not in (None, "") else None
+            return jsonify({"ok": True, **extract_link_service.query_cdk(provider_id=provider_id, cdk_id=cdk_id, cdk=code)})
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
 
@@ -1027,6 +1397,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                 trigger="manual",
                 link_type=data.get("link_type"),
                 cdk=data.get("cdk"),
+                provider_id=data.get("provider_id"),
+                cdk_id=data.get("cdk_id"),
+                proxy_url=data.get("proxyUrl") or data.get("proxy_url"),
+                payment_amount=data.get("payment_amount", 0),
             )
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
@@ -1080,7 +1454,11 @@ def create_app(auth_code: str | None = None) -> Flask:
                     trigger="manual_bulk",
                     link_type=data.get("link_type"),
                     cdk=data.get("cdk"),
-                )
+                 provider_id=data.get("provider_id"),
+                 cdk_id=data.get("cdk_id"),
+                 proxy_url=data.get("proxyUrl") or data.get("proxy_url"),
+                 payment_amount=data.get("payment_amount", 0),
+                                     )
             except Exception as exc:
                 failed.append({"id": acc_id, "email": email, "error": f"{type(exc).__name__}: {exc}"})
                 continue
@@ -2521,6 +2899,22 @@ def create_app(auth_code: str | None = None) -> Flask:
             row.update(svc.get_retry_info(row))
         return jsonify(rows)
 
+    @app.get("/api/jobs/active")
+    def api_jobs_active():
+        """任务中心快照：只返回排队、运行、暂停和停止中的任务。"""
+        from config import email as _email_cfg
+        manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
+        rows = db.list_active_jobs(limit=5000)
+        for row in rows:
+            row["manual_otp_required"] = manual_otp_required
+            row.update(svc.get_retry_info(row))
+        return jsonify({
+            "ok": True,
+            "items": [_compact_job_for_list(row) for row in rows],
+            "total": len(rows),
+            "status_counts": db.job_status_counts(),
+        })
+
     @app.post("/api/jobs")
     def api_jobs_create():
         """启动批量注册：body {count, workers}。"""
@@ -2722,6 +3116,27 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": result.get("error") or "停止失败"}), int(result.get("status") or 400)
         return jsonify(result)
 
+    @app.post("/api/jobs/<int:job_id>/pause")
+    def api_job_pause(job_id: int):
+        result = svc.pause_job(job_id)
+        if not result.get("ok"):
+            return jsonify({"ok": False, "error": result.get("error") or "暂停失败"}), int(result.get("status") or 400)
+        return jsonify(result)
+
+    @app.post("/api/jobs/<int:job_id>/resume")
+    def api_job_resume(job_id: int):
+        result = svc.resume_job(job_id)
+        if not result.get("ok"):
+            return jsonify({"ok": False, "error": result.get("error") or "恢复失败"}), int(result.get("status") or 400)
+        return jsonify(result)
+
+    @app.post("/api/jobs/<int:job_id>/cancel")
+    def api_job_cancel(job_id: int):
+        result = svc.request_stop_job(job_id)
+        if not result.get("ok"):
+            return jsonify({"ok": False, "error": result.get("error") or "取消失败"}), int(result.get("status") or 400)
+        return jsonify(result)
+
     @app.post("/api/jobs/<int:job_id>/retry")
     def api_job_retry(job_id: int):
         """重试失败/停止/取消任务；服务端自动判断完整注册或 Codex 补跑。"""
@@ -2786,8 +3201,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         job = db.get_job(job_id)
         if not job:
             return jsonify({"ok": False, "error": "任务不存在"}), 404
-        if job.get("status") in ("running", "stopping"):
-            return jsonify({"ok": False, "error": "运行中的任务不能删除，请等待完成后再删"}), 409
+        if job.get("status") in ("running", "paused", "stopping"):
+            return jsonify({"ok": False, "error": "进行中的任务不能删除，请先取消或等待完成"}), 409
         deleted = db.delete_job(job_id, delete_log=True, allow_running=False)
         if not deleted:
             return jsonify({"ok": False, "error": "任务不存在或已开始运行"}), 409
@@ -2820,8 +3235,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             if not job:
                 skipped.append({"id": job_id, "reason": "任务不存在"})
                 continue
-            if job.get("status") in ("running", "stopping"):
-                skipped.append({"id": job_id, "reason": "运行中，不能删除"})
+            if job.get("status") in ("running", "paused", "stopping"):
+                skipped.append({"id": job_id, "reason": "进行中，不能删除"})
                 continue
             if db.delete_job(job_id, delete_log=True, allow_running=False):
                 deleted.append(job_id)

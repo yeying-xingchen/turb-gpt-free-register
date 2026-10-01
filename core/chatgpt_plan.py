@@ -19,6 +19,7 @@ from core.session import BrowserSession, close_browser_session
 logger = logging.getLogger(__name__)
 
 ACCOUNTS_CHECK_PATH = "/backend-api/accounts/check/v4-2023-04-27"
+SUBSCRIPTIONS_PATH = "/backend-api/subscriptions"
 
 
 def now_iso() -> str:
@@ -207,20 +208,97 @@ def token_claims(token: str) -> dict:
     }
 
 
-def _common_headers(env: BrowserSession, token: str, claims: dict | None = None) -> dict[str, str]:
-    """生成与 ChatGPT 登录态前端一致的套餐查询头。"""
+def _common_headers(
+    env: BrowserSession,
+    token: str,
+    claims: dict | None = None,
+    *,
+    target_path: str = ACCOUNTS_CHECK_PATH,
+) -> dict[str, str]:
+    """生成与 ChatGPT 登录态前端一致的 GET 请求头。"""
     headers = env.get_chatgpt_headers(referer="https://chatgpt.com/")
     # GET 导航后的前端 fetch 不主动设置 content-type。
     headers.pop("content-type", None)
     headers.update({
         "authorization": f"Bearer {normalize_token(token)}",
-        "x-openai-target-path": ACCOUNTS_CHECK_PATH,
-        "x-openai-target-route": ACCOUNTS_CHECK_PATH,
+        "x-openai-target-path": target_path,
+        "x-openai-target-route": target_path,
     })
     account_id = str((claims or {}).get("account_id") or "").strip()
     if account_id:
         headers["chatgpt-account-id"] = account_id
     return headers
+
+
+def parse_subscription(data: dict) -> dict:
+    """提取订阅接口中的订阅和挽留期字段。"""
+    if not isinstance(data, dict):
+        raise ValueError("订阅响应不是 JSON 对象")
+    return {
+        "subscription_active_start": data.get("active_start"),
+        "subscription_active_until": data.get("active_until"),
+        "subscription_became_delinquent_at": data.get("became_delinquent_timestamp"),
+        "subscription_grace_period_end_at": data.get("grace_period_end_timestamp"),
+        "subscription_billing_currency": data.get("billing_currency"),
+        "subscription_billing_period": data.get("billing_period"),
+        "subscription_plan_type": data.get("plan_type"),
+    }
+
+
+def _fetch_subscription(
+    env: BrowserSession,
+    token: str,
+    account_id: str,
+    *,
+    timeout: float,
+) -> dict:
+    """读取订阅详情；订阅查询是套餐查询的可选补充。"""
+    checked_at = now_iso()
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        return {
+            "subscription_checked_at": checked_at,
+            "subscription_error": "订阅查询缺少 account_id",
+        }
+
+    url = f"https://chatgpt.com{SUBSCRIPTIONS_PATH}?account_id={quote(account_id)}"
+    try:
+        resp = env.get(
+            url,
+            headers=_common_headers(
+                env,
+                token,
+                {"account_id": account_id},
+                target_path=SUBSCRIPTIONS_PATH,
+            ),
+            allow_redirects=False,
+            timeout=timeout,
+        )
+        status = int(resp.status_code)
+        response_text = resp.text or ""
+        if not (200 <= status < 300):
+            return {
+                "subscription_checked_at": checked_at,
+                "subscription_http_status": status,
+                "subscription_error": f"HTTP {status}",
+            }
+        try:
+            data: Any = resp.json()
+        except Exception:
+            data = json.loads(response_text) if response_text.strip().startswith("{") else None
+        result = parse_subscription(data)
+        result.update({
+            "subscription_checked_at": checked_at,
+            "subscription_http_status": status,
+            "subscription_error": None,
+        })
+        return result
+    except Exception as exc:
+        logger.debug("订阅查询失败: %s: %s", type(exc).__name__, exc)
+        return {
+            "subscription_checked_at": checked_at,
+            "subscription_error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def parse_accounts_check(data: dict, *, token: str = "") -> dict:
@@ -503,6 +581,17 @@ def check_account_plan(
                         parsed["retryable"] = False
                         parsed["timezone_offset_min"] = effective_tz
                         parsed.update(route_meta)
+                        subscription_account_id = str(
+                            parsed.get("account_id") or claims.get("account_id") or ""
+                        ).strip()
+                        parsed.update(
+                            _fetch_subscription(
+                                env,
+                                token,
+                                subscription_account_id,
+                                timeout=timeout_seconds,
+                            )
+                        )
                         return parsed
             except Exception as exc:
                 logger.debug("套餐查询失败: %s: %s", type(exc).__name__, exc, exc_info=True)

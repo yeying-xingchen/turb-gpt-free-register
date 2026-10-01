@@ -1,0 +1,2179 @@
+    * { box-sizing: border-box; }
+    html { max-width: 100%; overflow-x: clip; }
+    :root {
+      --bg: #f8f9fa; --surface: #ffffff; --soft: #f7f9fc; --text: #172033;
+      --muted: #667085; --line: #d9e2ec; --blue: #2563eb; --green: #16803c;
+      --red: #c2413a; --amber: #b7791f;
+      --page-max-width: none;
+      --page-gutter: 24px;
+      --sidebar-width: 232px;
+      --sidebar-accent: #3b66f5;
+      --sidebar-accent-soft: #eef2ff;
+    }
+    body {
+      margin: 0; max-width: 100%; overflow-x: clip;
+      padding-left: var(--sidebar-width);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg); color: var(--text);
+    }
+    body.modal-open { overflow: hidden; position: fixed; left: 0; right: 0; width: 100%; }
+    h1, h2, h3, p { margin: 0; }
+    .stats {
+      display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .register-title {
+      margin: 0 0 12px; font-size: 22px; font-weight: 600;
+      letter-spacing: -0.02em; color: #303133;
+    }
+    .stat {
+      min-width: 0; padding: 14px;
+      border: 1px solid #ebeef5; border-radius: 8px;
+      background: #fff;
+    }
+    .stat-top {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+    }
+    .stat-top span {
+      min-width: 0; color: #909399; font-size: 12px; font-weight: 400; line-height: 1.4;
+    }
+    .stat-icon {
+      width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .stat-icon svg {
+      width: 16px; height: 16px; stroke: currentColor; fill: none;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .stat-icon--accounts { color: #409eff; background: color-mix(in srgb, #409eff 12%, transparent); }
+    .stat-icon--total { color: #409eff; background: color-mix(in srgb, #409eff 12%, transparent); }
+    .stat-icon--available { color: #67c23a; background: color-mix(in srgb, #67c23a 12%, transparent); }
+    .stat-icon--used { color: #e6a23c; background: color-mix(in srgb, #e6a23c 12%, transparent); }
+    .stat-icon--failed { color: #f56c6c; background: color-mix(in srgb, #f56c6c 12%, transparent); }
+    .stat strong {
+      display: block; margin-top: 10px; color: #303133; font-size: 20px;
+      font-weight: 600; line-height: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    @media (max-width: 1100px) {
+      .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 700px) {
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stat strong { font-size: 18px; }
+    }
+    main { width: calc(100% - var(--page-gutter) * 2); max-width: var(--page-max-width); min-width: 0; margin: 18px var(--page-gutter) 44px; display: grid; gap: 12px; }
+    main > div:not(.hidden) { display: grid; gap: 18px; }
+    section.card {
+      min-width: 0; max-width: 100%; overflow: hidden;
+      border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+      box-shadow: 0 8px 22px rgba(15,23,42,.06);
+    }
+    .head { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--soft); }
+    .head p { margin-top: 4px; color: var(--muted); font-size: 12px; }
+    .body { padding: 16px; }
+    label.fld { display: block; margin-bottom: 14px; font-size: 13px; font-weight: 700; }
+    label.fld .hint { display: block; margin-top: 3px; color: var(--muted); font-weight: 400; font-size: 12px; }
+    input, textarea, select {
+      width: 100%; min-height: 38px; border: 1px solid var(--line); border-radius: 6px;
+      padding: 8px 12px; font: inherit; margin-top: 6px;
+    }
+    textarea { min-height: 120px; font-family: ui-monospace, Consolas, monospace; font-size: 12px; resize: vertical; }
+    .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+    .row > * { flex: 1; min-width: 160px; }
+    .row label.fld { margin-bottom: 0; }
+    .row .action-cell {
+      flex: 0 0 auto; min-width: auto; align-self: flex-end;
+      display: inline-flex; gap: 8px; align-items: center;
+    }
+    .row .action-cell .btn { min-height: 38px; }
+    button.btn {
+      min-height: 38px; border: 1px solid var(--line); border-radius: 7px; background: #fff;
+      padding: 0 14px; font-weight: 800; cursor: pointer; font-size: 13px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap;
+    }
+    button.btn:hover { background: var(--soft); }
+    button.btn.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    button.btn.good { border-color: #2f855a; background: #edf8f1; color: #166534; }
+    button.btn.danger { border-color: #e7a3a0; color: #b3261e; background: #fff; }
+    button.btn:disabled { color: #98a2b3; cursor: not-allowed; background: #f2f4f7; border-color: var(--line); }
+    .toolbar { padding: 14px 16px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .search { flex: 1; min-width: min(420px, 100%); }
+    .search input { margin-top: 0; }
+    .buttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .inline-num { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap; }
+    .inline-num input { width:70px; min-height:38px; margin-top:0; padding:4px 8px; }
+    .table-wrap { overflow: auto; border-top: 1px solid #edf1f5; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
+    th { user-select: none; }
+    td.wrap, th.wrap { white-space: normal; word-break: break-word; }
+    td.center, th.center { text-align: center; }
+    .col-check { width: 42px; }
+    .col-id { width: 72px; }
+    .col-status { width: 96px; }
+    .col-email { width: 260px; }
+    .col-source { width: 96px; }
+    .col-token { width: 220px; }
+    .col-note { width: 180px; }
+    .col-small { width: 78px; }
+    .col-plan { width: 82px; }
+    .col-account { width: 180px; }
+    .col-time { width: 168px; }
+    .col-error { width: 320px; }
+    .col-actions { width: 220px; }
+    .jobs-table .col-actions { width: 330px; }
+    .accounts-table .col-token { width: 92px; }
+    .accounts-table .col-plan { width: 340px; }
+    .accounts-table .col-note { width: 180px; }
+    .accounts-table .col-agent { width: 220px; }
+    .accounts-table .col-actions { width: 360px; }
+    .accounts-table td:nth-child(6), .accounts-table th:nth-child(6) { overflow: visible; text-overflow: clip; }
+    .accounts-table td:nth-child(10), .accounts-table th:nth-child(10) { overflow: visible; text-overflow: clip; }
+
+    .accounts-table td:nth-child(8), .accounts-table th:nth-child(8) { overflow: visible; text-overflow: clip; }
+    .accounts-table td:nth-child(11), .accounts-table th:nth-child(11) { overflow: visible; text-overflow: clip; }
+    th { position: sticky; top: 0; background: #fbfcfe; color: #475467; z-index: 1; font-size: 12px; }
+    tr:hover td { background: #fbfdff; }
+    .main-cell { font-weight: 700; }
+    .sub-cell { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .mono { font-family: ui-monospace, "JetBrains Mono", Consolas, monospace; font-size: 12px; }
+    .muted { color: var(--muted); }
+    .pill { display: inline-flex; min-width: 48px; justify-content: center; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+    .status-available, .status-pending { color: var(--blue); background: #eef4ff; }
+    .status-used, .status-cancelled, .status-stopped, .status-disabled { color: #475467; background: #f2f4f7; }
+    .status-stopping { color: var(--amber); background: #fff7e6; }
+    .status-failed { color: var(--red); background: #fff0ef; }
+    .status-partial_success { color: #9a6700; background: #fff7d6; }
+    .status-running { color: var(--amber); background: #fff7e6; }
+    .status-success { color: var(--green); background: #e9f7ef; }
+    .extract-link-cell {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin-top: 4px; max-width: 100%;
+    }
+    .extract-link-cell .pill { min-width: auto; padding: 4px 10px; }
+    .extract-link-btn {
+      min-height: 26px; border: 1px solid #cfe7dc; border-radius: 999px;
+      padding: 0 10px; font-size: 12px; font-weight: 800; line-height: 1;
+      display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+      cursor: pointer; white-space: nowrap; transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
+    }
+    .extract-link-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(22,128,60,.10); }
+    .extract-copy { color: #166534; background: linear-gradient(180deg, #f0fbf5, #e3f5ea); border-color: #b9dfc9; }
+    .extract-qr { color: #1d4ed8; background: linear-gradient(180deg, #f3f7ff, #e8f0ff); border-color: #bdd0ff; }
+    .extract-link-expire {
+      flex-basis: 100%; margin-top: 1px; color: #667085; font-size: 12px;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .extract-link-error {
+      flex-basis: 100%; color: var(--red); font-size: 12px; line-height: 1.35;
+      max-width: 260px; white-space: normal; overflow-wrap: anywhere;
+    }
+    .agent-token-cell { margin-top: 4px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    .agent-token-cell button { min-height:24px; border:1px solid #b9dfc9; border-radius:999px; background:#f0fbf5; color:#166534; padding:0 9px; font-size:12px; font-weight:800; cursor:pointer; }
+    .agent-token-cell .agent-download { border-color:#bdd0ff; background:#f3f7ff; color:#1d4ed8; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .jobs-table td.actions-cell { text-align: center; vertical-align: middle; overflow: visible; }
+    .job-actions { justify-content: center; flex-wrap: nowrap; width: 100%; }
+    .job-actions button { flex: 0 0 auto; }
+    .actions button { min-height: 30px; border: 1px solid var(--line); border-radius: 6px; background: #fff; padding: 0 10px; font-weight: 800; cursor: pointer; font-size: 12px; line-height: 1; display:inline-flex; align-items:center; justify-content:center; white-space:nowrap; }
+    .actions button.primary { border-color: var(--blue); background: var(--blue); color: #fff; }
+    .actions button.good { border-color: #2f855a; background: #edf8f1; color: #166534; }
+    .actions button.danger { border-color: #e7a3a0; color: #b3261e; background: #fff; }
+
+    .toolbar-sep { display: none; }
+    .banner { padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 12px; }
+    .banner.warn { background: #fff7e6; color: #92600a; border: 1px solid #f3d99b; }
+    .banner.info { background: #eef4ff; color: #1d4ed8; border: 1px solid #c3d4fb; }
+    .log {
+      margin-top: 8px; background: #0c1322; color: #cbd5e1; border-radius: 6px; padding: 12px;
+      font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+      white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+      width: 100%; max-width: 100%; min-width: 0;
+      max-height: 320px; overflow: auto; line-height: 1.5;
+    }
+    #logPanel, #retryLogPanel, #liveLogPanel, #totpLogPanel, #emailChangeLogPanel, #qrPanel { min-width: 0; max-width: 100%; overflow-x: hidden; }
+    #logPanel:not(.hidden), #retryLogPanel:not(.hidden), #liveLogPanel:not(.hidden), #totpLogPanel:not(.hidden), #emailChangeLogPanel:not(.hidden), #qrPanel:not(.hidden) {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      z-index: 1000; display: block; width: min(1100px, calc(100vw - 48px));
+      max-height: min(760px, calc(100vh - 48px)); overflow: hidden;
+      padding: 16px; border: 1px solid var(--line); border-radius: 12px;
+      background: var(--surface); box-shadow: 0 0 0 9999px rgba(15,23,42,.45), 0 24px 70px rgba(15,23,42,.34);
+    }
+    #qrPanel:not(.hidden) { width: min(520px, calc(100vw - 48px)); text-align: center; }
+    #logPanel h3, #retryLogPanel h3, #liveLogPanel h3, #totpLogPanel h3, #emailChangeLogPanel h3, #qrPanel h3 { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    #logPanel h3 .btn, #retryLogPanel h3 .btn, #liveLogPanel h3 .btn, #totpLogPanel h3 .btn, #emailChangeLogPanel h3 .btn, #qrPanel h3 .btn { margin-left:auto; float:none !important; }
+    #logPanel .log, #retryLogPanel .log, #liveLogPanel .log, #totpLogPanel .log, #emailChangeLogPanel .log { max-height: calc(min(760px, calc(100vh - 48px)) - 74px); margin-top:0; }
+    #qrPanel img { display:block; max-width:min(360px, calc(100vw - 96px)); max-height:420px; margin:12px auto; border:1px solid var(--line); border-radius:10px; background:#fff; }
+    #qrPanel .qr-link { display:block; word-break:break-all; white-space:normal; font-size:12px; color:var(--muted); margin-top:8px; }
+    .hidden { display: none !important; }
+    #toast {
+      position: fixed; right: 18px; bottom: 18px; padding: 10px 14px; border-radius: 8px;
+      background: #101827; color: #fff; box-shadow: 0 14px 30px rgba(15,23,42,.24);
+      opacity: 0; transform: translateY(8px); pointer-events: none; transition: opacity .18s ease, transform .18s ease;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
+    /* 分页条 */
+    .pager-bar {
+      display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+      border-top: 1px solid var(--line); font-size: 13px; flex-wrap: wrap;
+    }
+    .pager-bar button {
+      min-height: 30px; border: 1px solid var(--line); border-radius: 6px;
+      background: #fff; padding: 0 12px; cursor: pointer; font-size: 12px; font-weight: 700;
+    }
+    .pager-bar button:disabled { color: #98a2b3; cursor: not-allowed; background: #f2f4f7; }
+    .pager-bar button:not(:disabled):hover { background: var(--soft); }
+    .pager-bar .pager-info { color: var(--muted); font-size: 12px; flex: 1; text-align: center; }
+    .pager-bar select {
+      min-height: 30px; width: auto; border: 1px solid var(--line); border-radius: 6px;
+      padding: 4px 8px; font: inherit; font-size: 12px; margin-top: 0;
+    }
+    .roxy-workspace-box {
+      grid-column: 1 / -1; border: 1px solid #c3d4fb; background: #eef4ff;
+      border-radius: 8px; padding: 12px; display: grid; gap: 10px;
+    }
+    .roxy-workspace-box .row { align-items: flex-end; }
+    .roxy-invite-link {
+      display: inline-flex; align-items: center; justify-content: center; width: fit-content;
+      min-height: 30px; padding: 0 10px; border-radius: 999px; border: 1px solid #9bbcff;
+      background: #fff; color: var(--blue); text-decoration: none; font-size: 12px; font-weight: 800;
+    }
+    .roxy-invite-link:hover { background: #e0ebff; }
+
+    /* ---- 左侧边栏（新增，暂不替换顶栏导航） ---- */
+    .app-sidebar {
+      position: fixed; left: 0; top: 0; bottom: 0; z-index: 200;
+      width: var(--sidebar-width); display: flex; flex-direction: column;
+      background: #fff; border-right: 1px solid #eef0f4;
+      box-shadow: 1px 0 0 rgba(15, 23, 42, 0.02);
+    }
+    .sidebar-brand {
+      display: flex; align-items: center; gap: 10px;
+      height: 64px; padding: 0 18px; flex-shrink: 0;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .sidebar-brand-icon {
+      width: 28px; height: 30px; flex-shrink: 0;
+    }
+    .sidebar-brand-title {
+      font-size: 15px; font-weight: 800; color: #0f172a;
+      letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sidebar-nav {
+      flex: 1; overflow-y: auto; overflow-x: hidden;
+      padding: 12px 10px 20px; display: flex; flex-direction: column; gap: 2px;
+      background: transparent; border: none; width: auto; max-width: none;
+    }
+    .app-sidebar .sidebar-nav button,
+    .app-sidebar .sidebar-nav button.sidebar-item {
+      width: 100%; display: flex; align-items: center; gap: 10px;
+      border: none; border-bottom: none; border-radius: 10px;
+      background: transparent; color: #475569;
+      font: inherit; font-size: 14px; font-weight: 600;
+      padding: 10px 12px; cursor: pointer; text-align: left;
+      transition: background .15s ease, color .15s ease;
+    }
+    .app-sidebar .sidebar-nav button:hover {
+      color: #0f172a; background: #f8fafc;
+    }
+    .app-sidebar .sidebar-nav button.active {
+      color: var(--sidebar-accent); background: var(--sidebar-accent-soft);
+      border-bottom: none;
+    }
+    .sidebar-item-icon {
+      width: 18px; height: 18px; flex-shrink: 0;
+      stroke: currentColor; fill: none;
+    }
+    .sidebar-item-label { flex: 1; min-width: 0; line-height: 1.2; }
+    .sidebar-footer {
+      flex-shrink: 0; padding: 10px; border-top: 1px solid #f1f5f9;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .sidebar-footer a {
+      display: flex; align-items: center; gap: 10px;
+      border-radius: 10px; padding: 10px 12px;
+      color: #64748b; text-decoration: none;
+      font-size: 13px; font-weight: 600;
+      transition: background .15s ease, color .15s ease;
+    }
+    .sidebar-footer a:hover { color: var(--sidebar-accent); background: var(--sidebar-accent-soft); }
+    .sidebar-footer-icon {
+      width: 16px; height: 16px; flex-shrink: 0;
+      stroke: currentColor; fill: none;
+    }
+    .sidebar-logout { margin: 0; }
+    .sidebar-logout button {
+      width: 100%; display: flex; align-items: center; gap: 10px;
+      border: none; border-radius: 10px; padding: 10px 12px;
+      background: transparent; color: #64748b;
+      font: inherit; font-size: 13px; font-weight: 600;
+      cursor: pointer; text-align: left;
+      transition: background .15s ease, color .15s ease;
+    }
+    .sidebar-logout button:hover { color: #b3261e; background: #fff0ef; }
+
+    /* ---- 新版注册区（工具条 + 表，旧区不改） ---- */
+    .jobs-panel-v2 {
+      margin-top: 4px;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04); overflow: hidden;
+    }
+    #regWarnV2:empty { display: none; }
+    #regWarnV2 { margin: 0 16px 8px; }
+    .jobs-toolbar-v2 {
+      display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+      padding: 16px;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn {
+      min-height: 40px; border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; padding: 8px 18px;
+      font: inherit; font-size: 14px; font-weight: 400; cursor: pointer;
+      display: inline-flex; align-items: center; white-space: nowrap;
+      transition: .1s; line-height: 1; box-sizing: border-box;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn:hover { color: #409eff; border-color: #c6e2ff; background: #ecf5ff; }
+    .jobs-toolbar-v2 .jobs-tb-btn:disabled { opacity: 1; cursor: not-allowed; color: #c0c4cc; background: #fff; border-color: #e4e7ed; }
+    .jobs-toolbar-v2 .jobs-tb-btn--retry {
+      color: #3A7FFF; background: #EBF2FF; border-color: #9BBEFF;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn--retry:hover:not(:disabled) { background: #dce8ff; border-color: #3A7FFF; color: #3A7FFF; }
+    .jobs-toolbar-v2 .jobs-tb-btn--retry:disabled { color: #9CBFFF; background: #EBF2FF; border-color: #D7E5FF; }
+    .jobs-toolbar-v2 .jobs-tb-btn--danger {
+      color: #e64545; background: #ffe0e0; border-color: #f89898;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn--danger:hover:not(:disabled) { background: #f56c6c; border-color: #f56c6c; color: #fff; }
+    .jobs-toolbar-v2 .jobs-tb-btn--danger:disabled { color: #f3a6a6; background: #fff0f0; border-color: #fbc4c4; }
+    .jobs-toolbar-v2 .jobs-tb-btn--primary {
+      color: #fff; background: #377DFF; border-color: #377DFF;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn--primary:hover:not(:disabled) { background: #5a94ff; border-color: #5a94ff; color: #fff; }
+    .jobs-toolbar-v2 .jobs-tb-btn--primary:disabled {
+      color: #9CBFFF; background: #EBF2FF; border-color: #D7E5FF;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn--good {
+      color: #166534; background: #edf8f1; border-color: #b9dfc9;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn--good:hover:not(:disabled) {
+      background: #d8f3e0; border-color: #2f855a; color: #166534;
+    }
+    .jobs-toolbar-v2 .jobs-tb-btn--good:disabled {
+      color: #a3c4ad; background: #f5faf7; border-color: #dce8e0;
+    }
+    .jobs-toolbar-v2 .jobs-tb-field {
+      display: inline-flex; align-items: center; gap: 8px;
+      color: #606266; font-size: 14px; white-space: nowrap;
+    }
+    .accounts-filter-v2 .acc-v2-date {
+      height: 40px; padding: 0 8px;
+      border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; font-size: 14px;
+      box-sizing: border-box; vertical-align: middle;
+      font-family: inherit;
+    }
+    .accounts-filter-v2 .acc-v2-date:hover,
+    .accounts-filter-v2 .acc-v2-date:focus { border-color: #409eff; outline: none; }
+    .accounts-filter-v2 .acc-v2-date-select,
+    .codex-filter-v2 .acc-v2-date-select {
+      position: relative; display: inline-flex; vertical-align: middle;
+    }
+    .accounts-filter-v2 .acc-v2-date-select-btn,
+    .codex-filter-v2 .acc-v2-date-select-btn {
+      min-height: 32px; margin: 0; padding: 0 28px 0 12px;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      color: #606266; font: inherit; font-size: 13px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: flex-start;
+      box-sizing: border-box; position: relative; text-align: left;
+      white-space: nowrap;
+    }
+    .accounts-filter-v2 .acc-v2-date-select-btn:hover,
+    .accounts-filter-v2 .acc-v2-date-select.open .acc-v2-date-select-btn,
+    .codex-filter-v2 .acc-v2-date-select-btn:hover,
+    .codex-filter-v2 .acc-v2-date-select.open .acc-v2-date-select-btn {
+      border-color: #377DFF;
+    }
+    .accounts-filter-v2 .acc-v2-date-select-btn::after,
+    .codex-filter-v2 .acc-v2-date-select-btn::after {
+      content: ""; position: absolute; right: 10px; top: 50%;
+      width: 0; height: 0; margin-top: -2px;
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 6px solid #909399;
+    }
+    .accounts-filter-v2 .acc-v2-date-select.open .acc-v2-date-select-btn::after,
+    .codex-filter-v2 .acc-v2-date-select.open .acc-v2-date-select-btn::after {
+      margin-top: -4px; border-top: none; border-bottom: 6px solid #909399;
+    }
+    .acc-v2-date-select-menu {
+      display: none; position: absolute; left: 0; top: calc(100% + 6px);
+      min-width: 300px; padding: 10px; z-index: 300;
+      border-radius: 8px; background: #fff;
+      box-shadow: 0 8px 24px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04);
+      box-sizing: border-box; font-size: 13px; color: #606266;
+    }
+    .acc-v2-date-select.open .acc-v2-date-select-menu { display: block; }
+    .acc-v2-date-select-menu-row {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+    }
+    .acc-v2-date-select-menu-row:last-of-type { margin-bottom: 0; }
+    .acc-v2-date-select-menu-row span { white-space: nowrap; color: #606266; }
+    .acc-v2-date-select-menu .acc-v2-date { flex: 1; min-width: 0; height: 32px; }
+    .acc-v2-date-select-menu .jobs-tb-btn {
+      min-height: 30px; padding: 0 10px; font-size: 13px; line-height: 1;
+    }
+    .acc-v2-date-select-actions {
+      display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;
+    }
+    .cal { min-width: 264px; user-select: none; }
+    .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .cal-nav {
+      width: 28px; height: 28px; padding: 0;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      color: #606266; font-size: 16px; line-height: 1; cursor: pointer;
+    }
+    .cal-nav:hover { border-color: #377DFF; color: #377DFF; }
+    .cal-title { font-weight: 600; color: #303133; font-size: 14px; }
+    .cal-week {
+      display: grid; grid-template-columns: repeat(7, 1fr);
+      text-align: center; color: #909399; font-size: 12px; margin-bottom: 6px;
+    }
+    .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+    .cal-cell {
+      height: 32px; padding: 0; border: none; border-radius: 6px;
+      background: transparent; color: #606266; font: inherit; font-size: 13px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      box-sizing: border-box;
+    }
+    .cal-cell:hover { background: #f5f7fa; color: #377DFF; }
+    .cal-cell.other { color: #c0c4cc; }
+    .cal-cell.start, .cal-cell.end { background: #377DFF; color: #fff; font-weight: 600; }
+    .cal-cell.start { border-radius: 6px 0 0 6px; }
+    .cal-cell.end { border-radius: 0 6px 6px 0; }
+    .cal-cell.start.end { border-radius: 6px; }
+    .cal-cell.in-range { background: #EBF2FF; color: #377DFF; }
+    .cal-foot {
+      margin-top: 10px; padding-top: 10px; border-top: 1px solid #ebeef5;
+    }
+    .cal-foot-btns { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .cal-foot-btns .jobs-tb-btn { min-height: 26px; padding: 0 8px; font-size: 12px; }
+    .cal-foot-tip {
+      margin-top: 8px; color: #909399; font-size: 12px;
+      line-height: 1.4; user-select: none; text-align: center;
+    }
+    .jobs-toolbar-v2 .el-input-number,
+    .accounts-filter-v2 .el-input-number {
+      position: relative; display: inline-flex; width: 150px; height: 40px;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      box-sizing: border-box; overflow: hidden; vertical-align: middle;
+    }
+    .jobs-toolbar-v2 .el-input-number:hover,
+    .jobs-toolbar-v2 .el-input-number:focus-within,
+    .accounts-filter-v2 .el-input-number:hover,
+    .accounts-filter-v2 .el-input-number:focus-within { border-color: #409eff; }
+    .jobs-toolbar-v2 .el-input-number input,
+    .accounts-filter-v2 .el-input-number input {
+      flex: 1; width: 100%; min-width: 0; height: 100%; margin: 0;
+      border: none; outline: none; background: transparent;
+      padding: 0 42px 0 12px; text-align: center;
+      color: #606266; font-size: 14px; box-sizing: border-box;
+      -moz-appearance: textfield; appearance: textfield;
+    }
+    .jobs-toolbar-v2 .el-input-number input::-webkit-outer-spin-button,
+    .jobs-toolbar-v2 .el-input-number input::-webkit-inner-spin-button,
+    .accounts-filter-v2 .el-input-number input::-webkit-outer-spin-button,
+    .accounts-filter-v2 .el-input-number input::-webkit-inner-spin-button {
+      -webkit-appearance: none; margin: 0;
+    }
+    .jobs-toolbar-v2 .el-input-number__increase,
+    .jobs-toolbar-v2 .el-input-number__decrease,
+    .accounts-filter-v2 .el-input-number__increase,
+    .accounts-filter-v2 .el-input-number__decrease {
+      position: absolute; right: 0; width: 32px; height: 20px; padding: 0;
+      border: none; border-left: 1px solid #dcdfe6; background: #f5f7fa;
+      color: #606266; cursor: pointer; display: inline-flex;
+      align-items: center; justify-content: center; box-sizing: border-box;
+      line-height: 1;
+    }
+    .jobs-toolbar-v2 .el-input-number__increase,
+    .accounts-filter-v2 .el-input-number__increase {
+      top: 0; border-bottom: 1px solid #dcdfe6; border-radius: 0 5px 0 0;
+    }
+    .jobs-toolbar-v2 .el-input-number__decrease,
+    .accounts-filter-v2 .el-input-number__decrease {
+      bottom: 0; border-radius: 0 0 5px 0;
+    }
+    .jobs-toolbar-v2 .el-input-number__increase:hover,
+    .jobs-toolbar-v2 .el-input-number__decrease:hover,
+    .accounts-filter-v2 .el-input-number__increase:hover,
+    .accounts-filter-v2 .el-input-number__decrease:hover {
+      color: #409eff; background: #f0f7ff;
+    }
+    .jobs-toolbar-v2 .el-input-number__increase:disabled,
+    .jobs-toolbar-v2 .el-input-number__decrease:disabled,
+    .accounts-filter-v2 .el-input-number__increase:disabled,
+    .accounts-filter-v2 .el-input-number__decrease:disabled {
+      color: #c0c4cc; cursor: not-allowed; background: #f5f7fa;
+    }
+    .jobs-toolbar-v2 .el-input-number__increase svg,
+    .jobs-toolbar-v2 .el-input-number__decrease svg,
+    .accounts-filter-v2 .el-input-number__increase svg,
+    .accounts-filter-v2 .el-input-number__decrease svg {
+      width: 12px; height: 12px; stroke: currentColor; fill: none;
+      stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .jobs-table-v2-wrap { overflow-x: auto; overflow-y: hidden; padding: 0; max-width: 100%; overscroll-behavior-inline: contain; }
+    .redeem-accounts-cell { min-width: 190px; max-width: 320px; white-space: normal !important; line-height: 1.55; }
+    .redeem-account-item { overflow-wrap: anywhere; }
+    .jobs-table-v2 {
+      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px;
+    }
+    .jobs-table-v2 th, .jobs-table-v2 td {
+      padding: 12px 12px; border-bottom: 1px solid #ebeef5;
+      text-align: left; vertical-align: middle;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: #606266; box-sizing: border-box;
+    }
+    .jobs-table-v2 thead th {
+      background: #f5f7fa; color: #808093; font-size: 14px; font-weight: 600;
+      height: 44px; border-bottom: 1px solid #ebeef5;
+      line-height: 1;
+    }
+    .jobs-table-v2 thead th:first-child { padding-left: 16px; }
+    .jobs-table-v2 thead th:last-child { padding-right: 16px; }
+    .jobs-table-v2 tbody td { height: 50px; background: #fff; }
+    .jobs-table-v2 tbody tr:hover td { background: #f5f7fa; }
+    .jobs-table-v2 tbody td:first-child { padding-left: 16px; }
+    .jobs-table-v2 tbody td:last-child { padding-right: 16px; }
+    .jobs-table-v2 .col-check {
+      width: 48px; padding-left: 16px; padding-right: 8px;
+      text-align: left; vertical-align: middle;
+    }
+    .jobs-table-v2 .col-id { width: 90px; padding-left: 8px; vertical-align: middle; }
+    .jobs-table-v2 input[type="checkbox"] {
+      width: 16px !important; height: 16px !important;
+      min-width: 16px !important; min-height: 16px !important;
+      max-width: 16px !important; max-height: 16px !important;
+      margin: 0 !important; padding: 0 !important;
+      appearance: none; -webkit-appearance: none;
+      border: 1px solid #dcdfe6; border-radius: 4px;
+      background: #fff; cursor: pointer;
+      box-sizing: border-box; position: relative; display: block;
+      flex-shrink: 0;
+    }
+    .jobs-table-v2 input[type="checkbox"]:hover:not(:disabled) { border-color: #377DFF; }
+    .jobs-table-v2 input[type="checkbox"]:checked {
+      background: #377DFF; border-color: #377DFF;
+    }
+    .jobs-table-v2 input[type="checkbox"]:checked::after {
+      content: ""; position: absolute; left: 4px; top: 1px;
+      width: 4px; height: 8px;
+      border: solid #fff; border-width: 0 1.5px 1.5px 0;
+      transform: rotate(45deg);
+    }
+    .jobs-table-v2 input[type="checkbox"]:disabled {
+      background: #fff; border-color: #dcdfe6; cursor: not-allowed; opacity: 1;
+    }
+    .jobs-table-v2 .col-status { width: 110px; }
+    .jobs-table-v2 .col-email { min-width: 200px; width: 24%; }
+    .jobs-table-v2 .col-time { width: 170px; }
+    .jobs-table-v2 .col-traffic { width: 120px; white-space: nowrap; }
+    .jobs-table-v2 .col-error { width: auto; min-width: 160px; }
+    .jobs-table-v2 .col-actions {
+      width: 168px; overflow: visible; text-overflow: clip; white-space: nowrap;
+    }
+    .jobs-table-v2 td.col-error {
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .jobs-table-v2 .jobs-v2-pill {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 26px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid transparent; box-sizing: border-box;
+      font-size: 13px; font-weight: 500; line-height: 1;
+      white-space: nowrap; vertical-align: middle;
+    }
+    .jobs-table-v2 .jobs-v2-pill--success {
+      color: #2bb8a6; background: #E7FCF8; border-color: #9ee0d6;
+    }
+    .jobs-table-v2 .jobs-v2-pill--failed {
+      color: #f56c6c; background: #fef0f0; border-color: #fbc4c4;
+    }
+    .jobs-table-v2 .jobs-v2-pill--running {
+      color: #fa8c16; background: #fff7e6; border-color: #ffd591;
+    }
+    .jobs-table-v2 .jobs-v2-pill--pending,
+    .jobs-table-v2 .jobs-v2-pill--muted {
+      color: #9e9ea8; background: #fafafa; border-color: #ebebef;
+    }
+    .jobs-table-v2 .jobs-v2-ops {
+      display: inline-flex; align-items: center;
+    }
+    .jobs-table-v2 .jobs-v2-op {
+      min-width: 32px; width: 32px; height: 32px; margin-right: 8px; border: none; border-radius: 6px;
+      cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+      padding: 0; transition: all .2s; user-select: none; box-sizing: border-box;
+      flex-shrink: 0;
+    }
+    .jobs-table-v2 .jobs-v2-op:last-child { margin-right: 0; }
+    .jobs-table-v2 .jobs-v2-op svg {
+      width: 16px; height: 16px; stroke: currentColor; fill: none;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .jobs-table-v2 .jobs-v2-op--view { background: rgba(144,147,153,.12); color: #909399; }
+    .jobs-table-v2 .jobs-v2-op--view:hover { background: #909399; color: #fff; }
+    .jobs-table-v2 .jobs-v2-op--retry { background: #E7FCF8; color: #2bb8a6; }
+    .jobs-table-v2 .jobs-v2-op--retry:hover { background: #2bb8a6; color: #fff; }
+    .jobs-table-v2 .jobs-v2-op--stop { background: #fff7e6; color: #fa8c16; }
+    .jobs-table-v2 .jobs-v2-op--stop:hover { background: #fa8c16; color: #fff; }
+    .jobs-table-v2 .jobs-v2-op--otp { background: #ecf5ff; color: #409eff; }
+    .jobs-table-v2 .jobs-v2-op--otp:hover { background: #409eff; color: #fff; }
+    .jobs-table-v2 .manual-otp-input--v2 {
+      width: 86px; height: 32px; margin-right: 8px; padding: 0 8px;
+      border: 1px solid #dcdfe6; border-radius: 6px; font: inherit; font-size: 12px;
+    }
+    .jobs-table-v2 .col-actions { width: 280px; }
+    .jobs-table-v2 .jobs-v2-op--del { background: #ffe0e0; color: #e64545; }
+    .jobs-table-v2 .jobs-v2-op--del:hover { background: #e64545; color: #fff; }
+    .jobs-table-v2 .jobs-v2-op:disabled { opacity: .5; cursor: not-allowed; }
+    .jobs-v2-pager {
+      display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+      gap: 8px; padding: 12px 16px 16px; color: #606266; font-size: 14px;
+      border-top: 1px solid #ebeef5; background: #fff;
+    }
+    .jobs-v2-pager .pager-total { color: #606266; margin-right: 4px; white-space: nowrap; }
+    .jobs-v2-pager .pager-goto { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: #606266; }
+    .jobs-v2-pager .pager-goto input {
+      width: 48px; height: 32px; margin: 0; padding: 0 4px; text-align: center;
+      border: 1px solid #dcdfe6; border-radius: 4px; background: #fff;
+      color: #606266; font: inherit; font-size: 14px; box-sizing: border-box;
+      min-height: 32px !important; min-width: 0 !important; max-width: 48px;
+    }
+    .jobs-v2-pager .pager-goto input:focus { outline: none; border-color: #377DFF; }
+    .jobs-v2-pager button {
+      min-height: 32px; height: 32px; border: 1px solid #dcdfe6; border-radius: 4px;
+      background: #fff; color: #606266; font: inherit; font-size: 14px;
+      padding: 0 8px; cursor: pointer; box-sizing: border-box;
+      min-width: 32px; display: inline-flex; align-items: center; justify-content: center;
+    }
+    .jobs-v2-pager button:hover:not(:disabled) { color: #377DFF; border-color: #c6e2ff; }
+    .jobs-v2-pager button:disabled { color: #c0c4cc; cursor: not-allowed; background: #fff; }
+    .jobs-v2-pager .pager-page {
+      min-width: 32px; height: 32px; border-radius: 4px; border: none;
+      background: #377DFF; color: #fff; display: inline-flex;
+      align-items: center; justify-content: center; font-weight: 500;
+      box-sizing: border-box; cursor: default;
+    }
+    .jobs-v2-pager .pager-size {
+      position: relative; display: inline-flex; vertical-align: middle;
+    }
+    .jobs-v2-pager .pager-size-btn {
+      width: 110px; min-width: 110px; height: 32px; margin: 0; padding: 0 28px 0 12px;
+      border: 1px solid #dcdfe6; border-radius: 4px; background: #fff;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: flex-start;
+      box-sizing: border-box; position: relative; text-align: left;
+    }
+    .jobs-v2-pager .pager-size-btn:hover,
+    .jobs-v2-pager .pager-size-btn:focus,
+    .jobs-v2-pager .pager-size-btn:active,
+    .jobs-v2-pager .pager-size.open .pager-size-btn {
+      color: #606266 !important; border-color: #dcdfe6 !important; background: #fff !important;
+    }
+    .jobs-v2-pager .pager-size-btn::after {
+      content: ""; position: absolute; right: 10px; top: 50%;
+      width: 0; height: 0; margin-top: -2px;
+      border-left: 4px solid transparent; border-right: 4px solid transparent;
+      border-top: 5px solid #909399;
+    }
+    .jobs-v2-pager .pager-size.open .pager-size-btn::after {
+      margin-top: -3px; border-top: none; border-bottom: 5px solid #909399;
+    }
+    .jobs-v2-pager .pager-size-menu {
+      display: none; position: absolute; left: 50%; bottom: calc(100% + 8px);
+      transform: translateX(-50%); min-width: 128px; padding: 6px;
+      border-radius: 8px; background: #fff;
+      box-shadow: 0 8px 24px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04);
+      z-index: 20; box-sizing: border-box;
+    }
+    .jobs-v2-pager .pager-size.open .pager-size-menu { display: block; }
+    .jobs-v2-pager .pager-size-item {
+      width: 100%; min-height: 34px; height: auto; margin: 0; padding: 8px 12px;
+      border: none; border-radius: 6px; background: transparent;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      box-sizing: border-box;
+    }
+    .jobs-v2-pager .pager-size-item:hover { background: #f5f7fa; color: #377DFF; }
+    .jobs-v2-pager .pager-size-item.is-active { background: #f0f2f5; color: #303133; font-weight: 500; }
+
+    /* ---- 新版账号表（追加在下方，旧区不改；样式对齐注册页） ---- */
+    .accounts-panel-v2 {
+      margin-top: 0;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04); overflow: hidden;
+    }
+    .accounts-table-v2-wrap { overflow-x: auto; overflow-y: hidden; padding: 0; max-width: 100%; overscroll-behavior-inline: contain; }
+    .accounts-table-v2 {
+      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px;
+      min-width: 1040px;
+    }
+    .accounts-table-v2 th, .accounts-table-v2 td {
+      padding: 12px 12px; border-bottom: 1px solid #ebeef5;
+      text-align: left; vertical-align: middle;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: #606266; box-sizing: border-box;
+    }
+    .accounts-table-v2 thead th {
+      background: #f5f7fa; color: #808093; font-size: 14px; font-weight: 600;
+      height: 44px; border-bottom: 1px solid #ebeef5; line-height: 1;
+    }
+    .accounts-table-v2 thead th:first-child { padding-left: 16px; }
+    .accounts-table-v2 thead th:last-child { padding-right: 16px; }
+    .accounts-table-v2 .col-check {
+      width: 48px; padding-left: 16px; padding-right: 8px;
+      text-align: left; vertical-align: middle;
+    }
+    .accounts-table-v2 .col-id { width: 72px; }
+    .accounts-table-v2 .col-email { width: 330px; }
+    .accounts-table-v2 .col-source { width: 90px; }
+    .accounts-table-v2 .col-token { width: 100px; }
+    .accounts-table-v2 .col-password { width: 120px; }
+    .accounts-table-v2 .col-plan { width: 220px; }
+    .accounts-table-v2 .col-note { width: 140px; }
+    .accounts-table-v2 .col-small { width: 170px; }
+    .accounts-table-v2 .col-status { width: 100px; }
+    .accounts-table-v2 .col-agent { width: 140px; }
+    .accounts-table-v2 .col-time { width: 170px; }
+    .accounts-table-v2 .col-actions { width: 148px; }
+    .accounts-table-v2 input[type="checkbox"] {
+      width: 16px !important; height: 16px !important;
+      min-width: 16px !important; min-height: 16px !important;
+      max-width: 16px !important; max-height: 16px !important;
+      margin: 0 !important; padding: 0 !important;
+      appearance: none; -webkit-appearance: none;
+      border: 1px solid #dcdfe6; border-radius: 4px;
+      background: #fff; cursor: pointer;
+      box-sizing: border-box; position: relative; display: block;
+      flex-shrink: 0;
+    }
+    .accounts-table-v2 input[type="checkbox"]:hover:not(:disabled) { border-color: #377DFF; }
+    .accounts-table-v2 input[type="checkbox"]:checked {
+      background: #377DFF; border-color: #377DFF;
+    }
+    .accounts-table-v2 input[type="checkbox"]:checked::after {
+      content: ""; position: absolute; left: 4px; top: 1px;
+      width: 4px; height: 8px;
+      border: solid #fff; border-width: 0 1.5px 1.5px 0;
+      transform: rotate(45deg);
+    }
+    .accounts-table-v2 input[type="checkbox"]:disabled {
+      background: #fff; border-color: #dcdfe6; cursor: not-allowed; opacity: 1;
+    }
+    .accounts-table-v2 tbody td { height: 56px; }
+    .accounts-table-v2 tbody td:first-child { padding-left: 16px; }
+    .accounts-table-v2 tbody td:last-child { padding-right: 16px; }
+    .accounts-table-v2 .col-email,
+    .accounts-table-v2 .col-password,
+    .accounts-table-v2 .col-plan,
+    .accounts-table-v2 .col-note,
+    .accounts-table-v2 .col-agent,
+    .accounts-table-v2 .col-actions {
+      white-space: normal; overflow: visible; text-overflow: clip; vertical-align: middle;
+    }
+    .accounts-table-v2 .acc-v2-email {
+      font-weight: 700; color: #303133; line-height: 1.35;
+      overflow: visible; text-overflow: clip; white-space: normal;
+      overflow-wrap: anywhere; word-break: break-word;
+    }
+    .accounts-table-v2 .acc-v2-sub {
+      margin-top: 2px; color: #909399; font-size: 12px; line-height: 1.3;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .accounts-table-v2 .acc-v2-email-history,
+    .accounts-table-v2 .acc-v2-email-user {
+      margin-top: 2px; color: #909399; font-size: 12px; line-height: 1.35;
+      white-space: normal; overflow: visible; text-overflow: clip;
+      overflow-wrap: anywhere; word-break: break-word;
+    }
+    .accounts-table-v2 .acc-v2-email-group {
+      display: inline-block; max-width: 100%; margin-top: 3px; padding: 1px 6px;
+      border: 1px solid #dbeafe; border-radius: 999px; color: #2563eb;
+      background: #eff6ff; font-size: 11px; line-height: 1.45;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
+    }
+    .accounts-table-v2 .acc-v2-email-user { color: #606266; }
+    .accounts-table-v2 .acc-v2-email-status {
+      margin-top: 2px; color: #e6a23c; font-size: 12px; line-height: 1.35;
+      white-space: normal; overflow-wrap: anywhere;
+    }
+    .accounts-table-v2 .acc-v2-muted { color: #c0c4cc; }
+    .accounts-table-v2 .pill {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 26px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid transparent; box-sizing: border-box;
+      font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap;
+    }
+    .accounts-table-v2 .pill.status-used {
+      color: #9e9ea8; background: #fafafa; border-color: #ebebef;
+    }
+    .accounts-table-v2 .pill.status-success {
+      color: #2bb8a6; background: #E7FCF8; border-color: #9ee0d6;
+    }
+    .accounts-table-v2 .pill.status-failed {
+      color: #f56c6c; background: #fef0f0; border-color: #fbc4c4;
+    }
+    .accounts-table-v2 .pill.status-running {
+      color: #fa8c16; background: #fff7e6; border-color: #ffd591;
+    }
+    .accounts-table-v2 .plan-promo-stack {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+      width: 100%; white-space: normal;
+    }
+    .accounts-table-v2 .plan-promo-head {
+      display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    }
+    .accounts-table-v2 .plan-promo-stack .pill {
+      height: auto; min-height: 26px; max-width: 100%; line-height: 1.3;
+      text-align: left; white-space: normal; overflow-wrap: anywhere;
+    }
+    .accounts-table-v2 .acc-v2-token-copy {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 26px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #9ee0d6; box-sizing: border-box;
+      font: inherit; font-size: 13px; font-weight: 500; line-height: 1;
+      color: #2bb8a6; background: #E7FCF8; cursor: pointer; white-space: nowrap;
+    }
+    .accounts-table-v2 .acc-v2-token-copy:hover:not(:disabled) {
+      background: #2bb8a6; border-color: #2bb8a6; color: #fff;
+    }
+    .accounts-table-v2 .acc-v2-token-copy:disabled {
+      opacity: .55; cursor: not-allowed;
+    }
+    .accounts-table-v2 .acc-v2-twofa {
+      font-size: 13px; font-weight: 500;
+    }
+    .accounts-table-v2 .acc-v2-twofa-actions {
+      display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap;
+    }
+    .accounts-table-v2 .acc-v2-twofa-btn {
+      min-height: 26px; padding: 0 10px; border-radius: 13px;
+      border: 1px solid #b9dfc9; background: #f0fbf5; color: #166534;
+      font: inherit; font-size: 12px; font-weight: 800; line-height: 1;
+      cursor: pointer; white-space: nowrap;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .accounts-table-v2 .acc-v2-twofa-btn:hover:not(:disabled) {
+      background: #2bb8a6; border-color: #2bb8a6; color: #fff;
+    }
+    .accounts-table-v2 .acc-v2-twofa-btn:disabled {
+      opacity: .55; cursor: not-allowed;
+    }
+    .accounts-table-v2 .acc-v2-twofa-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 26px; padding: 0 10px; border-radius: 13px;
+      border: 1px solid #9ee0d6; background: #E7FCF8; color: #2bb8a6;
+      font: inherit; font-size: 12px; font-weight: 800; line-height: 1;
+      white-space: nowrap;
+    }
+    .accounts-table-v2 .acc-v2-twofa-code {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 26px; padding: 0 10px; border-radius: 13px;
+      border: 1px solid #bdd0ff; background: #f3f7ff; color: #1d4ed8;
+      font-family: ui-monospace, "JetBrains Mono", Consolas, monospace;
+      font-size: 13px; font-weight: 900; line-height: 1; letter-spacing: .08em;
+      white-space: nowrap;
+    }
+    .accounts-table-v2 .acc-v2-codex {
+      font-size: 13px; font-weight: 500;
+    }
+    .accounts-table-v2 .acc-v2-codex.is-ok { color: #377DFF; }
+    .accounts-table-v2 .acc-v2-codex.is-skip { color: #79bbff; }
+    .accounts-table-v2 .acc-v2-codex.is-fail { color: #f56c6c; }
+    .accounts-table-v2 .acc-v2-codex.is-run { color: #e6a23c; }
+    .accounts-table-v2 .acc-v2-codex.is-mute { color: #c0c4cc; }
+    .accounts-table-v2 .agent-token-cell {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    }
+    .accounts-table-v2 .agent-token-cell button,
+    .accounts-table-v2 .extract-link-cell button {
+      min-height: 26px; padding: 0 10px; border-radius: 13px;
+      border: 1px solid #67c23a; background: #fff; color: #67c23a;
+      font: inherit; font-size: 12px; cursor: pointer; line-height: 1;
+      white-space: nowrap;
+    }
+    .accounts-table-v2 .agent-token-cell button:hover:not(:disabled),
+    .accounts-table-v2 .extract-link-cell button:hover:not(:disabled) {
+      background: #f0f9eb; border-color: #67c23a;
+    }
+    .accounts-table-v2 .agent-token-cell button:disabled,
+    .accounts-table-v2 .extract-link-cell button:disabled {
+      opacity: .55; cursor: not-allowed;
+    }
+    .accounts-table-v2 .acc-v2-actions {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px; align-items: center;
+      width: 100%;
+    }
+    .accounts-table-v2 .acc-v2-actions > button {
+      min-height: 28px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+      font: inherit; font-size: 12px; cursor: pointer; line-height: 1;
+      white-space: nowrap;
+      width: 100%; padding-left: 6px; padding-right: 6px;
+    }
+    .accounts-table-v2 .acc-v2-actions > button:hover:not(:disabled) {
+      color: #377DFF; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .accounts-table-v2 .acc-v2-actions > button.primary {
+      background: #377DFF; border-color: #377DFF; color: #fff;
+    }
+    .accounts-table-v2 .acc-v2-actions > button.primary:hover:not(:disabled) {
+      background: #5a94ff; border-color: #5a94ff; color: #fff;
+    }
+    .accounts-table-v2 .acc-v2-actions > button.danger {
+      color: #e64545; border-color: #f89898; background: #ffe0e0;
+    }
+    .accounts-table-v2 .acc-v2-actions > button.danger:hover:not(:disabled) {
+      background: #f56c6c; border-color: #f56c6c; color: #fff;
+    }
+    .accounts-table-v2 .acc-v2-actions > button:disabled {
+      opacity: .55; cursor: not-allowed;
+    }
+    .accounts-table-v2 .acc-v2-more { position: relative; min-width: 0; }
+    .accounts-table-v2 .acc-v2-more-btn {
+      min-height: 28px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+      font: inherit; font-size: 12px; cursor: pointer; line-height: 1;
+      white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;
+      width: 100%; justify-content: center; box-sizing: border-box;
+    }
+    .accounts-table-v2 .acc-v2-more-btn:hover,
+    .accounts-table-v2 .acc-v2-more.open .acc-v2-more-btn {
+      color: #377DFF; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .accounts-table-v2 .acc-v2-more-btn::after {
+      content: ""; width: 0; height: 0;
+      border-left: 4px solid transparent; border-right: 4px solid transparent;
+      border-top: 5px solid currentColor; margin-top: 1px;
+    }
+    .accounts-table-v2 .acc-v2-more-menu {
+      display: none; position: fixed; z-index: 4000;
+      width: 320px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
+      grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px;
+      padding: 6px; overflow-y: auto; overscroll-behavior: contain;
+      background: #fff; border: 1px solid #e4e7ed; border-radius: 6px;
+      box-shadow: 0 6px 16px rgba(0,0,0,.12);
+    }
+    .accounts-table-v2 .acc-v2-more.open .acc-v2-more-menu { display: grid; }
+    .accounts-table-v2 .acc-v2-more-menu button {
+      display: block; width: 100%; box-sizing: border-box;
+      border: none; border-radius: 0; background: transparent;
+      color: #606266; font: inherit; font-size: 13px;
+      text-align: left; padding: 8px 10px; min-height: 34px; line-height: 1.35;
+      cursor: pointer; white-space: normal; overflow-wrap: anywhere;
+      border-radius: 4px;
+    }
+    .accounts-table-v2 .acc-v2-more-menu button:hover:not(:disabled) {
+      background: #f5f7fa; color: #377DFF;
+    }
+    .accounts-table-v2 .acc-v2-more-menu button.danger,
+    .accounts-table-v2 .acc-v2-more-menu button.danger:hover:not(:disabled) {
+      color: #e64545; background: transparent;
+    }
+    .accounts-table-v2 .acc-v2-more-menu button.danger:hover:not(:disabled) {
+      background: #fef0f0;
+    }
+    .accounts-table-v2 .acc-v2-more-menu button.good {
+      color: #67c23a; background: transparent;
+    }
+    .accounts-table-v2 .acc-v2-more-menu button.good:hover:not(:disabled) {
+      background: #f0f9eb; color: #67c23a;
+    }
+    .accounts-table-v2 .acc-v2-more-menu button:disabled {
+      opacity: .45; cursor: not-allowed;
+    }
+    @media (max-width: 480px) {
+      .accounts-table-v2 .acc-v2-more-menu {
+        width: calc(100vw - 16px); grid-template-columns: 1fr;
+      }
+    }
+    .accounts-panel-v2 .jobs-v2-pager {
+      border-top: 1px solid #ebeef5;
+    }
+    #accountsToolbarV2 {
+      align-items: stretch; gap: 8px;
+    }
+    #accountsToolbarV2 .acc-v2-btn-group {
+      display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      padding: 6px 8px; border: 1px solid #ebeef5; border-radius: 8px;
+      background: #fafbfc;
+    }
+    #accountsToolbarV2 .acc-v2-btn-group-title {
+      color: #909399; font-size: 12px; font-weight: 600;
+      padding: 0 4px; white-space: nowrap;
+    }
+    #accountsToolbarV2 .jobs-tb-btn {
+      min-height: 32px; padding: 0 12px; font-size: 13px;
+    }
+    .accounts-filter-v2 {
+      display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+      padding: 16px 16px 0;
+    }
+    .accounts-filter-v2 .acc-v2-btn-group {
+      display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 6px 8px; border: 1px solid #ebeef5; border-radius: 8px;
+      background: #fafbfc;
+    }
+    .accounts-filter-v2 .acc-v2-search-wrap {
+      flex: 0 1 260px; width: 260px; max-width: 100%; min-width: 200px; padding: 4px 8px;
+    }
+    .accounts-filter-v2 .acc-v2-search-wrap input {
+      width: 100%; min-width: 0; min-height: 32px !important; margin: 0;
+      border: none; outline: none; background: transparent;
+      padding: 0 6px; font: inherit; font-size: 13px; color: #606266;
+      box-sizing: border-box;
+    }
+    .accounts-filter-v2 .acc-v2-search-wrap input:focus { outline: none; }
+    .accounts-filter-v2 .acc-v2-email-select-group {
+      flex: 1 1 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 8px; border-color: #cfe0ff; background: #f8fbff;
+    }
+    .accounts-filter-v2 .acc-v2-email-select-input {
+      flex: 1 1 360px; width: min(620px, 100%); min-width: 220px; min-height: 32px !important;
+      height: 34px; max-height: 72px; margin: 0; resize: vertical;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      padding: 7px 10px; font: inherit; font-size: 13px; line-height: 1.35;
+      color: #606266; box-sizing: border-box;
+    }
+    .accounts-filter-v2 .acc-v2-email-select-input:focus {
+      outline: none; border-color: #409eff; box-shadow: 0 0 0 2px rgba(64,158,255,.12);
+    }
+    .accounts-filter-v2 .acc-v2-email-select-group .jobs-tb-btn--primary {
+      color: #fff; background: #377DFF; border-color: #377DFF;
+    }
+    .accounts-filter-v2 .acc-v2-email-select-group .jobs-tb-btn--primary:hover:not(:disabled) {
+      color: #fff; background: #5a94ff; border-color: #5a94ff;
+    }
+    .accounts-filter-v2 .acc-v2-email-select-result {
+      min-width: 0; color: #667085; font-size: 12px; line-height: 1.35;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .accounts-filter-v2 .acc-v2-email-select-result.has-missing { color: #b7791f; }
+    @media (max-width: 700px) {
+      .accounts-filter-v2 .acc-v2-email-select-input { flex-basis: 100%; width: 100%; min-width: 0; }
+      .accounts-filter-v2 .acc-v2-email-select-result { flex-basis: 100%; }
+    }
+    .accounts-filter-v2 .acc-v2-selected {
+      color: #909399; font-size: 13px; font-weight: 600; white-space: nowrap; padding: 0 4px;
+    }
+    .accounts-filter-v2 .acc-v2-inline {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: #606266; font-size: 13px; white-space: nowrap;
+      min-height: 32px; padding: 0 4px;
+    }
+    .accounts-filter-v2 .acc-v2-toggle {
+      min-height: 32px; padding: 0 12px; border-radius: 6px;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+      font: inherit; font-size: 13px; cursor: pointer; line-height: 1;
+      white-space: nowrap; display: inline-flex; align-items: center;
+      transition: .1s; box-sizing: border-box;
+    }
+    .accounts-filter-v2 .acc-v2-toggle:hover {
+      color: #377DFF; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .accounts-filter-v2 .acc-v2-toggle.is-active {
+      color: #377DFF; background: #EBF2FF; border-color: #9BBEFF;
+      font-weight: 500;
+    }
+    .accounts-filter-v2 .acc-v2-toggle.is-active:hover {
+      background: #dce8ff; border-color: #3A7FFF; color: #3A7FFF;
+    }
+    .accounts-filter-v2 .jobs-tb-btn {
+      min-height: 32px; border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; padding: 0 12px;
+      font: inherit; font-size: 13px; font-weight: 400; cursor: pointer;
+      display: inline-flex; align-items: center; white-space: nowrap;
+      transition: .1s; line-height: 1; box-sizing: border-box;
+    }
+    .accounts-filter-v2 .jobs-tb-btn:hover:not(:disabled) {
+      color: #409eff; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .accounts-filter-v2 .jobs-tb-btn:disabled {
+      opacity: 1; cursor: not-allowed; color: #c0c4cc; background: #fff; border-color: #e4e7ed;
+    }
+    .accounts-filter-v2 .el-input-number {
+      width: 110px; height: 32px;
+    }
+    .accounts-filter-v2 .el-input-number input {
+      min-height: 0 !important; height: 32px !important; margin: 0 !important;
+      padding: 0 26px 0 0 !important; font-size: 13px; line-height: 32px;
+      text-align: center; border: none !important;
+    }
+    .accounts-filter-v2 .el-input-number__increase,
+    .accounts-filter-v2 .el-input-number__decrease {
+      width: 26px; height: 16px;
+    }
+    .accounts-filter-v2 .el-input-number__increase svg,
+    .accounts-filter-v2 .el-input-number__decrease svg {
+      width: 11px; height: 11px;
+    }
+    @media (max-width: 900px) {
+      .accounts-filter-v2 { flex-wrap: wrap; }
+      .accounts-filter-v2 .acc-v2-btn-group { flex-wrap: wrap; }
+      .accounts-filter-v2 .acc-v2-search-wrap {
+        flex-basis: 100%; width: 100%;
+      }
+    }
+    #accountsToolbarV2 { padding-top: 12px; }
+
+    /* ---- Codex 授权 ---- */
+    .codex-stats-v2 {
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .codex-stat-card {
+      min-width: 0; display: flex; align-items: center; gap: 14px;
+      padding: 16px 18px; border: 1px solid #ebeef5; border-radius: 8px;
+      background: #fff; box-shadow: 0 0 12px rgba(0,0,0,.04);
+    }
+    .codex-stat-icon {
+      width: 48px; height: 48px; border-radius: 10px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      color: #fff;
+    }
+    .codex-stat-icon svg {
+      width: 22px; height: 22px; stroke: currentColor; fill: none;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .codex-stat-card--total .codex-stat-icon { background: #409eff; }
+    .codex-stat-card--exported .codex-stat-icon { background: #67c23a; }
+    .codex-stat-card--pending .codex-stat-icon { background: #e6a23c; }
+    .codex-stat-meta { min-width: 0; flex: 1; }
+    .codex-stat-meta span {
+      display: block; color: #909399; font-size: 13px; font-weight: 400; line-height: 1.3;
+    }
+    .codex-stat-meta strong {
+      display: block; margin-top: 6px; color: #303133; font-size: 24px;
+      font-weight: 700; line-height: 1.1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    @media (max-width: 700px) {
+      .codex-stats-v2 { grid-template-columns: 1fr; }
+    }
+    .codex-panel-v2 {
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04); overflow: hidden;
+    }
+    .codex-filter-v2 {
+      display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+      padding: 16px 16px 0;
+    }
+    .codex-filter-v2 #btnRefreshCodexV2 { margin-left: auto; }
+    .codex-filter-v2 .acc-v2-btn-group {
+      display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 6px 8px; border: 1px solid #ebeef5; border-radius: 8px;
+      background: #fafbfc;
+    }
+    .codex-filter-v2 .acc-v2-search-wrap {
+      flex: 0 1 320px; width: 320px; max-width: 100%; min-width: 200px; padding: 4px 8px;
+    }
+    .codex-filter-v2 .acc-v2-search-wrap input {
+      width: 100%; min-width: 0; min-height: 32px !important; margin: 0;
+      border: none; outline: none; background: transparent;
+      padding: 0 6px; font: inherit; font-size: 13px; color: #606266;
+      box-sizing: border-box;
+    }
+    .codex-filter-v2 .acc-v2-selected {
+      color: #909399; font-size: 13px; font-weight: 600; white-space: nowrap; padding: 0 4px;
+    }
+    .codex-filter-v2 .jobs-tb-btn {
+      min-height: 32px; border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; padding: 0 12px;
+      font: inherit; font-size: 13px; cursor: pointer; line-height: 1;
+      display: inline-flex; align-items: center; white-space: nowrap;
+      transition: .1s; box-sizing: border-box;
+    }
+    .codex-filter-v2 .jobs-tb-btn:hover:not(:disabled) {
+      color: #409eff; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    #codexToolbarV2 {
+      padding: 12px 16px 16px;
+      justify-content: flex-start;
+    }
+    #codexToolbarV2 .jobs-tb-btn {
+      min-height: 32px; padding: 0 12px; font-size: 13px;
+    }
+    #codexToolbarV2 .jobs-tb-btn.is-active {
+      color: #377DFF; background: #EBF2FF; border-color: #9BBEFF;
+      font-weight: 500;
+    }
+    #codexToolbarV2 .jobs-tb-btn.is-active:hover {
+      background: #dce8ff; border-color: #3A7FFF; color: #3A7FFF;
+    }
+    .codex-table-v2-wrap, .outlook-table-v2-wrap { overflow-x: auto; overflow-y: hidden; padding: 0; max-width: 100%; overscroll-behavior-inline: contain; }
+    .codex-table-v2 {
+      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px;
+      min-width: 1100px;
+    }
+    .codex-table-v2 th, .codex-table-v2 td {
+      padding: 12px; border-bottom: 1px solid #ebeef5;
+      text-align: left; vertical-align: middle;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: #606266; box-sizing: border-box;
+    }
+    .codex-table-v2 thead th {
+      background: #f5f7fa; color: #808093; font-size: 14px; font-weight: 600;
+      height: 44px; border-bottom: 1px solid #ebeef5; line-height: 1;
+    }
+    .codex-table-v2 thead th:first-child,
+    .codex-table-v2 tbody td:first-child { padding-left: 16px; }
+    .codex-table-v2 thead th:last-child,
+    .codex-table-v2 tbody td:last-child { padding-right: 16px; }
+    .codex-table-v2 .col-check {
+      width: 48px; padding-left: 16px; padding-right: 8px;
+      text-align: left; vertical-align: middle;
+    }
+    .codex-table-v2 .col-email { width: 280px; white-space: normal; overflow: visible; }
+    .codex-table-v2 .col-plan { width: 100px; }
+    .codex-table-v2 .col-status { width: 100px; }
+    .codex-table-v2 .col-account { width: 160px; }
+    .codex-table-v2 .col-time { width: 160px; }
+    .codex-table-v2 .col-actions {
+      width: 200px; white-space: normal; overflow: visible; text-overflow: clip;
+    }
+    .codex-table-v2 .acc-v2-email {
+      font-weight: 700; color: #303133; line-height: 1.35;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .codex-table-v2 .acc-v2-sub {
+      margin-top: 2px; color: #909399; font-size: 12px; line-height: 1.3;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .codex-table-v2 .pill {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 26px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid transparent; box-sizing: border-box;
+      font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap;
+    }
+    .codex-table-v2 .pill.status-used {
+      color: #9e9ea8; background: #fafafa; border-color: #ebebef;
+    }
+    .codex-table-v2 .pill.status-available {
+      color: #2bb8a6; background: #E7FCF8; border-color: #9ee0d6;
+    }
+    .codex-table-v2 input[type="checkbox"] {
+      width: 16px !important; height: 16px !important;
+      min-width: 16px !important; min-height: 16px !important;
+      max-width: 16px !important; max-height: 16px !important;
+      margin: 0 !important; padding: 0 !important;
+      appearance: none; -webkit-appearance: none;
+      border: 1px solid #dcdfe6; border-radius: 4px;
+      background: #fff; cursor: pointer;
+      box-sizing: border-box; position: relative; display: block;
+      flex-shrink: 0;
+    }
+    .codex-table-v2 input[type="checkbox"]:hover:not(:disabled) { border-color: #377DFF; }
+    .codex-table-v2 input[type="checkbox"]:checked {
+      background: #377DFF; border-color: #377DFF;
+    }
+    .codex-table-v2 input[type="checkbox"]:checked::after {
+      content: ""; position: absolute; left: 4px; top: 1px;
+      width: 4px; height: 8px;
+      border: solid #fff; border-width: 0 1.5px 1.5px 0;
+      transform: rotate(45deg);
+    }
+    .codex-table-v2 .acc-v2-actions {
+      display: flex; flex-wrap: nowrap; gap: 6px; align-items: center;
+    }
+    .codex-table-v2 .acc-v2-actions > button {
+      min-height: 28px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+      font: inherit; font-size: 12px; cursor: pointer; line-height: 1;
+      white-space: nowrap;
+    }
+    .codex-table-v2 .acc-v2-actions > button.primary {
+      background: #377DFF; border-color: #377DFF; color: #fff;
+    }
+    .codex-table-v2 .acc-v2-actions > button.primary:hover:not(:disabled) {
+      background: #5a94ff; border-color: #5a94ff; color: #fff;
+    }
+    .codex-table-v2 .acc-v2-actions > button.danger {
+      color: #e64545; border-color: #f89898; background: #ffe0e0;
+    }
+    .codex-table-v2 .acc-v2-actions > button.danger:hover:not(:disabled) {
+      background: #f56c6c; border-color: #f56c6c; color: #fff;
+    }
+    .codex-table-v2 .acc-v2-more { position: relative; flex-shrink: 0; }
+    .codex-table-v2 .acc-v2-more-btn {
+      min-height: 28px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+      font: inherit; font-size: 12px; cursor: pointer; line-height: 1;
+      white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .codex-table-v2 .acc-v2-more-btn:hover,
+    .codex-table-v2 .acc-v2-more.open .acc-v2-more-btn {
+      color: #377DFF; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .codex-table-v2 .acc-v2-more-btn::after {
+      content: ""; width: 0; height: 0;
+      border-left: 4px solid transparent; border-right: 4px solid transparent;
+      border-top: 5px solid currentColor; margin-top: 1px;
+    }
+    .codex-table-v2 .acc-v2-more-menu {
+      display: none; position: fixed; z-index: 4000;
+      min-width: 148px; padding: 4px 0;
+      background: #fff; border: 1px solid #e4e7ed; border-radius: 6px;
+      box-shadow: 0 6px 16px rgba(0,0,0,.12);
+    }
+    .codex-table-v2 .acc-v2-more.open .acc-v2-more-menu { display: block; }
+    .codex-table-v2 .acc-v2-more-menu button {
+      display: block; width: 100%; box-sizing: border-box;
+      border: none; border-radius: 0; background: transparent;
+      color: #606266; font: inherit; font-size: 13px;
+      text-align: left; padding: 8px 14px; min-height: 0; line-height: 1.4;
+      cursor: pointer; white-space: nowrap;
+    }
+    .codex-table-v2 .acc-v2-more-menu button:hover:not(:disabled) {
+      background: #f5f7fa; color: #377DFF;
+    }
+    .codex-table-v2 .acc-v2-more-menu button.good { color: #166534; }
+    .codex-panel-v2 .jobs-v2-pager { border-top: 1px solid #ebeef5; }
+
+
+    /* ---- 邮箱池 ---- */
+    .outlook-panel-v2 {
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04); overflow: hidden;
+    }
+    .outlook-filter-v2 {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 16px;
+    }
+    .outlook-filter-v2 .acc-v2-btn-group {
+      display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 6px 8px; border: 1px solid #ebeef5; border-radius: 8px;
+      background: #fafbfc;
+    }
+    .outlook-filter-v2 .acc-v2-search-wrap {
+      flex: 0 1 320px; width: 320px; max-width: 100%; min-width: 200px; padding: 4px 8px;
+    }
+    .outlook-filter-v2 .outlook-v2-select {
+      position: relative; flex: 0 0 auto; display: inline-flex; vertical-align: middle;
+    }
+    .outlook-filter-v2 .jobs-tb-btn {
+      min-height: 40px; border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; padding: 8px 18px;
+      font: inherit; font-size: 14px; cursor: pointer; line-height: 1;
+      display: inline-flex; align-items: center; white-space: nowrap;
+      transition: .1s; box-sizing: border-box;
+    }
+    .outlook-filter-v2 .jobs-tb-btn:hover:not(:disabled) {
+      color: #409eff; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .outlook-filter-v2 .jobs-tb-btn:disabled {
+      opacity: 1; cursor: not-allowed; color: #c0c4cc; background: #fff; border-color: #e4e7ed;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--good {
+      color: #166534; background: #edf8f1; border-color: #b9dfc9;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--good:hover:not(:disabled) {
+      background: #d8f3e0; border-color: #2f855a; color: #166534;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--good:disabled {
+      color: #8fbf9a; background: #f3faf5; border-color: #d5eadc;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--danger {
+      color: #e64545; background: #ffe0e0; border-color: #f89898;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--danger:hover:not(:disabled) {
+      background: #f56c6c; border-color: #f56c6c; color: #fff;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--danger:disabled {
+      color: #f3a6a6; background: #fff0f0; border-color: #fbc4c4;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--primary {
+      color: #fff; background: #377DFF; border-color: #377DFF;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--primary:hover:not(:disabled) {
+      background: #5a94ff; border-color: #5a94ff; color: #fff;
+    }
+    .outlook-filter-v2 .jobs-tb-btn--primary:disabled {
+      color: #9CBFFF; background: #EBF2FF; border-color: #D7E5FF;
+    }
+    .outlook-filter-v2 #btnImportOutlookV2 { margin-left: auto; }
+    .outlook-filter-v2 .outlook-v2-select-btn {
+      min-width: 168px; height: 40px; margin: 0; padding: 0 32px 0 14px;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: flex-start;
+      box-sizing: border-box; position: relative; text-align: left;
+      white-space: nowrap;
+    }
+    .outlook-filter-v2 .outlook-v2-select-btn:hover,
+    .outlook-filter-v2 .outlook-v2-select.open .outlook-v2-select-btn {
+      border-color: #377DFF;
+    }
+    .outlook-filter-v2 .outlook-v2-select-btn::after {
+      content: ""; position: absolute; right: 12px; top: 50%;
+      width: 0; height: 0; margin-top: -2px;
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 6px solid #909399;
+    }
+    .outlook-filter-v2 .outlook-v2-select.open .outlook-v2-select-btn::after {
+      margin-top: -4px; border-top: none; border-bottom: 6px solid #909399;
+    }
+    .outlook-filter-v2 .outlook-v2-select-menu {
+      display: none; position: absolute; left: 0; top: calc(100% + 6px);
+      min-width: 100%; padding: 6px; z-index: 30;
+      border-radius: 8px; background: #fff;
+      box-shadow: 0 8px 24px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04);
+      box-sizing: border-box;
+    }
+    .outlook-filter-v2 .outlook-v2-select.open .outlook-v2-select-menu { display: block; }
+    .outlook-filter-v2 .outlook-v2-select-item {
+      width: 100%; min-height: 34px; margin: 0; padding: 8px 12px;
+      border: none; border-radius: 6px; background: transparent;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      display: flex; align-items: center; justify-content: flex-start;
+      box-sizing: border-box; white-space: nowrap; text-align: left;
+    }
+    .outlook-filter-v2 .outlook-v2-select-item:hover {
+      background: #f5f7fa; color: #377DFF;
+    }
+    .outlook-filter-v2 .outlook-v2-select-item.is-active {
+      background: #377DFF; color: #fff;
+    }
+    .outlook-filter-v2 .outlook-v2-select-item.is-active:hover {
+      background: #377DFF; color: #fff;
+    }
+    .outlook-filter-v2 .acc-v2-search-wrap input {
+      width: 100%; min-width: 0; min-height: 32px !important; height: 32px !important; margin: 0;
+      border: none; outline: none; background: transparent;
+      padding: 0 6px; font: inherit; font-size: 13px; color: #606266;
+      box-sizing: border-box;
+    }
+    .outlook-table-v2-wrap { overflow-x: auto; overflow-y: hidden; padding: 0; max-width: 100%; overscroll-behavior-inline: contain; }
+    .outlook-table-v2 {
+      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px;
+      min-width: 1100px;
+    }
+    .outlook-table-v2 th, .outlook-table-v2 td {
+      padding: 12px; border-bottom: 1px solid #ebeef5;
+      text-align: left; vertical-align: middle;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: #606266; box-sizing: border-box;
+    }
+    .outlook-table-v2 thead th {
+      background: #f5f7fa; color: #808093; font-size: 14px; font-weight: 600;
+      height: 44px; border-bottom: 1px solid #ebeef5; line-height: 1;
+    }
+    .outlook-table-v2 thead th:first-child,
+    .outlook-table-v2 tbody td:first-child { padding-left: 16px; }
+    .outlook-table-v2 thead th:last-child,
+    .outlook-table-v2 tbody td:last-child { padding-right: 16px; }
+    .outlook-table-v2 .col-check {
+      width: 48px; padding-left: 16px; padding-right: 8px;
+      text-align: left; vertical-align: middle;
+    }
+    .outlook-table-v2 .col-email { width: 280px; white-space: normal; overflow: visible; }
+    .outlook-table-v2 .col-source { width: 100px; }
+    .outlook-table-v2 .col-status { width: 100px; }
+    .outlook-table-v2 .col-token { width: 100px; }
+    .outlook-table-v2 .col-time { width: 160px; }
+    .outlook-table-v2 .col-actions {
+      width: 220px; white-space: normal; overflow: visible; text-overflow: clip;
+    }
+    .outlook-table-v2 .acc-v2-email {
+      font-weight: 700; color: #303133; line-height: 1.35;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .outlook-table-v2 .acc-v2-sub {
+      margin-top: 2px; color: #909399; font-size: 12px; line-height: 1.3;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .outlook-table-v2 .pill {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 26px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid transparent; box-sizing: border-box;
+      font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap;
+    }
+    .outlook-table-v2 .pill.status-available {
+      color: #377DFF; background: #EBF2FF; border-color: #9BBEFF;
+    }
+    .outlook-table-v2 .pill.status-used {
+      color: #909399; background: #f4f4f5; border-color: #e4e7ed;
+    }
+    .outlook-table-v2 .pill.status-failed {
+      color: #f56c6c; background: #fef0f0; border-color: #fbc4c4;
+    }
+    .outlook-table-v2 .pill.status-disabled {
+      color: #92600a; background: #fff7e6; border-color: #f3d99b;
+    }
+    .outlook-table-v2 .acc-v2-token-copy {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 26px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #9ee0d6; box-sizing: border-box;
+      font: inherit; font-size: 13px; font-weight: 500; line-height: 1;
+      color: #2bb8a6; background: #E7FCF8; cursor: pointer; white-space: nowrap;
+    }
+    .outlook-table-v2 .acc-v2-token-copy:hover:not(:disabled) {
+      background: #2bb8a6; border-color: #2bb8a6; color: #fff;
+    }
+    .outlook-table-v2 .acc-v2-token-copy:disabled,
+    .outlook-table-v2 .acc-v2-token-none {
+      display: inline-flex; align-items: center; justify-content: center;
+      height: 26px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #fbc4c4; box-sizing: border-box;
+      font-size: 13px; font-weight: 500; line-height: 1;
+      color: #f56c6c; background: #fef0f0; white-space: nowrap;
+    }
+    .outlook-table-v2 input[type="checkbox"] {
+      width: 16px !important; height: 16px !important;
+      min-width: 16px !important; min-height: 16px !important;
+      max-width: 16px !important; max-height: 16px !important;
+      margin: 0 !important; padding: 0 !important;
+      appearance: none; -webkit-appearance: none;
+      border: 1px solid #dcdfe6; border-radius: 4px;
+      background: #fff; cursor: pointer;
+      box-sizing: border-box; position: relative; display: block;
+      flex-shrink: 0;
+    }
+    .outlook-table-v2 input[type="checkbox"]:hover:not(:disabled) { border-color: #377DFF; }
+    .outlook-table-v2 input[type="checkbox"]:checked {
+      background: #377DFF; border-color: #377DFF;
+    }
+    .outlook-table-v2 input[type="checkbox"]:checked::after {
+      content: ""; position: absolute; left: 4px; top: 1px;
+      width: 4px; height: 8px;
+      border: solid #fff; border-width: 0 1.5px 1.5px 0;
+      transform: rotate(45deg);
+    }
+    .outlook-table-v2 input[type="checkbox"]:disabled {
+      background: #fff; border-color: #dcdfe6; cursor: not-allowed; opacity: 1;
+    }
+    .outlook-table-v2 .acc-v2-actions {
+      display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    }
+    .outlook-table-v2 .acc-v2-actions > button {
+      min-height: 28px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+      font: inherit; font-size: 12px; cursor: pointer; line-height: 1; white-space: nowrap;
+    }
+    .outlook-table-v2 .acc-v2-actions > button:hover:not(:disabled) {
+      color: #377DFF; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .outlook-table-v2 .acc-v2-actions > button.primary {
+      color: #fff; background: #377DFF; border-color: #377DFF;
+    }
+    .outlook-table-v2 .acc-v2-actions > button.primary:hover:not(:disabled) {
+      background: #5a94ff; border-color: #5a94ff; color: #fff;
+    }
+    .outlook-table-v2 .acc-v2-actions > button.danger {
+      color: #e64545; border-color: #f89898; background: #ffe0e0;
+    }
+    .outlook-table-v2 .acc-v2-actions > button.danger:hover:not(:disabled) {
+      background: #f56c6c; border-color: #f56c6c; color: #fff;
+    }
+    .outlook-table-v2 .acc-v2-more { position: relative; flex-shrink: 0; }
+    .outlook-table-v2 .acc-v2-more-btn {
+      min-height: 28px; padding: 0 10px; border-radius: 4px;
+      border: 1px solid #dcdfe6; background: #fff; color: #606266;
+      font: inherit; font-size: 12px; cursor: pointer; line-height: 1;
+      white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .outlook-table-v2 .acc-v2-more-btn:hover,
+    .outlook-table-v2 .acc-v2-more.open .acc-v2-more-btn {
+      color: #377DFF; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .outlook-table-v2 .acc-v2-more-btn::after {
+      content: ""; width: 0; height: 0;
+      border-left: 4px solid transparent; border-right: 4px solid transparent;
+      border-top: 5px solid currentColor; margin-top: 1px;
+    }
+    .outlook-table-v2 .acc-v2-more-menu {
+      display: none; position: fixed; z-index: 4000;
+      min-width: 148px; padding: 4px 0;
+      background: #fff; border: 1px solid #e4e7ed; border-radius: 6px;
+      box-shadow: 0 6px 16px rgba(0,0,0,.12);
+    }
+    .outlook-table-v2 .acc-v2-more.open .acc-v2-more-menu { display: block; }
+    .outlook-table-v2 .acc-v2-more-menu button {
+      display: block; width: 100%; box-sizing: border-box;
+      border: none; border-radius: 0; background: transparent;
+      color: #606266; font: inherit; font-size: 13px;
+      text-align: left; padding: 8px 14px; min-height: 0; line-height: 1.4;
+      cursor: pointer; white-space: nowrap;
+    }
+    .outlook-table-v2 .acc-v2-more-menu button:hover:not(:disabled) {
+      background: #f5f7fa; color: #377DFF;
+    }
+    .outlook-table-v2 .acc-v2-more-menu button.good { color: #166534; }
+    .outlook-table-v2 .acc-v2-more-menu button.danger { color: #e64545; }
+    .outlook-panel-v2 .jobs-v2-pager { border-top: 1px solid #ebeef5; }
+
+    /* ---- 邮箱池导入弹窗 ---- */
+    #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #accountImportModalV2:not(.hidden) {
+      position: fixed; inset: 0; z-index: 1200;
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px; box-sizing: border-box;
+      background: rgba(15, 23, 42, .45);
+    }
+    .outlook-import-dialog {
+      width: min(640px, 100%); max-height: min(860px, calc(100vh - 48px));
+      display: flex; flex-direction: column;
+      background: #fff; border-radius: 12px; border: 1px solid #ebeef5;
+      box-shadow: 0 24px 70px rgba(15,23,42,.28); overflow: hidden;
+    }
+    .outlook-import-head {
+      display: flex; align-items: flex-start; gap: 12px;
+      padding: 20px 20px 14px; border-bottom: 1px solid #ebeef5;
+    }
+    .outlook-import-head-main { min-width: 0; flex: 1; }
+    .outlook-import-head h3 {
+      margin: 0; font-size: 18px; font-weight: 700; color: #303133; line-height: 1.3;
+    }
+    .outlook-import-head p {
+      margin: 8px 0 0; font-size: 12px; line-height: 1.55; color: #909399;
+    }
+    .outlook-import-close {
+      width: 32px; height: 32px; flex-shrink: 0; margin: -4px -4px 0 0;
+      border: none; border-radius: 6px; background: transparent;
+      color: #909399; font-size: 20px; line-height: 1; cursor: pointer;
+    }
+    .outlook-import-close:hover { background: #f5f7fa; color: #606266; }
+    .outlook-import-body {
+      padding: 18px 20px; overflow: auto; display: grid; gap: 16px;
+    }
+    .outlook-import-field { display: grid; gap: 8px; }
+    .outlook-import-field > span {
+      font-size: 13px; font-weight: 600; color: #303133;
+    }
+    .outlook-import-hint {
+      font-size: 12px; color: #909399; line-height: 1.4;
+    }
+    .outlook-import-body .outlook-v2-select {
+      position: relative; width: 100%; display: block;
+    }
+    .outlook-import-body .outlook-v2-select-btn {
+      width: 100%; min-width: 0; height: 40px; margin: 0; padding: 0 32px 0 14px;
+      border: 1px solid #dcdfe6; border-radius: 6px; background: #fff;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: flex-start;
+      box-sizing: border-box; position: relative; text-align: left;
+    }
+    .outlook-import-body .outlook-v2-select-btn:hover,
+    .outlook-import-body .outlook-v2-select.open .outlook-v2-select-btn {
+      border-color: #377DFF;
+    }
+    .outlook-import-body .outlook-v2-select-btn::after {
+      content: ""; position: absolute; right: 12px; top: 50%;
+      width: 0; height: 0; margin-top: -2px;
+      border-left: 5px solid transparent; border-right: 5px solid transparent;
+      border-top: 6px solid #909399;
+    }
+    .outlook-import-body .outlook-v2-select.open .outlook-v2-select-btn::after {
+      margin-top: -4px; border-top: none; border-bottom: 6px solid #909399;
+    }
+    .outlook-import-body .outlook-v2-select-menu {
+      display: none; position: absolute; left: 0; right: 0; top: calc(100% + 6px);
+      padding: 6px; z-index: 30; border-radius: 8px; background: #fff;
+      box-shadow: 0 8px 24px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04);
+      box-sizing: border-box;
+    }
+    .outlook-import-body .outlook-v2-select.open .outlook-v2-select-menu { display: block; }
+    .outlook-import-body .outlook-v2-select-item {
+      width: 100%; min-height: 34px; margin: 0; padding: 8px 12px;
+      border: none; border-radius: 6px; background: transparent;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      display: flex; align-items: center; text-align: left; box-sizing: border-box;
+    }
+    .outlook-import-body .outlook-v2-select-item:hover { background: #f5f7fa; color: #377DFF; }
+    .outlook-import-body .outlook-v2-select-item.is-active { background: #377DFF; color: #fff; }
+    .outlook-import-check {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 12px 14px; border: 1px solid #ebeef5; border-radius: 8px;
+      background: #fafbfc; cursor: pointer; color: #606266; font-size: 13px; line-height: 1.5;
+    }
+    .outlook-import-check input {
+      width: 16px !important; height: 16px !important;
+      min-width: 16px !important; min-height: 16px !important;
+      max-width: 16px !important; max-height: 16px !important;
+      margin: 2px 0 0 !important; padding: 0 !important;
+      flex-shrink: 0; accent-color: #377DFF;
+    }
+    .outlook-import-body textarea {
+      width: 100%; min-height: 180px; margin: 0; padding: 12px 14px;
+      border: 1px solid #dcdfe6; border-radius: 8px; background: #fff;
+      color: #606266; font: inherit; font-size: 13px; line-height: 1.5;
+      resize: vertical; box-sizing: border-box;
+      font-family: ui-monospace, Consolas, monospace;
+    }
+    .outlook-import-body textarea:focus {
+      outline: none; border-color: #377DFF;
+      box-shadow: 0 0 0 3px rgba(55,125,255,.12);
+    }
+    .outlook-import-body input[type="text"],
+    .outlook-import-body input[type="number"],
+    .outlook-import-body select {
+      width: 100%; height: 40px; margin: 0; padding: 0 12px;
+      border: 1px solid #dcdfe6; border-radius: 8px; background: #fff;
+      color: #606266; font: inherit; font-size: 13px; box-sizing: border-box;
+    }
+    .outlook-import-result:empty { display: none; }
+    .outlook-import-foot {
+      display: flex; justify-content: flex-end; gap: 10px;
+      padding: 14px 20px 18px; border-top: 1px solid #ebeef5; background: #fafbfc;
+    }
+    .outlook-import-foot .jobs-tb-btn {
+      min-height: 40px; padding: 8px 18px; font-size: 14px;
+      border: 1px solid #dcdfe6; border-radius: 6px;
+      background: #fff; color: #606266; cursor: pointer;
+      display: inline-flex; align-items: center; white-space: nowrap;
+      font: inherit; line-height: 1; box-sizing: border-box;
+    }
+    .outlook-import-foot .jobs-tb-btn:hover:not(:disabled) {
+      color: #409eff; border-color: #c6e2ff; background: #ecf5ff;
+    }
+    .outlook-import-foot .jobs-tb-btn--primary {
+      color: #fff; background: #377DFF; border-color: #377DFF;
+    }
+    .outlook-import-foot .jobs-tb-btn--primary:hover:not(:disabled) {
+      background: #5a94ff; border-color: #5a94ff; color: #fff;
+    }
+    .outlook-import-foot .jobs-tb-btn:disabled {
+      opacity: .7; cursor: not-allowed;
+    }
+
+
+    /* ---- 新版配置布局（追加在概览下方） ---- */
+    .config-layout-v2 {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .config-nav-v2 {
+      position: sticky; top: 16px; z-index: 2;
+      align-self: start;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04); padding: 14px 10px;
+      box-sizing: border-box;
+    }
+    .config-nav-v2-title {
+      margin: 0 8px 10px; font-size: 13px; font-weight: 600; color: #909399;
+    }
+    .config-nav-v2-list {
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .config-nav-v2-item {
+      display: flex; align-items: center; gap: 10px;
+      width: 100%; margin: 0; padding: 10px 12px;
+      border: none; border-radius: 8px; background: transparent;
+      color: #606266; font: inherit; font-size: 14px; font-weight: 500;
+      text-align: left; cursor: pointer; box-sizing: border-box;
+      transition: background .12s ease, color .12s ease;
+    }
+    .config-nav-v2-item:hover { background: #f5f7fa; color: #303133; }
+    .config-nav-v2-item.is-active {
+      background: #ecf5ff; color: #377DFF;
+    }
+    .config-nav-v2-item svg {
+      width: 18px; height: 18px; flex-shrink: 0;
+      stroke: currentColor; fill: none;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .config-nav-v2-item span {
+      min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .config-main-v2 { min-width: 0; display: grid; gap: 16px; }
+    .config-cards-v2 {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+    }
+    .config-card-v2 {
+      min-height: 108px; padding: 16px;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04);
+      display: flex; flex-direction: column; gap: 8px;
+      position: relative;
+    }
+    .config-card-v2-top {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+    }
+    .config-card-v2-label {
+      font-size: 12px; color: #909399; line-height: 1.3;
+    }
+    .config-card-v2-icon {
+      width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0;
+      color: #409eff; background: color-mix(in srgb, #409eff 12%, transparent);
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .config-card-v2-icon svg {
+      width: 15px; height: 15px; stroke: currentColor; fill: none;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .config-card-v2-value {
+      font-size: 18px; font-weight: 700; color: #303133; line-height: 1.25;
+    }
+    .config-card-v2-value.is-placeholder { color: #c0c4cc; }
+    .config-card-v2-hint {
+      margin-top: auto; font-size: 12px; color: #909399; line-height: 1.4;
+    }
+    .config-ep-select {
+      position: relative; display: block; width: 100%; margin-top: 2px;
+    }
+    .config-ep-select-btn {
+      width: 100%; min-height: 36px; margin: 0; padding: 0 28px 0 12px;
+      border: 1px solid #dcdfe6; border-radius: 4px; background: #fff;
+      color: #303133; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: flex-start;
+      box-sizing: border-box; position: relative; text-align: left;
+    }
+    .config-ep-select-btn:hover,
+    .config-ep-select-btn:focus,
+    .config-ep-select.open .config-ep-select-btn {
+      color: #303133 !important; border-color: #dcdfe6 !important; background: #fff !important;
+    }
+    .config-ep-select-btn::after {
+      content: ""; position: absolute; right: 10px; top: 50%;
+      width: 0; height: 0; margin-top: -2px;
+      border-left: 4px solid transparent; border-right: 4px solid transparent;
+      border-top: 5px solid #909399;
+    }
+    .config-ep-select.open .config-ep-select-btn::after {
+      margin-top: -3px; border-top: none; border-bottom: 5px solid #909399;
+    }
+    .config-ep-select-menu {
+      display: none; position: absolute; left: 0; top: calc(100% + 8px);
+      min-width: 100%; width: max-content; max-width: 280px; padding: 6px;
+      border-radius: 8px; background: #fff;
+      box-shadow: 0 8px 24px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04);
+      z-index: 40; box-sizing: border-box;
+    }
+    .config-ep-select.open .config-ep-select-menu { display: block; }
+    .config-ep-select-item {
+      width: 100%; min-height: 34px; height: auto; margin: 0; padding: 8px 12px;
+      border: none; border-radius: 6px; background: transparent;
+      color: #606266; font: inherit; font-size: 14px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      box-sizing: border-box; white-space: nowrap;
+    }
+    .config-ep-select-item:hover { background: #f5f7fa; color: #377DFF; }
+    .config-ep-select-item.is-active { background: #f0f2f5; color: #303133; font-weight: 500; }
+    .config-select-v2-field .config-ep-select { margin-top: 6px; }
+    .config-select-v2-field .config-ep-select-btn { font-weight: 500; color: #606266; }
+    .config-sections-v2 { display: grid; gap: 16px; }
+    .config-section-v2 {
+      scroll-margin-top: 20px;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04); padding: 20px 22px; min-height: 120px;
+    }
+    .config-section-v2 h3 {
+      margin: 0; font-size: 18px; font-weight: 700; color: #303133;
+    }
+    .config-section-v2 > p {
+      margin: 8px 0 0; font-size: 13px; color: #909399; line-height: 1.5;
+    }
+    .config-section-v2-body {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+      gap: 12px 18px;
+      min-width: 0;
+    }
+    .config-section-v2-body--single {
+      grid-template-columns: minmax(0, 420px);
+    }
+    .config-select-v2-field select {
+      max-width: 100%;
+    }
+    .config-section-v2-body label.fld {
+      margin-bottom: 0;
+      min-width: 0; max-width: 100%; overflow: visible;
+    }
+    .config-section-v2-body label.fld > input,
+    .config-section-v2-body label.fld > select,
+    .config-section-v2-body label.fld > textarea {
+      width: 100%; max-width: 100%;
+    }
+    .config-section-v2-body label.fld .hint {
+      line-height: 1.45; white-space: normal; overflow: visible;
+      overflow-wrap: anywhere; word-break: break-word;
+    }
+    .config-field-wrap { min-width: 0; }
+    .config-field-wrap > label.fld { margin-bottom: 0; }
+    .config-external-link {
+      display: inline-flex; align-items: center; gap: 4px; margin-top: 7px;
+      color: #377DFF; font-size: 12px; font-weight: 500; text-decoration: none;
+    }
+    .config-external-link:hover { text-decoration: underline; }
+    .config-recommendations {
+      margin-top: 9px; padding: 10px 12px;
+      border: 1px solid #e6f0ff; border-radius: 8px; background: #f7fbff;
+      font-size: 12px; line-height: 1.55; color: #606266;
+    }
+    .config-recommendations-title { color: #303133; font-weight: 600; }
+    .config-recommendations-item { display: block; margin-top: 4px; }
+    .config-recommendations-item a { color: #377DFF; font-weight: 500; text-decoration: none; }
+    .config-recommendations-item a:hover { text-decoration: underline; }
+    .config-section-v2-actions {
+      margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px;
+    }
+    .config-section-v2-placeholder {
+      margin: 8px 0 0; font-size: 13px; color: #c0c4cc; line-height: 1.5;
+    }
+    .config-section-v2-head {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+    }
+    .config-section-v2-head-main { min-width: 0; }
+    .config-section-v2-head-icon {
+      width: 40px; height: 40px; flex-shrink: 0; border-radius: 10px;
+      color: #377DFF; background: color-mix(in srgb, #377DFF 12%, transparent);
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .config-section-v2-head-icon svg {
+      width: 22px; height: 22px; stroke: currentColor; fill: none;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .config-section-v2-meta {
+      margin: 6px 0 0; font-size: 13px; color: #909399; line-height: 1.4;
+    }
+    .config-switches-v2 {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px 28px;
+    }
+    .config-subtabs-v2 {
+      margin-top: 16px;
+      display: flex; gap: 8px; flex-wrap: wrap;
+      padding: 6px; border: 1px solid #ebeef5; border-radius: 10px; background: #fafbfc;
+    }
+    .config-subtabs-v2 button {
+      border: none; background: transparent; color: #606266;
+      border-radius: 8px; min-height: 34px; padding: 0 14px;
+      cursor: pointer; font: inherit; font-size: 13px; font-weight: 500;
+    }
+    .config-subtabs-v2 button:hover { background: #f5f7fa; color: #303133; }
+    .config-subtabs-v2 button.active { background: #ecf5ff; color: #377DFF; font-weight: 600; }
+    .config-section-v2-subhelp {
+      margin: 12px 0 0; font-size: 13px; color: #909399; line-height: 1.5;
+    }
+    .remail-promo-notice {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin: 0 0 0 10px; padding: 8px 12px;
+      color: #b42318; background: #fff1f0; border: 1px solid #fecdca;
+      border-radius: 8px; font-size: 13px; font-weight: 700; line-height: 1.4;
+      vertical-align: middle; white-space: nowrap;
+    }
+    .config-switches-v2 + .config-section-v2-body {
+
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid #ebeef5;
+    }
+    .config-switch-v2 {
+      min-width: 0; display: grid; gap: 12px; align-content: start;
+    }
+    .config-switch-v2-top {
+      display: flex; align-items: center; gap: 10px; min-width: 0;
+    }
+    .config-switch-v2-icon {
+      width: 36px; height: 36px; border-radius: 10px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .config-switch-v2-icon svg {
+      width: 18px; height: 18px; stroke: currentColor; fill: none;
+      stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+    .config-switch-v2-icon--codex { color: #409eff; background: color-mix(in srgb, #409eff 12%, transparent); }
+    .config-switch-v2-icon--2fa { color: #67c23a; background: color-mix(in srgb, #67c23a 12%, transparent); }
+    .config-switch-v2-icon--flow { color: #e6a23c; background: color-mix(in srgb, #e6a23c 12%, transparent); }
+    .config-switch-v2-icon--default { color: #909399; background: #f5f7fa; }
+    .config-switch-v2-label {
+      min-width: 0; font-size: 14px; font-weight: 600; color: #303133; line-height: 1.4;
+    }
+    .config-switch-v2-toggle {
+      position: relative; width: 40px !important; height: 22px !important;
+      min-width: 40px !important; max-width: 40px !important;
+      min-height: 22px !important; max-height: 22px !important;
+      margin: 0 !important; padding: 0 !important;
+      border: none !important; background: transparent !important;
+      cursor: pointer; box-sizing: border-box;
+      -webkit-appearance: none; appearance: none;
+      flex-shrink: 0;
+    }
+    .config-switch-v2-toggle::before {
+      content: ''; position: absolute; inset: 0;
+      border-radius: 999px; background: #dcdfe6;
+      transition: background .15s ease;
+    }
+    .config-switch-v2-toggle::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 18px; height: 18px; border-radius: 50%; background: #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,.18);
+      transition: transform .15s ease;
+    }
+    .config-switch-v2-toggle:checked::before { background: #377DFF; }
+    .config-switch-v2-toggle:checked::after { transform: translateX(18px); }
+    .config-switch-v2-toggle:focus-visible {
+      outline: 2px solid color-mix(in srgb, #377DFF 45%, transparent);
+      outline-offset: 2px; border-radius: 999px;
+    }
+    .config-switch-v2-help {
+      margin: 0; font-size: 12px; color: #909399; line-height: 1.55;
+    }
+    @media (max-width: 1100px) {
+      .config-switches-v2 { grid-template-columns: 1fr; gap: 16px; }
+    }
+    @media (max-width: 1100px) {
+      .config-cards-v2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 900px) {
+      .config-layout-v2 { grid-template-columns: 1fr; }
+      .config-nav-v2 { position: static; }
+    }
+    @media (max-width: 600px) {
+      .config-cards-v2 { grid-template-columns: 1fr; }
+    }
+
+    /* ---- 配置页概览 ---- */
+    .config-overview-v2 {
+      margin-top: 16px;
+      padding: 22px 24px;
+      border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
+      box-shadow: 0 0 12px rgba(0,0,0,.04);
+    }
+    .config-overview-v2-title {
+      margin: 0; font-size: 28px; font-weight: 700; color: #303133;
+      letter-spacing: -0.02em; line-height: 1.25;
+    }
+    .config-overview-v2-desc {
+      margin: 10px 0 0; max-width: 720px;
+      font-size: 13px; line-height: 1.65; color: #909399;
+    }
+    @media (max-width: 1100px) {
+      :root { --page-gutter: 16px; }
+      .accounts-table-v2 { min-width: 0; }
+      .accounts-table-v2 th, .accounts-table-v2 td { padding-left: 8px; padding-right: 8px; }
+      .accounts-table-v2 .col-email { width: 24%; }
+      .accounts-table-v2 .col-plan { width: 17%; }
+      .accounts-table-v2 .col-actions { width: 126px; }
+      .accounts-table-v2 th:nth-child(4), .accounts-table-v2 td:nth-child(4),
+      .accounts-table-v2 th:nth-child(6), .accounts-table-v2 td:nth-child(6),
+      .accounts-table-v2 th:nth-child(8), .accounts-table-v2 td:nth-child(8),
+      .accounts-table-v2 th:nth-child(11), .accounts-table-v2 td:nth-child(11) { display: none; }
+      .accounts-table-v2 .col-email,
+      .accounts-table-v2 .col-plan,
+      .accounts-table-v2 .col-actions { white-space: normal; }
+      #accountsToolbarV2 { align-items: stretch; }
+      #accountsToolbarV2 .acc-v2-btn-group { flex: 1 1 280px; min-width: 0; }
+    }
+
+    @media (max-width: 760px) {
+      body { padding-left: 64px; }
+      :root { --sidebar-width: 64px; --page-gutter: 10px; }
+      .app-sidebar { width: 64px; }
+      .sidebar-brand { justify-content: center; padding: 0; }
+      .sidebar-brand-title, .sidebar-item-label, .sidebar-footer span { display: none; }
+      .sidebar-nav { padding-left: 8px; padding-right: 8px; }
+      .app-sidebar .sidebar-nav button,
+      .sidebar-footer a, .sidebar-logout button { justify-content: center; padding-left: 10px; padding-right: 10px; }
+      .sidebar-footer { padding-left: 8px; padding-right: 8px; }
+      main { width: calc(100% - var(--page-gutter) * 2); margin-top: 12px; }
+      .register-title { font-size: 20px; }
+      .accounts-filter-v2 { padding-left: 10px; padding-right: 10px; }
+      .accounts-filter-v2 .acc-v2-search-wrap { flex-basis: 100%; width: 100%; min-width: 0; }
+      #accountsToolbarV2 .acc-v2-btn-group { flex-basis: 100%; }
+      .accounts-table-v2 th, .accounts-table-v2 td { padding-top: 10px; padding-bottom: 10px; }
+      .accounts-table-v2 .col-id { width: 54px; }
+      .accounts-table-v2 .col-email { width: auto; }
+      .accounts-table-v2 .col-plan { width: 22%; }
+      .accounts-table-v2 .col-small { width: 76px; }
+      .accounts-table-v2 .col-status { width: 76px; }
+      .accounts-table-v2 .col-actions { width: 112px; }
+      .accounts-table-v2 .acc-v2-actions { grid-template-columns: 1fr; gap: 4px; }
+      .accounts-table-v2 .acc-v2-email { overflow-wrap: anywhere; }
+      .jobs-table-v2 th, .jobs-table-v2 td { padding-left: 8px; padding-right: 8px; }
+      .jobs-table-v2 th:nth-child(2), .jobs-table-v2 td:nth-child(2),
+      .jobs-table-v2 th:nth-child(5), .jobs-table-v2 td:nth-child(5),
+      .jobs-table-v2 th:nth-child(6), .jobs-table-v2 td:nth-child(6),
+      .jobs-table-v2 th:nth-child(7), .jobs-table-v2 td:nth-child(7),
+      .jobs-table-v2 th:nth-child(8), .jobs-table-v2 td:nth-child(8) { display: none; }
+      .jobs-table-v2 { min-width: 0; }
+      .jobs-table-v2 .col-email { width: auto; min-width: 0; }
+      .jobs-table-v2 .col-actions { width: 128px; }
+      .jobs-table-v2 .jobs-v2-ops { flex-wrap: wrap; }
+      .jobs-v2-pager { padding-left: 10px; padding-right: 10px; gap: 4px; }
+      .jobs-v2-pager .pager-total { flex: 1 1 100%; }
+      .jobs-v2-pager .pager-goto { margin-left: auto; }
+      .codex-table-v2, .outlook-table-v2 { min-width: 0; }
+      .codex-table-v2 th:nth-child(4), .codex-table-v2 td:nth-child(4),
+      .codex-table-v2 th:nth-child(5), .codex-table-v2 td:nth-child(5),
+      .outlook-table-v2 th:nth-child(3), .outlook-table-v2 td:nth-child(3),
+      .outlook-table-v2 th:nth-child(5), .outlook-table-v2 td:nth-child(5) { display: none; }
+    }
+
+    @media (max-width: 420px) {
+      body { padding-left: 56px; }
+      :root { --sidebar-width: 56px; }
+      .app-sidebar { width: 56px; }
+      .sidebar-nav { padding-left: 4px; padding-right: 4px; }
+      .sidebar-footer { padding-left: 4px; padding-right: 4px; }
+      .accounts-table-v2 .col-id { display: none; }
+      .accounts-table-v2 .col-small, .accounts-table-v2 .col-status { width: 64px; }
+      .accounts-table-v2 .col-plan { width: 25%; }
+      .accounts-table-v2 .col-actions { width: 92px; }
+      .accounts-table-v2 .acc-v2-actions > button,
+      .accounts-table-v2 .acc-v2-more-btn { padding-left: 4px; padding-right: 4px; }
+      .jobs-toolbar-v2 { padding: 12px; }
+    }
+
+
+
+/* 任务中心 */
+.sidebar-item-badge {
+  min-width: 20px; height: 20px; padding: 0 6px; margin-left: auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: #ef4444; color: #fff; font-size: 11px; font-weight: 800;
+}
+.task-center-heading {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+}
+.task-center-subtitle { color: #667085; font-size: 13px; line-height: 1.5; margin-top: -6px; }
+.task-center-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.task-center-stat {
+  min-width: 0; padding: 16px 18px; border: 1px solid #ebeef5; border-radius: 8px;
+  background: #fff; box-shadow: 0 0 12px rgba(0,0,0,.03);
+}
+.task-center-stat span { display: block; color: #909399; font-size: 12px; }
+.task-center-stat strong { display: block; margin-top: 8px; color: #303133; font-size: 24px; line-height: 1; }
+.task-center-panel { min-width: 0; }
+.task-center-toolbar { justify-content: space-between; }
+.task-center-toolbar-title { display: flex; align-items: baseline; gap: 10px; color: #303133; font-size: 15px; font-weight: 700; }
+.task-center-toolbar-title .muted { font-size: 12px; font-weight: 400; }
+.task-center-table { min-width: 1080px; }
+.task-center-table .task-col-id { width: 100px; }
+.task-center-table .task-col-status { width: 110px; }
+.task-center-table .task-col-progress { width: 260px; }
+.task-center-table .task-col-email { width: 220px; }
+.task-center-table .task-col-stage { width: 170px; }
+.task-center-table .task-col-time { width: 175px; }
+.task-center-table .task-col-actions { width: 250px; }
+.task-center-table td { vertical-align: middle; }
+.task-progress-line { display: flex; align-items: center; gap: 10px; }
+.task-progress-line strong { min-width: 36px; color: #475467; font-size: 12px; text-align: right; }
+.task-progress-track { height: 8px; flex: 1; min-width: 100px; overflow: hidden; border-radius: 999px; background: #edf1f7; }
+.task-progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #3b66f5, #7c3aed); transition: width .3s ease; }
+.task-progress-message { margin-top: 6px; color: #909399; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-center-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.task-action-btn { min-height: 28px; padding: 0 9px; border: 1px solid #d9e2ec; border-radius: 6px; background: #fff; color: #475467; cursor: pointer; font-size: 12px; font-weight: 700; }
+.task-action-btn:hover { background: #f5f7fa; border-color: #b8c5d6; }
+.task-action-btn--view { color: #2563eb; border-color: #c8d7ff; background: #f3f6ff; }
+.task-action-btn--pause { color: #a16207; border-color: #f4d58d; background: #fffaf0; }
+.task-action-btn--resume { color: #166534; border-color: #b9dfc9; background: #f0fbf5; }
+.task-action-btn--cancel { color: #b3261e; border-color: #efb0ac; background: #fff7f6; }
+.task-action-btn:disabled { opacity: .55; cursor: not-allowed; }
+.task-center-stopping { color: #b7791f; font-size: 12px; }
+.task-center-empty { padding: 42px 16px !important; color: #909399; text-align: center !important; }
+@media (max-width: 700px) {
+  .task-center-heading { align-items: stretch; flex-direction: column; }
+  .task-center-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .task-center-table { min-width: 860px; }
+}

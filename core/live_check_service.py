@@ -86,7 +86,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         if (
             not result.get("ok")
             and result.get("status") == "failed"
-            and "403" in err_text
+            and (result.get("http_status") == 403 or "403" in err_text)
             and selected_proxy
             and str(route.get("network_route") or "") == "proxy"
         ):
@@ -104,13 +104,13 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 email_source=email_source,
                 fingerprint_state={},
             )
-        db.update_account_liveness(account_id, result)
-        if result.get("ok"):
-            _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")
-        elif result.get("status") == "deactivated":
-            _append_log(email, f"[查活] 完成：账号已废 {result.get('error') or ''}")
-        else:
-            _append_log(email, f"[查活] 完成：失败 {result.get('error') or ''}")
+            selected_proxy = None
+            route = {
+                **route,
+                "network_route": "direct",
+                "upstream_proxy_used": None,
+                "proxy_fallback_reason": "查活代理路线 HTTP 403，已使用独立直连会话兜底",
+            }
         result.update({
             "network_route": route.get("network_route"),
             "proxy_used": _mask_proxy(selected_proxy) or None,
@@ -118,6 +118,13 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             "proxy_mode": route.get("proxy_mode"),
             "proxy_fallback_reason": route.get("proxy_fallback_reason"),
         })
+        db.update_account_liveness(account_id, result)
+        if result.get("ok"):
+            _append_log(email, "[查活] 完成：账号正常，已刷新最新 AT/accessToken")
+        elif result.get("status") == "deactivated":
+            _append_log(email, f"[查活] 完成：账号已废 {result.get('error') or ''}")
+        else:
+            _append_log(email, f"[查活] 完成：失败 {result.get('error') or ''}")
         return result
     except Exception as exc:
         result = {

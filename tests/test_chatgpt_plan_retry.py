@@ -44,6 +44,15 @@ class _PlanSession:
                     }
                 }
             }),
+            _Response(200, data={
+                "active_start": "2025-01-01T00:00:00Z",
+                "active_until": "2025-02-01T00:00:00Z",
+                "became_delinquent_timestamp": "2025-01-15T00:00:00Z",
+                "grace_period_end_timestamp": "2025-01-22T00:00:00Z",
+                "billing_currency": "USD",
+                "billing_period": "monthly",
+                "plan_type": "chatgptplusplan",
+            }),
         ]
         self.created.append(self)
 
@@ -95,6 +104,8 @@ class ChatgptPlanRetryTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["attempt_count"], 2)
         self.assertEqual(result["timezone_offset_min"], "-540")
+        self.assertEqual(result["subscription_grace_period_end_at"], "2025-01-22T00:00:00Z")
+        self.assertEqual(result["subscription_became_delinquent_at"], "2025-01-15T00:00:00Z")
         self.assertEqual(len(_PlanSession.created), 1)
         session = _PlanSession.created[0]
         self.assertEqual(session.reset_count, 1)
@@ -106,6 +117,11 @@ class ChatgptPlanRetryTests(unittest.TestCase):
         self.assertEqual(first_headers["oai-device-id"], "device-one")
         self.assertEqual(first_headers["oai-session-id"], "session-one")
         self.assertNotIn("content-type", first_headers)
+        subscription_url, subscription_headers = session.requests[-1]
+        self.assertIn("/backend-api/subscriptions?account_id=acc-1", subscription_url)
+        self.assertEqual(subscription_headers["x-openai-target-path"], "/backend-api/subscriptions")
+        self.assertEqual(subscription_headers["x-openai-target-route"], "/backend-api/subscriptions")
+        self.assertEqual(subscription_headers["chatgpt-account-id"], "acc-1")
 
     def test_403_is_retryable(self):
         self.assertTrue(plan._retryable_plan_error(403))

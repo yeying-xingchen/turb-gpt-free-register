@@ -31,6 +31,7 @@ _retired_executors: list[ThreadPoolExecutor] = []
 _executor_lock = threading.RLock()
 
 _STOP_EVENTS: dict[int, threading.Event] = {}
+_PAUSE_EVENTS: dict[int, threading.Event] = {}
 _ACTIVE_JOBS: set[int] = set()
 _STOP_LOCK = threading.Lock()
 _THREAD_CTX = threading.local()
@@ -44,12 +45,15 @@ def _activate_job(job_id: int) -> None:
     _THREAD_CTX.job_id = int(job_id)
     with _STOP_LOCK:
         _STOP_EVENTS.setdefault(int(job_id), threading.Event())
+        pause_event = _PAUSE_EVENTS.setdefault(int(job_id), threading.Event())
+        pause_event.set()
         _ACTIVE_JOBS.add(int(job_id))
 
 
 def _deactivate_job(job_id: int) -> None:
     with _STOP_LOCK:
         _STOP_EVENTS.pop(int(job_id), None)
+        _PAUSE_EVENTS.pop(int(job_id), None)
         _ACTIVE_JOBS.discard(int(job_id))
     try:
         delattr(_THREAD_CTX, "job_id")
@@ -70,8 +74,25 @@ def is_stop_requested(job_id: int | None = None) -> bool:
     return bool(job and job.get("status") in ("stopping", "stopped", "cancelled"))
 
 
+def _wait_if_paused(job_id: int | None = None) -> None:
+    """在注册流程已有的检查点等待恢复；取消会通过事件唤醒等待。"""
+    if job_id is None:
+        job_id = getattr(_THREAD_CTX, "job_id", None)
+    if not job_id:
+        return
+    while True:
+        job = db.get_job(int(job_id))
+        if not job or job.get("status") != "paused":
+            return
+        with _STOP_LOCK:
+            pause_event = _PAUSE_EVENTS.setdefault(int(job_id), threading.Event())
+            pause_event.clear()
+        pause_event.wait(timeout=0.5)
+
+
 def check_stop_requested() -> None:
     job_id = getattr(_THREAD_CTX, "job_id", None)
+    _wait_if_paused(job_id)
     if is_stop_requested(job_id):
         raise StopRequested(f"任务 #{job_id} 已被用户手动停止")
 
@@ -88,6 +109,15 @@ def _append_job_log(job_id: int, message: str) -> None:
             f.write(f"{ts} [WARNING] [manual-stop] {message}\n")
     except Exception:
         pass
+
+
+def _set_job_progress(job_id: int, progress: int, stage: str, message: str = "") -> None:
+    db.update_job(
+        job_id,
+        progress=progress,
+        stage=stage,
+        progress_message=message or stage,
+    )
 
 
 def _random_display_name() -> str:
@@ -288,35 +318,56 @@ def _run_one_job(job_id: int, log_file: str) -> None:
         log_logger.info(f"[Job {job_id}] 已被用户取消，跳过执行")
         _deactivate_job(job_id)
         return
+    if current.get("status") == "paused":
+        _wait_if_paused(job_id)
+        current = db.get_job(job_id)
+        if not current or current.get("status") == "cancelled":
+            _deactivate_job(job_id)
+            return
 
-    db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
+    db.update_job(
+        job_id,
+        status="running",
+        started_at=None if current.get("started_at") else datetime.now().isoformat(timespec="seconds"),
+        progress=5,
+        stage="启动任务",
+        progress_message="任务线程已启动",
+    )
 
     email: str | None = None
     try:
         with _JobLogContext(log_file):
             from main import run_registration
             log_logger.info(f"[Job {job_id}] 开始注册任务")
+            _set_job_progress(job_id, 10, "准备注册", "正在准备注册参数")
             email, name, birthday = _prepare_registration_args()
             db.update_job(job_id, email=email)
+            _set_job_progress(job_id, 18, "准备邮箱", "已准备注册参数，等待邮箱流程")
             check_stop_requested()
             def _on_email_acquired(acquired_email: str) -> None:
                 nonlocal email
                 email = str(acquired_email or "").strip() or None
                 if email:
                     db.update_job(job_id, email=email)
+                    _set_job_progress(job_id, 25, "邮箱已分配", "邮箱已分配，开始注册流程")
                     log_logger.info(f"[Job {job_id}] 页面已找到邮箱输入框，已分配邮箱: {email}")
 
+            _set_job_progress(job_id, 30, "注册中", "正在执行注册流程")
             result = run_registration(
                 email=email,
                 name=name,
                 birthday=birthday,
                 on_email_acquired=_on_email_acquired,
             )
+            _set_job_progress(job_id, 90, "收尾中", "注册流程已返回，正在保存结果")
             if is_stop_requested(job_id):
                 _release_unconsumed_job_email(email, "用户手动停止")
                 db.update_job(
                     job_id,
                     status="stopped",
+                    progress=90,
+                    stage="已取消",
+                    progress_message="任务已按请求停止",
                     network_traffic=(result or {}).get("network_traffic") if isinstance(result, dict) else None,
                     error="用户手动停止",
                     completed_at=datetime.now().isoformat(timespec="seconds"),
@@ -327,6 +378,9 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 db.update_job(
                     job_id,
                     status="success",
+                    progress=100,
+                    stage="已完成",
+                    progress_message="注册任务已完成",
                     email=result.get("email"),
                     account_id=result.get("account_id"),
                     network_traffic=result.get("network_traffic"),
@@ -340,6 +394,8 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                 db.update_job(
                     job_id,
                     status="failed",
+                    stage="失败",
+                    progress_message="注册任务失败",
                     email=result_email,
                     account_id=(result or {}).get("account_id") if isinstance(result, dict) else None,
                     network_traffic=(result or {}).get("network_traffic") if isinstance(result, dict) else None,
@@ -395,8 +451,22 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
         codex_retry_service.release(email)
         _deactivate_job(job_id)
         return
+    if current.get("status") == "paused":
+        _wait_if_paused(job_id)
+        current = db.get_job(job_id)
+        if not current or current.get("status") == "cancelled":
+            codex_retry_service.release(email)
+            _deactivate_job(job_id)
+            return
 
-    db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
+    db.update_job(
+        job_id,
+        status="running",
+        started_at=None if current.get("started_at") else datetime.now().isoformat(timespec="seconds"),
+        progress=10,
+        stage="Codex 授权",
+        progress_message="正在执行 Codex 授权",
+    )
     try:
         result = codex_retry_service.run_worker(
             email,
@@ -404,12 +474,16 @@ def _run_codex_retry_job(job_id: int, log_file: str, email: str, account_id: int
             target_log_path=log_file,
         )
         now_iso = datetime.now().isoformat(timespec="seconds")
+        _set_job_progress(job_id, 90, "收尾中", "Codex 授权已返回，正在保存结果")
         if is_stop_requested(job_id) or result.get("status") == "stopped":
-            db.update_job(job_id, status="stopped", email=email, account_id=account_id, error=str(result.get("message") or "用户手动停止")[:500], completed_at=now_iso)
+            db.update_job(job_id, status="stopped", email=email, account_id=account_id, progress=90, stage="已取消", progress_message="任务已按请求停止", error=str(result.get("message") or "用户手动停止")[:500], completed_at=now_iso)
         elif result.get("ok"):
             db.update_job(
                 job_id,
                 status="success",
+                progress=100,
+                stage="已完成",
+                progress_message="Codex 授权已完成",
                 email=email,
                 account_id=account_id,
                 completed_at=now_iso,
@@ -644,6 +718,47 @@ def cancel_pending_jobs() -> int:
     return cancelled
 
 
+def pause_job(job_id: int) -> dict:
+    """暂停排队或运行中的任务；线程会在现有检查点等待恢复。"""
+    job = db.get_job(job_id)
+    if not job:
+        return {"ok": False, "error": "任务不存在", "status": 404}
+    status = str(job.get("status") or "")
+    if status == "paused":
+        return {"ok": True, "message": "任务已暂停", "job_id": job_id, "state": "paused"}
+    if status in ("success", "failed", "cancelled", "stopped", "stopping"):
+        return {"ok": False, "error": f"当前状态不支持暂停：{status}", "status": 409}
+    with _STOP_LOCK:
+        active = int(job_id) in _ACTIVE_JOBS
+        pause_event = _PAUSE_EVENTS.get(int(job_id))
+        if pause_event is not None:
+            pause_event.clear()
+    db.update_job(job_id, status="paused", stage="已暂停", progress_message="任务已暂停，等待恢复")
+    _append_job_log(job_id, "用户手动暂停：任务将在当前步骤结束后等待恢复。")
+    logger.info("[Service] 用户暂停任务 #%s active=%s", job_id, active)
+    return {"ok": True, "message": "任务已暂停", "job_id": job_id, "state": "paused"}
+
+
+def resume_job(job_id: int) -> dict:
+    """恢复暂停任务；已开始执行的任务继续使用原线程。"""
+    job = db.get_job(job_id)
+    if not job:
+        return {"ok": False, "error": "任务不存在", "status": 404}
+    if job.get("status") != "paused":
+        return {"ok": False, "error": f"当前状态不是暂停：{job.get('status')}", "status": 409}
+    with _STOP_LOCK:
+        active = int(job_id) in _ACTIVE_JOBS
+        pause_event = _PAUSE_EVENTS.get(int(job_id))
+    if job.get("started_at") and not active:
+        return {"ok": False, "error": "任务线程不存在，请重新重试该任务", "status": 409}
+    next_status = "running" if job.get("started_at") else "pending"
+    db.update_job(job_id, status=next_status, stage="继续执行", progress_message="任务已恢复，继续执行")
+    if pause_event is not None:
+        pause_event.set()
+    _append_job_log(job_id, "用户恢复任务：继续执行。")
+    return {"ok": True, "message": "任务已恢复", "job_id": job_id, "state": next_status}
+
+
 def request_stop_job(job_id: int) -> dict:
     """手动停止单个注册任务。pending 直接取消；running 设置停止标记，运行线程会在检查点退出。"""
     job = db.get_job(job_id)
@@ -657,6 +772,22 @@ def request_stop_job(job_id: int) -> dict:
         return {"ok": True, "message": "排队任务已取消", "job_id": job_id, "state": "cancelled"}
     if status in ("success", "failed", "cancelled", "stopped"):
         return {"ok": True, "message": f"任务已结束：{status}", "job_id": job_id, "state": status}
+    if status == "paused":
+        with _STOP_LOCK:
+            active = int(job_id) in _ACTIVE_JOBS
+            stop_event = _STOP_EVENTS.get(int(job_id))
+            pause_event = _PAUSE_EVENTS.get(int(job_id))
+            if stop_event is not None:
+                stop_event.set()
+            if pause_event is not None:
+                pause_event.set()
+        if active:
+            db.update_job(job_id, status="stopping", stage="取消中", progress_message="已发送取消信号")
+            _append_job_log(job_id, "用户取消已暂停任务：等待线程退出。")
+            return {"ok": True, "message": "已发送取消信号", "job_id": job_id, "state": "stopping"}
+        db.update_job(job_id, status="cancelled", completed_at=now_iso, stage="已取消", progress_message="任务已取消", error="用户手动取消")
+        _append_job_log(job_id, "用户取消：暂停任务已取消。")
+        return {"ok": True, "message": "暂停任务已取消", "job_id": job_id, "state": "cancelled"}
     if status in ("running", "stopping"):
         with _STOP_LOCK:
             active = int(job_id) in _ACTIVE_JOBS
