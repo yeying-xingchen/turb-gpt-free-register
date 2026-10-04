@@ -38,6 +38,7 @@ __pycache__/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+*.runtime.lock
 .venv/
 *.py[cod]
 *$py.class
@@ -89,3 +90,16 @@ webui.log
 webui.pid
 logs/
 run/
+
+# Nuxt frontend
+frontend/node_modules/
+frontend/.nuxt/
+frontend/.output/
+frontend/.data/
+frontend/coverage/
+frontend/test-results/
+frontend/dist
+
+# The legacy accounts/ rule must not hide Vue source components.
+!frontend/app/components/accounts/
+!frontend/app/components/accounts/*.vue

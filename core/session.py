@@ -90,6 +90,7 @@ class BrowserSession:
         sentinel_sid: str | None = None,
         browser_profile: dict | None = None,
         fingerprint_seed: str | None = None,
+        defer_identity_cookies: bool = False,
     ):
         """
         初始化会话。
@@ -100,6 +101,7 @@ class BrowserSession:
                    显式传 "" 表示禁用代理。
             detect_exit_geo: 是否探测出口 IP 并自动选择语言/时区画像。
                              套餐查询等短请求可关闭，避免额外网络等待。
+            defer_identity_cookies: 先访问首页，再调用 prime_identity_cookies 设置身份。
         """
         # proxy=None  → 从池里随机抽（默认行为），并按代理池上游配置决定是否链式
         # proxy=""    → 禁用代理（直连）
@@ -214,19 +216,19 @@ class BrowserSession:
         if issues:
             logger.warning("[指纹] 浏览器画像存在不一致: %s", "; ".join(issues))
 
-        # 让 HTTP Cookie、OAuth 参数 ext-oai-did、Sentinel 里的 id 三者一致。
-        # 浏览器里 oai-did 通常会作为一方 Cookie 存在；协议层主动补齐可减少同一会话内
-        # “头部/参数/JS 指纹有设备 ID，但 Cookie Jar 为空”的不一致。
-        for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
-            self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
-        # 参考真实前端会话：语言不仅体现在 Accept-Language/oai-language，也写入
-        # 同一个 Cookie Jar，避免代理为 JP 但 Cookie 仍泄漏默认地区。
-        locale = self.navigator_language()
-        for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
-            self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
+        # 查活先取得首页 Cookie，再补齐设备身份；其他调用方维持原初始化顺序。
+        if not defer_identity_cookies:
+            self.prime_identity_cookies()
 
         # Cloudflare 状态只能来自真实响应 Set-Cookie；这里仅记录变化，不主动伪造/覆盖。
         self._cf_cookie_seen = self.cf_cookie_snapshot()
+
+    def prime_identity_cookies(self) -> None:
+        """补齐设备和语言 Cookie，保留服务器下发的 CF/OAuth Cookie。"""
+        locale = self.navigator_language()
+        for domain in ("chatgpt.com", "auth.openai.com", "sentinel.openai.com"):
+            self.session.cookies.set("oai-did", self.device_id, domain=domain, path="/")
+            self.session.cookies.set("oai-locale", locale, domain=domain, path="/")
 
     def cf_cookie_snapshot(self) -> dict:
         """返回当前 CookieJar 中的 Cloudflare 关键 Cookie 摘要，便于确认同 IP/同会话连续性。"""

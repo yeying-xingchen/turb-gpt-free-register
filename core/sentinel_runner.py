@@ -52,8 +52,9 @@ _SENTINEL_DIR = _PROJECT_ROOT / "sentinel"
 _RUNNER_PATH = _SENTINEL_DIR / "sentinel-runner.js"
 _SDK_PATH = _SENTINEL_DIR / "sdk.js"
 
-# 各 flow 对应的 page-url（与浏览器实际页面一致，影响 sdk.js 指纹生成）
+# Auth flow 对应的 page-url（与浏览器实际页面一致，影响 sdk.js 指纹生成）
 _FLOW_PAGE_URL = {
+    "password_verify": "https://auth.openai.com/log-in/password",
     "username_password_create": "https://auth.openai.com/create-account/password",
     "email_otp_validate": "https://auth.openai.com/email-verification",
     "authorize_continue": "https://auth.openai.com/email-verification",
@@ -156,9 +157,8 @@ def generate_sentinel_token(
     build_id = str(profile.get("build_id", OPENAI_BUILD_ID))
     # Auth 页面 Sentinel token 的 documentElement 通常没有 data-build；
     # ChatGPT 页面 prepare/finalize 的 p 才带前端 build。
-    runner_build_id = "" if page_url is None and flow in {
-        "email_otp_validate", "authorize_continue", "oauth_create_account", "username_password_create"
-    } else build_id
+    # 复用 Auth 页面映射，避免新增 flow 时遗漏无 build 上下文。
+    runner_build_id = "" if page_url is None and flow in _FLOW_PAGE_URL else build_id
     timezone_iana = str(profile.get("timezone_iana", TIMEZONE_IANA))
     timezone_name = str(profile.get("timezone_name", TIMEZONE_NAME))
     timezone_offset_minutes = int(profile.get("timezone_offset_minutes", TIMEZONE_OFFSET_MINUTES))

@@ -396,90 +396,108 @@ def _build_cloak_locale_options(proxy_url: str | None = None) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
-def build_cloak_driver(proxy: str | None = None) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
+def build_cloak_driver(
+    proxy: str | None = None,
+    *,
+    isolated: bool = False,
+    force_proxy: bool = False,
+) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
     """启动 CloakBrowser 并返回 Selenium 风格 driver。
 
+    CLOAK_USE_PROXY 或 force_proxy 启用时：
     proxy=None  时按 config.proxy.PROXY_POOL 随机抽取；
     proxy=""    时显式禁用代理；
     proxy="..." 时使用指定代理。
+    isolated=True 忽略 CLOAK_USER_DATA_DIR，每次创建临时独立 browser/context。
     """
-    proxy_relay = None
+    browser = context = proxy_relay = None
     proxy_pool_target = ""
-    if proxy is None and bool(getattr(_cfg, "CLOAK_USE_PROXY", True)):
-        try:
-            from config.proxy import pick_proxy
-        except Exception:
-            proxy = None
-        else:
-            from core.proxy_chain import open_proxy_pool_proxy
-            proxy_pool_target = str(pick_proxy() or "").strip()
-            proxy, proxy_relay = open_proxy_pool_proxy(proxy_pool_target)
     try:
-        from cloakbrowser import launch, launch_persistent_context
-    except ImportError as exc:
-        raise RuntimeError("未安装 cloakbrowser，请执行：pip install cloakbrowser") from exc
+        use_proxy = force_proxy or bool(getattr(_cfg, "CLOAK_USE_PROXY", True))
+        if proxy is None and use_proxy:
+            try:
+                from config.proxy import pick_proxy
+            except Exception:
+                proxy = None
+            else:
+                from core.proxy_chain import open_proxy_pool_proxy
+                proxy_pool_target = str(pick_proxy() or "").strip()
+                proxy, proxy_relay = open_proxy_pool_proxy(proxy_pool_target)
+        try:
+            from cloakbrowser import launch, launch_persistent_context
+        except ImportError as exc:
+            raise RuntimeError("未安装 cloakbrowser，请执行：pip install cloakbrowser") from exc
 
-    launch_args = list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
-    seed = str(getattr(_cfg, "CLOAK_FINGERPRINT_SEED", "") or "").strip()
-    if seed:
-        launch_args.append(f"--fingerprint={seed}")
+        launch_args = list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
+        seed = str(getattr(_cfg, "CLOAK_FINGERPRINT_SEED", "") or "").strip()
+        if seed:
+            launch_args.append(f"--fingerprint={seed}")
 
-    proxy_url = _normalize_proxy(proxy) if bool(getattr(_cfg, "CLOAK_USE_PROXY", True)) else None
-    locale_opts = _build_cloak_locale_options(proxy_url)
-    # geoip=True 交给 CloakBrowser 根据当前出口 IP 自动匹配 timezone/locale/WebRTC。
-    # 之前只有显式 proxy_url 时才开启；如果用户走系统代理/VPN/透明代理，代码层面
-    # 看不到 proxy_url，会误关 geoip，导致语言/时区不跟随出口。这里改为完全尊重配置。
-    opts = {
-        "headless": bool(getattr(_cfg, "CLOAK_HEADLESS", False)),
-        "humanize": bool(getattr(_cfg, "CLOAK_HUMANIZE", True)),
-        "geoip": bool(getattr(_cfg, "CLOAK_GEOIP", True)),
-    }
-    if locale_opts.get("locale"):
-        opts["locale"] = locale_opts["locale"]
-    if locale_opts.get("timezone"):
-        opts["timezone"] = locale_opts["timezone"]
-    if proxy_url:
-        opts["proxy"] = proxy_url
-    if launch_args:
-        opts["args"] = launch_args
-    license_key = str(getattr(_cfg, "CLOAK_LICENSE_KEY", "") or "").strip()
-    if license_key:
-        opts["license_key"] = license_key
+        proxy_url = _normalize_proxy(proxy) if use_proxy else None
+        locale_opts = _build_cloak_locale_options(proxy_url)
+        # geoip=True 交给 CloakBrowser 根据当前出口 IP 自动匹配 timezone/locale/WebRTC。
+        # 之前只有显式 proxy_url 时才开启；如果用户走系统代理/VPN/透明代理，代码层面
+        # 看不到 proxy_url，会误关 geoip，导致语言/时区不跟随出口。这里改为完全尊重配置。
+        opts = {
+            "headless": bool(getattr(_cfg, "CLOAK_HEADLESS", False)),
+            "humanize": bool(getattr(_cfg, "CLOAK_HUMANIZE", True)),
+            "geoip": bool(getattr(_cfg, "CLOAK_GEOIP", True)),
+        }
+        if locale_opts.get("locale"):
+            opts["locale"] = locale_opts["locale"]
+        if locale_opts.get("timezone"):
+            opts["timezone"] = locale_opts["timezone"]
+        if proxy_url:
+            opts["proxy"] = proxy_url
+        if launch_args:
+            opts["args"] = launch_args
+        license_key = str(getattr(_cfg, "CLOAK_LICENSE_KEY", "") or "").strip()
+        if license_key:
+            opts["license_key"] = license_key
 
-    user_data_dir = str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
-    logger.info(
-        "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
-        opts.get("headless"), opts.get("humanize"), opts.get("geoip"),
-        proxy_url or "无", opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
-        locale_opts.get("accept_language") or "自动/默认", bool(user_data_dir),
-    )
-    context_kwargs = {}
-    if locale_opts.get("locale"):
-        context_kwargs["locale"] = locale_opts["locale"]
-    if locale_opts.get("timezone"):
-        context_kwargs["timezone_id"] = locale_opts["timezone"]
-    if locale_opts.get("accept_language"):
-        context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
+        user_data_dir = "" if isolated else str(getattr(_cfg, "CLOAK_USER_DATA_DIR", "") or "").strip()
+        logger.info(
+            "[Cloak] 启动 CloakBrowser：headless=%s humanize=%s geoip=%s proxy=%s locale=%s timezone=%s accept_language=%s persistent=%s",
+            opts.get("headless"), opts.get("humanize"), opts.get("geoip"),
+            proxy_url or "无", opts.get("locale") or "自动/默认", opts.get("timezone") or "自动/默认",
+            locale_opts.get("accept_language") or "自动/默认", bool(user_data_dir),
+        )
+        context_kwargs = {}
+        if locale_opts.get("locale"):
+            context_kwargs["locale"] = locale_opts["locale"]
+        if locale_opts.get("timezone"):
+            context_kwargs["timezone_id"] = locale_opts["timezone"]
+        if locale_opts.get("accept_language"):
+            context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
 
-    if user_data_dir:
-        context = launch_persistent_context(user_data_dir, **opts)
+        if user_data_dir:
+            context = launch_persistent_context(user_data_dir, **opts)
+            browser = getattr(context, "browser", None) or context
+            # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
+        else:
+            browser = launch(**opts)
+            context = browser.new_context(**context_kwargs)
         page = context.new_page()
-        browser = getattr(context, "browser", None) or context
-        # persistent context 的 locale/timezone 已通过 launch_persistent_context 参数传入。
-    else:
-        browser = launch(**opts)
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
 
-    driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
-    # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
-    # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
-    driver._registration_log_prefix = "[Cloak注册]"
-    driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
-    return driver, CloakOpenResult(raw={
-        "driver": "cloakbrowser",
-        "proxy": proxy_url,
-        "proxy_pool_target": proxy_pool_target or proxy_url,
-        "locale": locale_opts,
-        "options": {k: v for k, v in opts.items() if k != "license_key"},
-    })
+        driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
+        # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
+        # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
+        driver._registration_log_prefix = "[Cloak注册]"
+        driver.set_page_load_timeout(int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90))
+        return driver, CloakOpenResult(raw={
+            "driver": "cloakbrowser",
+            "proxy": proxy_url,
+            "proxy_pool_target": proxy_pool_target or proxy_url,
+            "locale": locale_opts,
+            "options": {k: v for k, v in opts.items() if k != "license_key"},
+        })
+    except BaseException:
+        # driver 尚未交给调用方；任意阶段失败都由这里释放已取得的资源。
+        # persistent context 可能同时充当 browser，避免对同一对象重复关闭。
+        for resource in (context, browser if browser is not context else None, proxy_relay):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    logger.debug("[Cloak] 启动失败后的资源清理失败", exc_info=True)
+        raise

@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_ENV_PATH = _PROJECT_ROOT / ".env"
+_ENV_PATH = Path(os.environ.get("TURB_ENV_FILE") or (_PROJECT_ROOT / ".env")).expanduser().resolve()
 _LOADED = False
 
 # 这些多行列表字段允许用空值显式覆盖为 []。
@@ -71,11 +71,9 @@ def load_env(*, override: bool = False) -> Path:
         _LOADED = True
         return _ENV_PATH
 
+    # 只读取指定文件；不存在时仍可使用系统环境变量，不向父目录搜寻密钥。
     if _ENV_PATH.exists():
         load_dotenv(dotenv_path=_ENV_PATH, override=override)
-    else:
-        # 仍然允许系统环境变量生效
-        load_dotenv(override=override)
     _LOADED = True
     return _ENV_PATH
 

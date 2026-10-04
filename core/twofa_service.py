@@ -5,17 +5,18 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
-from core import db
+from core import db, task_control
 from core.account_export import setup_2fa
 from core.session import BrowserSession, close_browser_session
 from core.proxy_utils import mask_proxy_url
 
 logger = logging.getLogger(__name__)
+
+KIND = "totp_setup"
 
 
 def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
@@ -26,14 +27,14 @@ def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
     return max(lower, min(upper, value))
 
 
-_MAX_WORKERS = 16
+_MAX_WORKERS = task_control.MAX_WORKERS
 _WORKERS = _int_setting("TWOFA_WORKERS", 4, 1, _MAX_WORKERS)
 _QUEUE_LIMIT = _int_setting("TWOFA_QUEUE_LIMIT", 200, _WORKERS, 5000)
-_EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="twofa")
+_EXECUTOR = task_control.register_pool(KIND, _WORKERS, max_workers=_MAX_WORKERS)
 _RUNNING: set[int] = set()
 _OUTSTANDING = 0
 _LOCK = threading.Condition()
-_LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
+_LOG_DIR: Path | None = None  # None follows the process-bound database log directory.
 
 
 def apply_settings() -> dict:
@@ -45,12 +46,13 @@ def apply_settings() -> dict:
         _WORKERS = workers
         _QUEUE_LIMIT = queue_limit
         _LOCK.notify_all()
-        return {
-            "workers": _WORKERS,
-            "queue_limit": _QUEUE_LIMIT,
-            "running": len(_RUNNING),
-            "outstanding": _OUTSTANDING,
-        }
+    _EXECUTOR.set_workers(_WORKERS)
+    return {
+        "workers": _WORKERS,
+        "queue_limit": _QUEUE_LIMIT,
+        "running": len(_RUNNING),
+        "outstanding": _OUTSTANDING,
+    }
 
 
 def _release_outstanding() -> None:
@@ -62,7 +64,7 @@ def _release_outstanding() -> None:
 
 def log_path(email: str) -> Path:
     safe = str(email or "").replace("/", "_").replace("\\", "_").replace(":", "_")
-    return _LOG_DIR / f"twofa-{safe}.log"
+    return (_LOG_DIR or db._LOG_DIR) / f"twofa-{safe}.log"
 
 
 def _normalize_proxy(proxy: str | None) -> str | None:
@@ -126,9 +128,8 @@ def _run_twofa(
     root_logger = logging.getLogger()
     thread_name = threading.current_thread().name
     try:
+        task_control.checkpoint(KIND, account_id)
         with _LOCK:
-            while len(_RUNNING) >= _WORKERS:
-                _LOCK.wait()
             _RUNNING.add(int(account_id))
         if not db.mark_account_totp_setup_running(account_id):
             return {"ok": False, "status": "failed", "error": "账号已删除或 2FA 状态已被重置"}
@@ -152,6 +153,7 @@ def _run_twofa(
             f"source={proxy_source} device_id={session.device_id}",
         )
         _append_log(email, f"[2FA] 指纹摘要：{session.fingerprint_summary_text()}")
+        task_control.checkpoint(KIND, account_id)
         secret = setup_2fa(session, email, access_token=access_token)
         db.update_account_totp_secret(
             account_id,
@@ -160,6 +162,14 @@ def _run_twofa(
         _append_log(email, f"[2FA] 完成：secret={secret[:4]}...{secret[-4:]}")
         logger.info("[2FA] 完成：email=%s secret=%s...%s", email, secret[:4], secret[-4:])
         return {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"}
+    except task_control.TaskCancelled:
+        result = {"ok": False, "status": "cancelled", "error": "用户取消 2FA 设置"}
+        try:
+            db.update_account_totp_secret(account_id, result)
+            _append_log(email, "[2FA] 已取消：用户手动取消")
+        except Exception:
+            logger.exception("[2FA] 写回取消状态失败: account_id=%s", account_id)
+        return result
     except Exception as exc:
         result = {"ok": False, "status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
         try:
@@ -193,6 +203,23 @@ def _run_twofa(
             _RUNNING.discard(int(account_id))
             _OUTSTANDING = max(0, _OUTSTANDING - 1)
             _LOCK.notify_all()
+        task_control.release(KIND, account_id)
+
+
+def _cancel_pending_twofa(account_id: int) -> None:
+    """排队中的 2FA 任务被取消：释放占用并写回取消状态。"""
+    global _OUTSTANDING
+    with _LOCK:
+        _RUNNING.discard(int(account_id))
+        _OUTSTANDING = max(0, _OUTSTANDING - 1)
+        _LOCK.notify_all()
+    try:
+        db.update_account_totp_secret(int(account_id), {
+            "ok": False, "status": "cancelled", "error": "用户取消 2FA 设置",
+        })
+    except Exception:
+        logger.exception("[2FA] 写回取消状态失败: account_id=%s", account_id)
+    task_control.release(KIND, account_id)
 
 
 def queue_settings() -> dict:
@@ -235,16 +262,21 @@ def enqueue_account_totp_setup(
 
     _append_log(email, f"[2FA] 已入队 account_id={account_id} trigger={trigger}", clear=True)
     try:
-        future = _EXECUTOR.submit(
+        accepted = _EXECUTOR.submit(
             _run_twofa,
             account_id=account_id,
             email=email,
             access_token=access_token,
             proxy=proxy,
             trigger=str(trigger or "manual"),
+            control=task_control.control(KIND, account_id),
+            on_cancel=lambda: _cancel_pending_twofa(account_id),
         )
-        return {"accepted": True, "busy": False, "future": future, "log_path": str(log_path(email))}
+        if accepted is False:
+            raise RuntimeError("2FA 队列已关闭")
+        return {"accepted": True, "busy": False, "future": accepted, "log_path": str(log_path(email))}
     except Exception as exc:
+        task_control.release(KIND, account_id)
         _release_outstanding()
         db.update_account_totp_secret(account_id, {"ok": False, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
         return {"accepted": False, "busy": False, "error": f"{type(exc).__name__}: {exc}"}

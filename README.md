@@ -86,18 +86,24 @@ EMAIL_SOURCE = "outlook,generic_api,imap"
 
 - 批量启动注册任务。
 - 实时查看任务日志。
+- 任务中心统一展示注册、Codex 补跑、开通 Plus、查活、查套餐、提链、支付、2FA、邮箱换绑和 Agent Token 生成的进度与历史；同一账号多次执行分别留档。账号操作提供本次执行的阶段日志，暂停/恢复/取消按钮按任务实际能力显示，「取消排队注册」仅作用于注册队列。
 - 动态调整注册线程数，提交后新任务立即使用最新值。
 - 批量补跑 Codex，补跑线程数每次提交即时生效。
 - 管理账号、邮箱池、Codex 凭证；账号页支持单个/批量换绑邮箱并指定新邮箱来源，换绑后同时展示原邮箱与当前邮箱，支持查看换绑日志，并自动查活刷新 AT。
-- 账号查活优先使用已保存的密码，并按服务端实际要求完成邮箱 OTP / MFA；支持 TOTP Base32 密钥和 `otpauth://totp/` URI，动态码临近过期时等待下一窗口，明确无效时最多重试一次。没有密码和 2FA 的旧记录仍可使用已有 AT 的邮箱重认证链。只有完成 Web 登录并取得新 AT 才标记正常；密码错误、验证码错误、限流或网络阻断记为查活失败，明确停用/删除/封禁才标记废号。遇到手机号验证或资料补全会提示先处理。登录状态分流与 TOTP 处理参考 [reauth-web](https://github.com/boji1334/reauth-web)，保留本项目的 ChatGPT Web Session/AT 用途。
+- 账号查活通过独立的 `LIVE_CHECK_DRIVER` 选择 `protocol`（默认）或 `cloak`，不自动跟随注册或 Codex 授权驱动；启用方式见下方「配置查活驱动」。协议驱动参考协议登录样本，按“首页 → 设备 Cookie → 登录页 → CSRF → Signin(login)”建立登录上下文，优先使用已保存的密码，并按服务端实际要求完成邮箱 OTP / MFA；支持 TOTP Base32 密钥和 `otpauth://totp/` URI，动态码临近过期时等待下一窗口，明确无效时最多重试一次。兼容 MFA 页面别名、Location 重定向及相对回调地址；回调成功后空 Session 最多轮询 8 次，每次间隔 0.35 秒，不重复消费 OAuth code。没有密码和 2FA 的旧记录仍可使用已有 AT 的邮箱重认证链。查活自动重试可在配置页「账号查活」或 `.env` 中独立设置：`LIVE_CHECK_MAX_ATTEMPTS=3` 表示含首次最多尝试 3 次，运行时限定 1–5，设为 1 关闭整链自动重试（仍保留阶段内 CSRF/OTP 重试与 Session 轮询）；`LIVE_CHECK_RETRY_DELAY=2.0` 为基础秒数，运行时限定 0–60，按 1、2、4 倍指数退避，单次延迟最多 60 秒。瞬时网络错误、403/408/429/5xx 或 Session 尚未就绪时会有限重登，优先未用代理；单代理或代理耗尽时使用独立会话重试原出口，代理池非空不回退直连。密码/密钥等明确凭据错误和明确废号不重复整链登录，验证码阶段仍保留有限重取新码。只有完成 Web 登录并取得新 AT 才标记正常；密码错误、验证码错误、限流或网络阻断记为查活失败，明确停用/删除/封禁才标记废号。遇到手机号验证或资料补全会提示先处理。登录状态分流与 TOTP 处理参考 [reauth-web](https://github.com/boji1334/reauth-web)，保留本项目的 ChatGPT Web Session/AT 用途。
 - 邮箱池导入默认不创建账号；勾选“导入后默认视为注册成功账号”后，会将邮箱池标记为已用并同步显示在账号页，可直接批量补跑 Codex。
 - Roxy/Cloak 浏览器注册完成后统计整个浏览器会话的上传、下载和总流量，任务列表与账号扩展信息均会保存结果；Browser Use/Skyvern 云端浏览器不启用本地流量监听、资源拦截或 JS 覆盖率采集。
 - 配置页支持热加载，保存后无需重启。
-- 支持 Plus 兑换：管理员在「兑换管理」生成带数量/有效期的 CDK，用户访问 `/redeem` 输入 CDK 后，从已知 Plus 库存中一次性领取登录凭据并下载 TXT；同一账号只会发放一次，库存不足时不会扣减 CDK。
+- 提链服务商支持 UPI-GIT5：单账号与多账号合并批次、CDK 额度查询、进度刷新、取消和二维码；使用前需填写上游可连接的入口代理，详见 [UPI-GIT5 提链接入](docs/upi_git5_integration.md)。
+- 账号页支持选择已提炼的 UPI 账号并「提交支付」，支付 CDK 由用户当次输入；默认 Astra Scan Workbench 只发送链接和邮箱，masi 与 UPI OrderHub 自动发送所选账号的完整 AT；OrderHub 支持 API Key 或数字雇主账号登录。支持逐条结果、订单查询和幂等恢复，详见 [支付接入说明](docs/payment_integration.md)。
+- 管理员可在账号页勾选账号并点击「开通 Plus」，选择提链和支付凭据后，后台自动完成资格查询、UPI 提链、支付及真实套餐核验；支持进度展示、重复点击保护和中断后核对原任务。当前适用于 free 且可 Plus 试用的账号，详见 [开通与支付说明](docs/payment_integration.md)。
+- 支持 CDK 兑换：管理员在「兑换管理」生成绑定分组、带数量/有效期的 CDK，用户访问 `/redeem` 输入 CDK 和本次兑换数量（默认 1 个，支持分次领取），成功后先在页面查看邮箱、密码和 2FA 密钥，再手动下载 TXT。页面保留当前会话内各批次结果；同一账号只会发放一次，数量无效、超出剩余额度或库存不足时不会扣减 CDK。`POST /api/redeem` 支持整数 `quantity`，省略时兼容旧行为，兑换全部剩余额度。
 
 ### 数据存储
 
-- 账号、邮箱库、任务、Codex 凭证及兑换数据运行时统一存储在项目根目录 `turb.sqlite3`，按业务拆分为 `accounts`、`email_pool`、`registration_jobs`、`codex_accounts`、`codex_agent_accounts`、`redeem_codes` 和 `redeem_claims` 表。
+- 账号、邮箱库、任务、Codex 凭证及兑换数据运行时默认存储在项目根目录 `turb.sqlite3`（可通过进程环境变量 `TURB_DATA_DIR` 指定目录），按业务拆分为 `accounts`、`email_pool`、`registration_jobs`、`codex_accounts`、`codex_agent_accounts`、`redeem_codes`、`redeem_claims` 和 `redeem_deliveries` 等表。
+- 同一数据库的 CLI/WebUI 使用进程运行锁；应用构造不再恢复任务，启动入口持锁后执行恢复。任务进度、套餐/查活/Codex 状态和邮箱领取等热点使用行级事务。
+- 兑换领取与交付快照在同一事务提交；带原 `request_id` 的重试可恢复原批次，下载固定 10 分钟内可重复读取。启动、隔离测试及分批恢复协议详见 [运行与交付说明](docs/runtime_reliability.md)。
 - 数据库启用 WAL、超时等待和常用字段索引，WebUI 的账号、套餐状态、邮箱库、Codex 和任务分页直接执行 SQLite `COUNT(*) + LIMIT/OFFSET`，不再先读取全量数据后由 Python 切片。
 - 首次启动会自动把现有 JSON/历史 SQLite 数据迁移到新数据库；迁移完成后不再读写账号、任务、邮箱池和 Codex 凭证 JSON/TXT 文件。
 - `turb.sqlite3*` 属于运行时数据，已加入 `.gitignore`，请纳入备份策略。
@@ -176,10 +182,10 @@ Roxy/Selenium 会在当前 Chrome target 上启用 CDP `Profiler.startPreciseCov
 ## 环境要求
 
 - Python 3.10+
-- Node.js 18+
+- Node.js 22.12+（推荐 Node.js 24 LTS；Nuxt 前端构建需要）
 - 可用代理、系统代理/VPN，或 RoxyBrowser 代理环境
 - 如使用 Roxy 注册：需要本机 RoxyBrowser API 可访问
-- 如使用 Cloak 注册：首次运行会自动下载 Cloak Chromium binary；`CLOAK_GEOIP=True` 需要 `cloakbrowser[geoip]` 依赖
+- 如使用 Cloak 注册或查活：需要 `cloakbrowser>=0.4.10` 和 `playwright>=1.49.0`；首次运行会自动下载 Cloak Chromium binary；`CLOAK_GEOIP=True` 需要 `cloakbrowser[geoip]` 扩展（已包含在 `requirements.txt`）
 - 如启用 Codex 自动授权：需要接码平台配置
 
 安装依赖：
@@ -190,9 +196,13 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
 .venv/bin/python -m pip install -r requirements.txt
 node --version
+npm --prefix frontend ci
+npm --prefix frontend run build
 ```
 
-启动 WebUI 时，`webui.sh` 会优先使用 `.venv/bin/python`：
+前端已使用 **Nuxt 4 + Vue 3 + TypeScript** 重写，代码位于 `frontend/`。生产构建输出到 `frontend/.output/public/`，由现有 Flask 服务直接提供，生产环境无需额外运行 Node 服务。默认控制台、登录页和公开兑换页均使用新前端；登录后可在页面入口切换到旧版侧边栏（`/?ui=modern`）或历史版顶部导航（`/?ui=legacy`），两个旧页面也提供回切入口。详细开发、部署与验证方式见 [Nuxt 前端说明](docs/nuxt_frontend.md)。
+
+启动 WebUI 时，`webui.sh` 会优先使用 `.venv/bin/python`；首次启动若缺少前端产物，会自动安装锁定依赖并构建：
 
 ```bash
 ./webui.sh start
@@ -585,6 +595,34 @@ CPA_MANAGEMENT_KEY = "你的CPA管理密钥"
 
 ---
 
+### 5. 配置查活驱动
+
+在 WebUI「配置 → 账号查活 → 查活驱动」选择「CloakBrowser」并保存，也可以在项目根目录 `.env` 设置：
+
+```dotenv
+# 默认使用协议查活；切换到 CloakBrowser 时显式设为 cloak
+LIVE_CHECK_DRIVER=cloak
+CLOAK_HEADLESS=True
+CLOAK_HUMANIZE=True
+CLOAK_GEOIP=True
+```
+
+`LIVE_CHECK_DRIVER` 的源码默认值位于 `config/live_check.py`，为 `protocol`。只支持 `protocol` / `cloak`，不支持 `same_as_registration` 等自动跟随模式；修改 `REGISTRATION_DRIVER` 或 `CODEX_OAUTH_DRIVER` 不会改变查活驱动。配置遵循现有 `.env` / 环境变量覆盖规范，并纳入 `config.reload_all()`；通过 WebUI 保存后热加载，后续启动的查活读取新配置。
+
+启用 Cloak 前，在运行项目的 Python 环境中安装依赖：
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+依赖文件已包含 `cloakbrowser[geoip]>=0.4.10` 和 `playwright>=1.49.0`；Cloak 首次启动会自动下载 Chromium binary，需要网络可访问下载源。`CLOAK_HEADLESS=False` 时需要可用的图形显示环境，服务器通常使用 `True`。使用默认 `protocol` 查活无需启动 Cloak 浏览器。
+
+Cloak 查活复用「CloakBrowser」中的 `CLOAK_HEADLESS`、`CLOAK_HUMANIZE`、`CLOAK_GEOIP`、`CLOAK_LOCALE`、`CLOAK_TIMEZONE`、`CLOAK_LICENSE_KEY`、`CLOAK_FINGERPRINT_SEED` 和 `CLOAK_SELENIUM_TIMEOUT` 等运行参数。每次查活强制创建临时、独立的浏览器上下文，不读取 `CLOAK_USER_DATA_DIR` 的持久化登录态；成功或失败都会关闭上下文和浏览器，`CLOAK_KEEP_BROWSER_OPEN=True` 对查活也不生效。
+
+查活出口沿用现有查活网络路由、上游代理及重试策略：代理候选优先取 `PLAN_CHECK_PROXY`，未配置时取 `PROXY_POOL`；代理池非空时不回退直连。Cloak 使用查活服务实际传入的出口，`CLOAK_USE_PROXY=False` 不会使查活绕过已选代理，也不会另行抽取注册代理。协议与 Cloak 查活都只有在重新登录并取得新 AT 后才标记正常。
+
+---
+
 ## 使用方式
 
 ## WebUI 推荐方式
@@ -640,10 +678,11 @@ WebUI 页面说明：
 | 页面 | 功能 |
 |---|---|
 | 注册 | 设置注册数量、线程数，启动批量注册，查看任务和日志 |
+| 任务中心 | 汇总各种后台任务的类型、进度、结果和阶段日志，查看按执行次数保存的历史记录 |
 | 账号 | 查看账号、复制 token、补跑 Codex、批量删除账号 |
 | Codex 授权 | 查看/下载/删除 SQLite 中的 Codex 凭证 |
 | 邮箱池 | 导入邮箱、筛选来源、标记可用/失败、删除邮箱 |
-| 兑换管理 | 生成带数量/有效期的 CDK、查看 Plus 可兑换库存、停用未使用 CDK；公开页为 `/redeem` |
+| 兑换管理 | 生成绑定分组、带数量/有效期的 CDK，查看库存、停用 CDK；公开页 `/redeem` 支持指定本次数量、分次兑换、页面展示凭据及手动下载 |
 | 配置 | 修改运行配置并热加载，含 Roxy、Codex、邮箱、代理、人工节奏等 |
 
 ### 线程数说明
@@ -766,6 +805,8 @@ WebUI 配置页保存后会调用热加载；Roxy、Codex、邮箱、代理、�
 | `turb.sqlite3` | 账号、邮箱库、任务、Codex 和 Agent 凭证全部数据 |
 | 旧 JSON/TXT/Codex 文件 | 仅用于首次迁移，运行期间不再读写 |
 | `注册日志/` | 注册任务日志、Codex 补跑日志 |
+| `注册日志/scan-payment-<id>.log` | 「提交支付」完整日志：逐步动作、目标地址、请求头、请求体、响应、状态码、耗时、任务 ID 与错误；默认明文记录支付 CDK、OrderHub API Key 和账号 AT |
+| `注册日志/extract-link-<id>.log` | 「提链」完整日志：入队、任务创建、SSE 事件流、批次绑定与轮询、最终结果；默认明文记录提链 CDK、账号 AT、租户会话 token 和入口代理 |
 
 ---
 

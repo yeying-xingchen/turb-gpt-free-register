@@ -79,6 +79,13 @@ class UiAssetTests(unittest.TestCase):
         self.assertRegex(html, r'<link rel="stylesheet" href="/assets/console.css\?v=[a-f0-9]+">')
         self.assertNotIn('async function loadAccounts()', html)
         self.assertIn('accountsBodyV2', html)
+        self.assertIn('data-extract-manage', html)
+        self.assertRegex(html, r'<link rel="stylesheet" href="/assets/extract-links.css\?v=[a-f0-9]+">')
+
+        with self.app.test_request_context():
+            legacy = self.app.jinja_env.get_template('index_legacy.html').render()
+        self.assertIn('data-extract-manage', legacy)
+        self.assertIn('window.ExtractLinks.open', legacy)
 
 
 if __name__ == '__main__':

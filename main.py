@@ -673,6 +673,14 @@ def main():
         logger.error("多线程注册需要启用 Outlook 自动取件；请开启 USE_EMAIL_SERVICE 或改用 --workers 1")
         sys.exit(1)
 
+    from core.runtime import acquire_runtime_owner, recover_startup
+    try:
+        runtime_owner = acquire_runtime_owner()
+    except RuntimeError as exc:
+        logger.error(str(exc))
+        raise SystemExit(2) from exc
+    recover_startup(runtime_owner)
+
     if args.workers > args.count:
         logger.info(f"[批量] 并发线程数 {args.workers} 大于目标数量，已按 {args.count} 个任务执行")
         args.workers = args.count

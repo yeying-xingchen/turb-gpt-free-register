@@ -74,7 +74,6 @@ class AccountLivenessTests(unittest.TestCase):
     def test_preflight_preserves_explicit_direct_route_and_skips_providers(self):
         with patch.object(liveness, "BrowserSession", _DummyBrowserSession), \
              patch.object(liveness, "_warm_login_fingerprint_context"), \
-             patch.object(liveness, "probe_auth_session"), \
              patch.object(liveness, "get_csrf_token", return_value="csrf"), \
              patch.object(liveness, "signin_openai", return_value="https://auth.example/authorize"):
             session, authorize_url = liveness._network_preflight_with_retry(
@@ -89,7 +88,6 @@ class AccountLivenessTests(unittest.TestCase):
         csrf_errors = [RuntimeError("HTTP Error 403"), "csrf"]
         with patch.object(liveness, "BrowserSession", _DummyBrowserSession), \
              patch.object(liveness, "_warm_login_fingerprint_context"), \
-             patch.object(liveness, "probe_auth_session"), \
              patch.object(liveness, "get_csrf_token", side_effect=csrf_errors), \
              patch.object(liveness, "signin_openai", return_value="authorize"), \
              patch.object(liveness.time, "sleep"):
@@ -290,7 +288,8 @@ class AccountLivenessTests(unittest.TestCase):
              patch.object(live_service, "resolve_plan_check_route", side_effect=route_for), \
              patch.object(live_service, "open_plan_check_proxy", side_effect=lambda route, selected, timeout: (selected, None)), \
              patch("config.proxy.PLAN_CHECK_PROXY", [proxy_a, proxy_b]), \
-             patch("config.proxy.PLAN_CHECK_MAX_ATTEMPTS", 3), \
+             patch("config.proxy.LIVE_CHECK_MAX_ATTEMPTS", 3), \
+             patch("config.proxy.LIVE_CHECK_RETRY_DELAY", 0.0), \
              patch.object(live_service.random, "choice", return_value=proxy_b), \
              patch.object(live_service, "check_account_liveness", side_effect=[failed, success]) as check:
             result = live_service._run_live_check(
@@ -332,24 +331,27 @@ class AccountLivenessTests(unittest.TestCase):
              patch.object(live_service, "resolve_plan_check_route", return_value=route), \
              patch.object(live_service, "open_plan_check_proxy", side_effect=lambda route, selected, timeout: (selected, None)), \
              patch("config.proxy.PLAN_CHECK_PROXY", [proxy_url]), \
-             patch("config.proxy.PLAN_CHECK_MAX_ATTEMPTS", 3), \
+             patch("config.proxy.LIVE_CHECK_MAX_ATTEMPTS", 3), \
+             patch("config.proxy.LIVE_CHECK_RETRY_DELAY", 0.0), \
              patch.object(live_service, "check_account_liveness", return_value=failed) as check:
             result = live_service._run_live_check(
                 account_id=1, email="user@example.com", proxy=None, trigger="manual",
             )
 
         self.assertFalse(result["ok"])
-        check.assert_called_once()
-        self.assertEqual(check.call_args.kwargs["proxy"], proxy_url)
+        self.assertEqual(check.call_count, 3)
+        self.assertEqual(result["attempts"], 3)
+        self.assertTrue(all(entry.kwargs["proxy"] == proxy_url for entry in check.call_args_list))
+        self.assertTrue(check.call_args_list[1].kwargs["fingerprint_state"]["force_fresh"])
         self.assertTrue(slot.released)
 
     def test_direct_success_clears_previous_proxy_record(self):
         row = {"id": 1, "email": "user@example.com", "live_check_proxy_used": "old-proxy"}
-        with patch.object(liveness.db, "_load_accounts", return_value=[row]), \
-             patch.object(liveness.db, "_save_accounts"):
-            liveness.db.update_account_liveness(1, {
-                "ok": True, "access_token": "new-token", "proxy_used": None,
-            })
+        liveness.db._save_collection("accounts", [row])
+        liveness.db.update_account_liveness(1, {
+            "ok": True, "access_token": "new-token", "proxy_used": None,
+        })
+        row = liveness.db.get_account(1)
         self.assertIsNone(row["live_check_proxy_used"])
         self.assertEqual(row["access_token"], "new-token")
 

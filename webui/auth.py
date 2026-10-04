@@ -102,11 +102,20 @@ def _unauthorized_response():
 
 
 def register_auth_routes(app: Any) -> None:
+    @app.after_request
+    def _prevent_api_caching(response: Response):
+        # Business APIs can contain credentials, configuration or task logs.
+        # Cover successful responses and errors; versioned UI assets keep their cache policy.
+        if request.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
     @app.before_request
     def _require_auth_code():
         endpoint = request.endpoint or ""
         public_endpoints = set(app.config.get("AUTH_PUBLIC_ENDPOINTS") or ())
-        if endpoint in {"auth_login", "auth_logout", "static", *public_endpoints}:
+        if endpoint in {"auth_login", "auth_logout", "api_auth_login", "api_auth_session", "api_auth_logout", "static", *public_endpoints}:
             return None
         if request.path in ("/favicon.ico",):
             return Response(status=204)
@@ -114,8 +123,31 @@ def register_auth_routes(app: Any) -> None:
             return None
         return _unauthorized_response()
 
+    @app.get("/api/auth/session", endpoint="api_auth_session")
+    def _api_auth_session():
+        return jsonify({"ok": True, "authenticated": request_is_authorized()})
+
+    @app.post("/api/auth/login", endpoint="api_auth_login")
+    def _api_auth_login():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get("auth_code"), str):
+            return jsonify({"ok": False, "error": "请输入授权码"}), 400
+        if not code_is_valid(data["auth_code"].strip()):
+            return jsonify({"ok": False, "error": "授权码错误"}), 401
+        session.permanent = data.get("remember") is True
+        session[_SESSION_KEY] = True
+        return jsonify({"ok": True, "authenticated": True})
+
+    @app.post("/api/auth/logout", endpoint="api_auth_logout")
+    def _api_auth_logout():
+        session.pop(_SESSION_KEY, None)
+        return jsonify({"ok": True})
+
     @app.route("/login", methods=["GET", "POST"], endpoint="auth_login")
     def _auth_login():
+        if request.method == "GET":
+            from webui.frontend import frontend_page
+            return frontend_page()
         error = ""
         next_url = request.values.get("next") or "/"
         if not str(next_url).startswith("/") or str(next_url).startswith("//"):

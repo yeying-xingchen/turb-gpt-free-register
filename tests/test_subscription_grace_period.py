@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import unittest
-from unittest.mock import patch
 
 from core import db
 from core.chatgpt_plan import parse_subscription
@@ -35,18 +34,18 @@ class SubscriptionGracePeriodTests(unittest.TestCase):
             "subscription_http_status": 200,
             "subscription_error": None,
         }
-        with patch.object(db, "_load_accounts", return_value=rows), patch.object(db, "_save_accounts"):
-            db.update_account_plan_check(acc_id=1, result=result)
-            compact = _compact_account_for_list(rows[0])
-            self.assertEqual(compact["subscription_grace_period_end_at"], "2025-01-22T00:00:00Z")
-            self.assertEqual(compact["subscription_became_delinquent_at"], "2025-01-15T00:00:00Z")
+        db._save_collection("accounts", rows)
+        db.update_account_plan_check(acc_id=1, result=result)
+        compact = _compact_account_for_list(db.get_account(1))
+        self.assertEqual(compact["subscription_grace_period_end_at"], "2025-01-22T00:00:00Z")
+        self.assertEqual(compact["subscription_became_delinquent_at"], "2025-01-15T00:00:00Z")
 
-            result["subscription_became_delinquent_at"] = None
-            result["subscription_grace_period_end_at"] = None
-            db.update_account_plan_check(acc_id=1, result=result)
-            compact = _compact_account_for_list(rows[0])
-            self.assertNotIn("subscription_grace_period_end_at", compact)
-            self.assertNotIn("subscription_became_delinquent_at", compact)
+        result["subscription_became_delinquent_at"] = None
+        result["subscription_grace_period_end_at"] = None
+        db.update_account_plan_check(acc_id=1, result=result)
+        compact = _compact_account_for_list(db.get_account(1))
+        self.assertNotIn("subscription_grace_period_end_at", compact)
+        self.assertNotIn("subscription_became_delinquent_at", compact)
 
 
 if __name__ == "__main__":

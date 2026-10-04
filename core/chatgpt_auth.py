@@ -5,7 +5,7 @@ ChatGPT Auth 模块
 """
 import json
 import logging
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode, urlparse, parse_qs, urljoin
 
 from core.session import BrowserSession
 from config import (
@@ -137,7 +137,9 @@ def probe_auth_session(session: BrowserSession) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def signin_openai(session: BrowserSession, csrf_token: str, email: str) -> str:
+def signin_openai(
+    session: BrowserSession, csrf_token: str, email: str, *, login_only: bool = False,
+) -> str:
     """
     步骤3: 发起 OAuth Signin 请求。
     POST https://chatgpt.com/api/auth/signin/openai
@@ -147,7 +149,8 @@ def signin_openai(session: BrowserSession, csrf_token: str, email: str) -> str:
     Args:
         session: 浏览器会话
         csrf_token: 从步骤2获取的 CSRF token
-        email: 注册邮箱
+        email: 登录或注册邮箱
+        login_only: 已有账号使用 login 入口，并保留服务端返回的授权参数。
 
     Returns:
         authorize_url: auth.openai.com 的授权 URL
@@ -157,7 +160,7 @@ def signin_openai(session: BrowserSession, csrf_token: str, email: str) -> str:
         "prompt": "login",
         "ext-oai-did": session.device_id,
         "auth_session_logging_id": session.auth_session_logging_id,
-        "screen_hint": "login_or_signup",
+        "screen_hint": "login" if login_only else "login_or_signup",
         "login_hint": email,
     }
     url = "https://chatgpt.com/api/auth/signin/openai?" + urlencode(query_params)
@@ -175,15 +178,26 @@ def signin_openai(session: BrowserSession, csrf_token: str, email: str) -> str:
     })
 
     logger.info(f"[步骤3] 发起 OAuth Signin 请求, 邮箱: {email}")
-    resp = session.post(url, headers=headers, data=body)
+    # 登录链需要先取得 authorize URL，再以 document 请求跟随重定向。
+    options = {"allow_redirects": False} if login_only else {}
+    resp = session.post(url, headers=headers, data=body, **options)
     resp.raise_for_status()
 
-    data = resp.json()
-    authorize_url = data.get("url", "")
+    if login_only and resp.status_code not in (200, 302, 303):
+        raise RuntimeError(f"登录 signin 返回非预期状态 HTTP {resp.status_code}")
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    authorize_url = data.get("url", "") if isinstance(data, dict) else ""
+    if login_only and not authorize_url:
+        authorize_url = resp.headers.get("location", "")
+    if not isinstance(authorize_url, str) or not authorize_url.strip():
+        raise ValueError("[步骤3] 未获取到 authorize URL")
 
-    if not authorize_url:
-        raise ValueError(f"[步骤3] 未获取到 authorize URL, 响应: {data}")
-
+    if login_only:
+        logger.info("[步骤3] 获取登录 authorize URL 成功，保留服务端授权上下文")
+        return urljoin("https://chatgpt.com/", authorize_url)
     authorize_url = _ensure_authorize_context(authorize_url, session, email)
     logger.info("[步骤3] 获取 authorize URL 成功，已确认 login_or_signup/oai-did 上下文")
     logger.debug(f"[步骤3] URL: {authorize_url[:160]}...")

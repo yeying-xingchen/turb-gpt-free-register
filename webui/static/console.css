@@ -704,20 +704,21 @@
     .jobs-v2-pager .pager-size-item.is-active { background: #f0f2f5; color: #303133; font-weight: 500; }
 
     /* ---- 新版账号表（追加在下方，旧区不改；样式对齐注册页） ---- */
+    #tab-accounts { min-width: 0; max-width: 100%; }
     .accounts-panel-v2 {
-      margin-top: 0;
+      min-width: 0; max-width: 100%; margin-top: 0;
       border: 1px solid #ebeef5; border-radius: 10px; background: #fff;
       box-shadow: 0 0 12px rgba(0,0,0,.04); overflow: hidden;
     }
-    .accounts-table-v2-wrap { overflow-x: auto; overflow-y: hidden; padding: 0; max-width: 100%; overscroll-behavior-inline: contain; }
+    .accounts-table-v2-wrap { min-width: 0; overflow-x: auto; overflow-y: hidden; padding: 0; max-width: 100%; overscroll-behavior-inline: contain; }
     .accounts-table-v2 {
-      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 14px;
-      min-width: 1040px;
+      width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px;
+      min-width: 0;
     }
     .accounts-table-v2 th, .accounts-table-v2 td {
-      padding: 12px 12px; border-bottom: 1px solid #ebeef5;
+      padding: 12px 8px; border-bottom: 1px solid #ebeef5;
       text-align: left; vertical-align: middle;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; white-space: normal; overflow-wrap: anywhere;
       color: #606266; box-sizing: border-box;
     }
     .accounts-table-v2 thead th {
@@ -727,21 +728,21 @@
     .accounts-table-v2 thead th:first-child { padding-left: 16px; }
     .accounts-table-v2 thead th:last-child { padding-right: 16px; }
     .accounts-table-v2 .col-check {
-      width: 48px; padding-left: 16px; padding-right: 8px;
+      width: 40px; padding-left: 12px; padding-right: 8px;
       text-align: left; vertical-align: middle;
     }
-    .accounts-table-v2 .col-id { width: 72px; }
-    .accounts-table-v2 .col-email { width: 330px; }
-    .accounts-table-v2 .col-source { width: 90px; }
-    .accounts-table-v2 .col-token { width: 100px; }
-    .accounts-table-v2 .col-password { width: 120px; }
-    .accounts-table-v2 .col-plan { width: 220px; }
-    .accounts-table-v2 .col-note { width: 140px; }
-    .accounts-table-v2 .col-small { width: 170px; }
-    .accounts-table-v2 .col-status { width: 100px; }
-    .accounts-table-v2 .col-agent { width: 140px; }
-    .accounts-table-v2 .col-time { width: 170px; }
-    .accounts-table-v2 .col-actions { width: 148px; }
+    .accounts-table-v2 .col-id { width: 4%; }
+    .accounts-table-v2 .col-email { width: auto; }
+    .accounts-table-v2 .col-source { width: 5%; }
+    .accounts-table-v2 .col-token { width: 6%; }
+    .accounts-table-v2 .col-password { width: 7%; }
+    .accounts-table-v2 .col-plan { width: 16%; }
+    .accounts-table-v2 .col-note { width: 6%; }
+    .accounts-table-v2 .col-small { width: 9%; }
+    .accounts-table-v2 .col-status { width: 7%; }
+    .accounts-table-v2 .col-agent { width: 8%; }
+    .accounts-table-v2 .col-time { width: 9%; }
+    .accounts-table-v2 .col-actions { width: 9%; }
     .accounts-table-v2 input[type="checkbox"] {
       width: 16px !important; height: 16px !important;
       min-width: 16px !important; min-height: 16px !important;
@@ -993,23 +994,94 @@
         width: calc(100vw - 16px); grid-template-columns: 1fr;
       }
     }
+    .accounts-table-v2 .col-token .pill { padding-left: 4px; padding-right: 4px; font-size: 12px; }
+    .accounts-table-v2 .col-plan > .acc-v2-sub { white-space: normal; overflow: visible; }
+    .accounts-table-v2 .pill,
+    .accounts-table-v2 .acc-v2-twofa-actions,
+    .accounts-table-v2 .acc-v2-twofa-badge,
+    .accounts-table-v2 .acc-v2-twofa-code,
+    .accounts-table-v2 .extract-link-cell > * {
+      min-width: 0; max-width: 100%; height: auto; min-height: 26px;
+      white-space: normal; overflow-wrap: anywhere; line-height: 1.35;
+    }
+    .accounts-table-v2 .acc-v2-twofa-btn,
+    .accounts-table-v2 .extract-link-cell button {
+      max-width: 100%; white-space: normal; line-height: 1.35;
+    }
+    .accounts-filter-v2 .acc-v2-btn-group,
+    #accountsToolbarV2 .acc-v2-btn-group,
+    .accounts-filter-v2 .acc-v2-inline {
+      min-width: 0; max-width: 100%;
+    }
+    .accounts-filter-v2 select { min-width: 0; max-width: 100%; }
     .accounts-panel-v2 .jobs-v2-pager {
       border-top: 1px solid #ebeef5;
     }
+    .accounts-heading-v2.jobs-toolbar-v2 {
+      justify-content: space-between; padding: 0 0 16px;
+    }
+    .accounts-heading-v2 .register-title { margin: 0; }
+    .accounts-page-actions-v2, .acc-v2-bulk-actions {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0;
+    }
     #accountsToolbarV2 {
-      align-items: stretch; gap: 8px;
+      flex-direction: column; align-items: stretch; gap: 12px;
+      margin-top: 16px; border-top: 1px solid #ebeef5; background: #fafbfc;
     }
-    #accountsToolbarV2 .acc-v2-btn-group {
-      display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
-      padding: 6px 8px; border: 1px solid #ebeef5; border-radius: 8px;
-      background: #fafbfc;
+    .acc-v2-selection-summary {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px;
+      color: #606266; font-size: 13px;
     }
-    #accountsToolbarV2 .acc-v2-btn-group-title {
-      color: #909399; font-size: 12px; font-weight: 600;
-      padding: 0 4px; white-space: nowrap;
-    }
-    #accountsToolbarV2 .jobs-tb-btn {
+    .acc-v2-selection-summary strong { color: #303133; }
+    .acc-v2-selection-summary p { flex-basis: 100%; margin: 0; font-size: 12px; color: #6b7280; }
+    .accounts-heading-v2 .jobs-tb-btn, #accountsToolbarV2 .jobs-tb-btn {
       min-height: 32px; padding: 0 12px; font-size: 13px;
+    }
+    #accountsToolbarV2 #btnClearAccountSelectionV2 {
+      margin-left: auto; border-color: transparent; background: transparent;
+    }
+    #tab-accounts summary.jobs-tb-btn { list-style: none; gap: 10px; }
+    #tab-accounts summary.jobs-tb-btn::-webkit-details-marker { display: none; }
+    #tab-accounts summary.jobs-tb-btn::after {
+      content: ''; width: 6px; height: 6px; border-right: 1.5px solid currentColor;
+      border-bottom: 1.5px solid currentColor; transform: rotate(45deg); margin-top: -3px;
+    }
+    #tab-accounts details[open] > summary.jobs-tb-btn::after { transform: rotate(225deg); margin-top: 3px; }
+    #tab-accounts details[open] > summary.jobs-tb-btn { color: #377DFF; border-color: #9BBEFF; background: #EBF2FF; }
+    #tab-accounts :is(button, summary, input, textarea, select):focus-visible {
+      outline: 2px solid #377DFF; outline-offset: 2px;
+    }
+    .acc-v2-action-menu-panel {
+      display: none; position: fixed; z-index: 1500; box-sizing: border-box;
+      width: 252px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px);
+      overflow-y: auto; overscroll-behavior: contain; padding: 8px;
+      background: #fff; border: 1px solid #e4e7ed; border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(16,24,40,.14);
+    }
+    .acc-v2-action-menu[open] > .acc-v2-action-menu-panel { display: grid; gap: 4px; }
+    #tab-accounts .acc-v2-action-menu-panel .jobs-tb-btn {
+      width: 100%; justify-content: flex-start; border-color: transparent; background: transparent;
+      padding: 8px 10px; white-space: normal; line-height: 1.4; text-align: left;
+    }
+    #tab-accounts .acc-v2-action-menu-panel .jobs-tb-btn:hover:not(:disabled) { background: #ecf5ff; color: #377DFF; }
+    #tab-accounts .acc-v2-action-menu-panel .jobs-tb-btn--danger { color: #d63939; }
+    #tab-accounts .acc-v2-action-menu-panel .jobs-tb-btn--danger:hover:not(:disabled) { color: #d63939; background: #fef0f0; }
+    #tab-accounts .acc-v2-action-menu-panel .jobs-tb-btn:disabled { color: #c0c4cc; }
+    .acc-v2-action-menu-panel hr { width: 100%; border: 0; border-top: 1px solid #ebeef5; margin: 4px 0; }
+    .acc-v2-menu-scope { margin: 0; padding: 4px 10px 8px; color: #6b7280; font-size: 12px; line-height: 1.5; }
+    .acc-v2-bulk-workers { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+    .acc-v2-bulk-workers input { width: 60px; min-height: 32px; margin: 0; padding: 4px 8px; }
+    .accounts-filter-v2 .accounts-filter-options-v2 { flex-basis: 100%; }
+    .acc-v2-email-picker { min-width: 0; max-width: 100%; align-self: center; }
+    .acc-v2-email-picker[open] { flex-basis: 100%; }
+    .acc-v2-email-picker[open] > .acc-v2-email-select-group { margin-top: 8px; }
+    .acc-v2-email-select-help { flex-basis: 100%; margin: 0; color: #6b7280; font-size: 12px; line-height: 1.5; }
+    @media (max-width: 700px) {
+      .accounts-page-actions-v2 { width: 100%; }
+      .acc-v2-bulk-actions > button, .acc-v2-bulk-actions > details { flex: 1 1 auto; }
+      .acc-v2-bulk-actions > details > summary { justify-content: center; }
+      .acc-v2-selection-summary > span { flex-basis: 100%; order: 1; }
+      .acc-v2-selection-summary p { order: 2; }
     }
     .accounts-filter-v2 {
       display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
@@ -2048,20 +2120,54 @@
       margin: 10px 0 0; max-width: 720px;
       font-size: 13px; line-height: 1.65; color: #909399;
     }
+    @media (max-width: 1600px) {
+      .accounts-table-v2 .acc-v2-actions { grid-template-columns: 1fr; gap: 4px; }
+    }
     @media (max-width: 1100px) {
       :root { --page-gutter: 16px; }
-      .accounts-table-v2 { min-width: 0; }
-      .accounts-table-v2 th, .accounts-table-v2 td { padding-left: 8px; padding-right: 8px; }
-      .accounts-table-v2 .col-email { width: 24%; }
-      .accounts-table-v2 .col-plan { width: 17%; }
-      .accounts-table-v2 .col-actions { width: 126px; }
-      .accounts-table-v2 th:nth-child(4), .accounts-table-v2 td:nth-child(4),
-      .accounts-table-v2 th:nth-child(6), .accounts-table-v2 td:nth-child(6),
-      .accounts-table-v2 th:nth-child(8), .accounts-table-v2 td:nth-child(8),
-      .accounts-table-v2 th:nth-child(11), .accounts-table-v2 td:nth-child(11) { display: none; }
-      .accounts-table-v2 .col-email,
-      .accounts-table-v2 .col-plan,
-      .accounts-table-v2 .col-actions { white-space: normal; }
+      /* 窄屏用卡片呈现所有字段，避免固定列宽及隐藏列继续占位。 */
+      .accounts-table-v2,
+      .accounts-table-v2 thead { display: block; }
+      .accounts-table-v2 colgroup { display: none; }
+      .accounts-table-v2 thead tr { display: block; }
+      .accounts-table-v2 thead th { display: none; }
+      .accounts-table-v2 thead .col-check {
+        display: flex; align-items: center; gap: 8px; width: 100%; padding: 12px;
+      }
+      .accounts-table-v2 thead .col-check::after { content: '全选当前页'; font-size: 13px; }
+      .accounts-table-v2 tbody {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr));
+        gap: 12px; padding: 12px; background: #f7f9fc;
+      }
+      .accounts-table-v2 tbody tr {
+        display: grid; grid-template-columns: 24px minmax(0, 1fr); align-content: start;
+        min-width: 0; padding: 12px; border: 1px solid #ebeef5; border-radius: 8px; background: #fff;
+      }
+      .accounts-table-v2 tbody td,
+      .accounts-table-v2 tbody td[class] {
+        display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 8px;
+        grid-column: 1 / -1; width: auto; min-width: 0; height: auto;
+        padding: 8px 0; white-space: normal; overflow-wrap: anywhere;
+        border-bottom: 1px solid #f0f2f5;
+      }
+      .accounts-table-v2 tbody td::before {
+        content: attr(data-label); grid-column: 1; grid-row: 1;
+        color: #909399; font-size: 12px; line-height: 1.5;
+      }
+      .accounts-table-v2 tbody td > * { grid-column: 2; min-width: 0; max-width: 100%; }
+      .accounts-table-v2 tbody td.col-check {
+        display: block; grid-column: 1; grid-row: 1; padding: 2px 0 10px; border: 0;
+      }
+      .accounts-table-v2 tbody td.col-email {
+        display: block; grid-column: 2; grid-row: 1; padding: 0 0 10px; border: 0;
+      }
+      .accounts-table-v2 tbody .col-check::before,
+      .accounts-table-v2 tbody .col-email::before,
+      .accounts-table-v2 tbody td[colspan]::before { content: none; }
+      .accounts-table-v2 tbody td:last-child { padding-right: 0; border-bottom: 0; }
+      .accounts-table-v2 tbody td[colspan] { display: block; }
+      .accounts-table-v2 tbody .acc-v2-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .accounts-table-v2 .acc-v2-sub { white-space: normal; overflow-wrap: anywhere; }
       #accountsToolbarV2 { align-items: stretch; }
       #accountsToolbarV2 .acc-v2-btn-group { flex: 1 1 280px; min-width: 0; }
     }
@@ -2081,15 +2187,6 @@
       .accounts-filter-v2 { padding-left: 10px; padding-right: 10px; }
       .accounts-filter-v2 .acc-v2-search-wrap { flex-basis: 100%; width: 100%; min-width: 0; }
       #accountsToolbarV2 .acc-v2-btn-group { flex-basis: 100%; }
-      .accounts-table-v2 th, .accounts-table-v2 td { padding-top: 10px; padding-bottom: 10px; }
-      .accounts-table-v2 .col-id { width: 54px; }
-      .accounts-table-v2 .col-email { width: auto; }
-      .accounts-table-v2 .col-plan { width: 22%; }
-      .accounts-table-v2 .col-small { width: 76px; }
-      .accounts-table-v2 .col-status { width: 76px; }
-      .accounts-table-v2 .col-actions { width: 112px; }
-      .accounts-table-v2 .acc-v2-actions { grid-template-columns: 1fr; gap: 4px; }
-      .accounts-table-v2 .acc-v2-email { overflow-wrap: anywhere; }
       .jobs-table-v2 th, .jobs-table-v2 td { padding-left: 8px; padding-right: 8px; }
       .jobs-table-v2 th:nth-child(2), .jobs-table-v2 td:nth-child(2),
       .jobs-table-v2 th:nth-child(5), .jobs-table-v2 td:nth-child(5),
@@ -2116,12 +2213,9 @@
       .app-sidebar { width: 56px; }
       .sidebar-nav { padding-left: 4px; padding-right: 4px; }
       .sidebar-footer { padding-left: 4px; padding-right: 4px; }
-      .accounts-table-v2 .col-id { display: none; }
-      .accounts-table-v2 .col-small, .accounts-table-v2 .col-status { width: 64px; }
-      .accounts-table-v2 .col-plan { width: 25%; }
-      .accounts-table-v2 .col-actions { width: 92px; }
-      .accounts-table-v2 .acc-v2-actions > button,
-      .accounts-table-v2 .acc-v2-more-btn { padding-left: 4px; padding-right: 4px; }
+      .accounts-table-v2 tbody { padding: 8px; gap: 8px; }
+      .accounts-table-v2 tbody tr { padding: 10px; }
+      .accounts-table-v2 tbody td[class] { grid-template-columns: 52px minmax(0, 1fr); gap: 4px; }
       .jobs-toolbar-v2 { padding: 12px; }
     }
 
@@ -2149,7 +2243,11 @@
 .task-center-toolbar-title { display: flex; align-items: baseline; gap: 10px; color: #303133; font-size: 15px; font-weight: 700; }
 .task-center-toolbar-title .muted { font-size: 12px; font-weight: 400; }
 .task-center-table { min-width: 1080px; }
-.task-center-table .task-col-id { width: 100px; }
+.task-center-table .task-col-id { width: 185px; }
+.task-center-table .task-col-id .sub-cell { overflow-wrap: anywhere; white-space: normal; }
+.task-status--attention { color: #a16207; background: #fff7e6; }
+.task-log-details { margin: 0 0 12px; color: #667085; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.task-log-details > span { margin-left: 8px; }
 .task-center-table .task-col-status { width: 110px; }
 .task-center-table .task-col-progress { width: 260px; }
 .task-center-table .task-col-email { width: 220px; }
@@ -2163,6 +2261,12 @@
 .task-progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #3b66f5, #7c3aed); transition: width .3s ease; }
 .task-progress-message { margin-top: 6px; color: #909399; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-center-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.task-center-table .task-otp-input {
+  flex-basis: 100%; width: 100%; height: 30px; padding: 0 8px;
+  border: 1px solid #dcdfe6; border-radius: 6px; font: inherit; font-size: 12px;
+}
+.task-action-btn--otp { color: #1d4ed8; border-color: #bfd3ff; background: #eef4ff; }
+.task-action-btn--otp:hover { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
 .task-action-btn { min-height: 28px; padding: 0 9px; border: 1px solid #d9e2ec; border-radius: 6px; background: #fff; color: #475467; cursor: pointer; font-size: 12px; font-weight: 700; }
 .task-action-btn:hover { background: #f5f7fa; border-color: #b8c5d6; }
 .task-action-btn--view { color: #2563eb; border-color: #c8d7ff; background: #f3f6ff; }

@@ -18,7 +18,9 @@ EXTRACT_LINK_TYPES = frozenset({"pix", "upi", "kakao_pay", "ideal"})
 LUMEN_LINK_TYPES = frozenset({
     "ideal", "upi", "pix", "paypal", "kakao_pay", "momo", "blik", "twint", "gcash", "gopay",
 })
-ACTIVE_LUMEN_STATUSES = ("queued", "running", "awaiting_blik", "unknown", "interrupted")
+UPI_GIT5_LINK_TYPES = frozenset({"upi"})
+PROVIDER_TYPES = frozenset({"extract", "lumen", "upi_git5"})
+ACTIVE_TASK_STATUSES = ("queued", "running", "awaiting_blik", "unknown", "interrupted")
 _DEFAULTS_MARKER = "extract_provider_defaults_v1"
 _PROVIDER_FIELDS = {"name", "provider_type", "api_base", "default_link_type", "enabled", "is_default", "note"}
 _CDK_FIELDS = {"cdk", "memo", "enabled", "provider_id"}
@@ -110,17 +112,17 @@ def _require_provider(conn, provider_id: int) -> dict:
     return item
 
 
-def _refuse_active_lumen(conn, provider: dict) -> None:
-    statuses = ",".join("?" for _ in ACTIVE_LUMEN_STATUSES)
+def _refuse_active_tasks(conn, provider: dict) -> None:
+    statuses = ",".join("?" for _ in ACTIVE_TASK_STATUSES)
     active = conn.execute(f"""
         SELECT 1 FROM accounts
         WHERE CAST(json_extract(payload, '$.extract_link_provider_id') AS INTEGER)=?
           AND lower(json_extract(payload, '$.extract_link_status')) IN ({statuses})
-          AND (?='lumen' OR lower(json_extract(payload, '$.extract_link_provider_type'))='lumen')
+          AND (? IN ('lumen', 'upi_git5') OR lower(json_extract(payload, '$.extract_link_provider_type')) IN ('lumen', 'upi_git5'))
         LIMIT 1
-    """, (provider["id"], *ACTIVE_LUMEN_STATUSES, provider["provider_type"])).fetchone()
+    """, (provider["id"], *ACTIVE_TASK_STATUSES, provider["provider_type"])).fetchone()
     if active is not None:
-        raise RuntimeError("供应商存在进行中或可恢复的 Lumen 任务")
+        raise RuntimeError("供应商存在进行中或可恢复的提链任务")
 
 
 def ensure_defaults() -> None:
@@ -168,11 +170,19 @@ def save_provider(data: dict, provider_id: int | None = None) -> dict:
             values.update(data)
             values["name"] = _text(values.get("name"), "name", 120)
             values["provider_type"] = _text(values["provider_type"], "provider_type", 16).lower()
-            if values["provider_type"] not in {"extract", "lumen"}:
+            if values["provider_type"] not in PROVIDER_TYPES:
                 raise ValueError("provider_type 无效")
             values["api_base"] = _api_base(values.get("api_base"))
-            methods = LUMEN_LINK_TYPES if values["provider_type"] == "lumen" else EXTRACT_LINK_TYPES
-            default_method = "ideal" if values["provider_type"] == "lumen" else "pix"
+            methods = {
+                "extract": EXTRACT_LINK_TYPES,
+                "lumen": LUMEN_LINK_TYPES,
+                "upi_git5": UPI_GIT5_LINK_TYPES,
+            }.get(values["provider_type"], EXTRACT_LINK_TYPES)
+            default_method = {
+                "extract": "pix",
+                "lumen": "ideal",
+                "upi_git5": "upi",
+            }.get(values["provider_type"], "pix")
             values["default_link_type"] = _text(values.get("default_link_type", default_method), "default_link_type", 24).lower()
             if values["default_link_type"] not in methods:
                 raise ValueError("default_link_type 无效")
@@ -180,7 +190,7 @@ def save_provider(data: dict, provider_id: int | None = None) -> dict:
             values["is_default"] = _bool(values["is_default"], "is_default")
             values["note"] = _text(values["note"], "note", 2000, optional=True)
             if previous and any(values[key] != previous[key] for key in ("api_base", "provider_type")):
-                _refuse_active_lumen(conn, previous)
+                _refuse_active_tasks(conn, previous)
             if previous and previous["provider_type"] != "lumen" and values["provider_type"] == "lumen":
                 codes = [row[0].casefold() for row in conn.execute("SELECT cdk FROM extract_provider_cdks WHERE provider_id=?", (provider_id,))]
                 if len(codes) != len(set(codes)):
@@ -211,7 +221,7 @@ def delete_provider(provider_id: int) -> bool:
     provider_id = _id(provider_id, "provider_id")
     with _connection(write=True) as conn:
         provider = _require_provider(conn, provider_id)
-        _refuse_active_lumen(conn, provider)
+        _refuse_active_tasks(conn, provider)
         conn.execute("DELETE FROM extract_provider_cdks WHERE provider_id=?", (provider_id,))
         conn.execute("DELETE FROM extract_providers WHERE id=?", (provider_id,))
         return True
@@ -251,6 +261,8 @@ def save_cdk(provider_id: int, data: dict, cdk_id: int | None = None) -> dict:
                 previous = conn.execute("SELECT * FROM extract_provider_cdks WHERE id=? AND provider_id=?", (cdk_id, provider_id)).fetchone()
                 if previous is None:
                     raise LookupError("CDK 不存在或与供应商不匹配")
+            if previous is not None and provider["provider_type"] == "upi_git5" and "cdk" in data and data["cdk"] != previous["cdk"]:
+                _refuse_active_tasks(conn, provider)
             values = dict(previous) if previous is not None else {"memo": "", "enabled": True}
             values.update(data)
             code = _text(values.get("cdk"), "cdk", 512)
@@ -279,6 +291,11 @@ def save_cdk(provider_id: int, data: dict, cdk_id: int | None = None) -> dict:
 def delete_cdk(cdk_id: int) -> bool:
     cdk_id = _id(cdk_id, "cdk_id")
     with _connection(write=True) as conn:
+        row = conn.execute("SELECT provider_id FROM extract_provider_cdks WHERE id=?", (cdk_id,)).fetchone()
+        if row:
+            provider = _require_provider(conn, row["provider_id"])
+            if provider["provider_type"] == "upi_git5":
+                _refuse_active_tasks(conn, provider)
         if not conn.execute("DELETE FROM extract_provider_cdks WHERE id=?", (cdk_id,)).rowcount:
             raise LookupError("CDK 不存在")
         return True

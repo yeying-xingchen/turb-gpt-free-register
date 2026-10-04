@@ -820,8 +820,8 @@ def request_stop_job(job_id: int) -> dict:
     return {"ok": False, "error": f"当前状态不支持停止：{status}", "status": 409}
 
 
-def read_job_log(job_id: int, max_bytes: int = 50_000) -> str:
-    """读取任务日志文件最后 max_bytes 字节，给 Web UI 显示。"""
+def read_job_log(job_id: int, max_bytes: int | None = None) -> str:
+    """读取任务日志完整内容；传入 max_bytes 时保留兼容的尾部读取能力。"""
     job = db.get_job(job_id)
     if not job or not job.get("log_file"):
         return ""
@@ -830,7 +830,7 @@ def read_job_log(job_id: int, max_bytes: int = 50_000) -> str:
         return ""
     size = p.stat().st_size
     with p.open("rb") as f:
-        if size > max_bytes:
+        if max_bytes is not None and max_bytes > 0 and size > max_bytes:
             f.seek(size - max_bytes)
         data = f.read()
     return data.decode("utf-8", errors="replace")

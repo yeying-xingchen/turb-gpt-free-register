@@ -3,105 +3,669 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>账号兑换</title>
+  <meta name="theme-color" content="#f5f7f4">
+  <meta name="description" content="使用 CDK 兑换账号，查看公开库存并下载登录凭据。">
+  <title>CDK 兑换 · 账号兑换中心</title>
   <style>
-    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fb; color: #172033; }
+    :root {
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --ink: #183b35;
+      --muted: #697972;
+      --line: #e1e8e1;
+      --green: #23735b;
+      --green-dark: #18543f;
+      --mint: #d6efbe;
+      --surface: #fff;
+    }
     * { box-sizing: border-box; }
-    body { min-height: 100vh; margin: 0; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 15% 10%, #e0eaff 0, transparent 34%), #f5f7fb; }
-    .card { width: min(560px, 100%); padding: 38px; border: 1px solid #e2e8f0; border-radius: 22px; background: #fff; box-shadow: 0 24px 70px rgba(15, 23, 42, .10); }
-    .brand { display: inline-flex; align-items: center; gap: 10px; color: #3b66f5; font-size: 13px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-    .brand-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 10px; color: #fff; background: linear-gradient(135deg, #3b66f5, #7c3aed); font-weight: 900; }
-    h1 { margin: 22px 0 10px; color: #0f172a; font-size: clamp(28px, 6vw, 40px); letter-spacing: -.04em; }
-    .desc { margin: 0; color: #64748b; line-height: 1.7; font-size: 14px; }
-    .field { display: grid; gap: 9px; margin-top: 28px; color: #334155; font-size: 13px; font-weight: 800; }
-    input { width: 100%; min-height: 52px; border: 1px solid #dbe3ee; border-radius: 12px; padding: 0 16px; color: #0f172a; background: #fbfdff; font: 600 16px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .08em; outline: none; }
-    input:focus { border-color: #3b66f5; box-shadow: 0 0 0 4px rgba(59, 102, 245, .12); }
-    button { width: 100%; min-height: 50px; margin-top: 16px; border: 0; border-radius: 12px; color: #fff; background: #3b66f5; font: 800 15px inherit; cursor: pointer; }
-    button:hover { background: #2f55d4; }
-    button:disabled { cursor: wait; opacity: .62; }
-    .hint { margin-top: 16px; color: #94a3b8; font-size: 12px; line-height: 1.6; }
-    .result { display: none; margin-top: 20px; padding: 14px 16px; border: 1px solid #bbf7d0; border-radius: 12px; color: #166534; background: #f0fdf4; font-size: 13px; line-height: 1.6; }
+    html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+    body { margin: 0; min-height: 100vh; color: var(--ink); background: #f5f7f4; -webkit-font-smoothing: antialiased; }
+    button, input { font: inherit; }
+    button, a, input, summary { -webkit-tap-highlight-color: transparent; }
+    button, a { touch-action: manipulation; }
+    button { cursor: pointer; }
+    a { color: inherit; }
+    svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+    button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid #62a48a; outline-offset: 5px; }
+    ::selection { color: #173c2f; background: #d6efbe; }
+    .page-shell { width: min(1120px, calc(100% - 64px)); margin: 0 auto; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 24px; min-height: 98px; border-bottom: 1px solid var(--line); }
+    .brand { display: inline-flex; align-items: center; gap: 12px; text-decoration: none; }
+    .brand-mark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 13px; color: var(--mint); background: var(--ink); }
+    .brand-mark svg { width: 23px; height: 23px; }
+    .brand-copy { display: grid; gap: 4px; }
+    .brand-copy strong { font-size: 15px; font-weight: 650; letter-spacing: .06em; }
+    .brand-copy span { color: var(--muted); font-size: 9px; letter-spacing: .18em; }
+    .topnav { display: flex; align-items: center; gap: 30px; font-size: 12px; }
+    .topnav a { color: var(--muted); text-decoration: none; transition: color .2s; }
+    .topnav a:hover { color: var(--green); }
+    .nav-current { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+    .status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #568a54; flex-shrink: 0; }
+    main { padding-top: 42px; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 54px; align-items: center; }
+    .hero { min-width: 0; padding: 12px 0; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 9px; color: var(--green); font-size: 10px; font-weight: 650; letter-spacing: .16em; }
+    .eyebrow::before { content: ""; width: 21px; height: 1px; background: currentColor; }
+    h1 { margin: 22px 0 18px; font-size: clamp(38px, 4.2vw, 54px); font-weight: 650; line-height: 1.24; letter-spacing: -.045em; }
+    h1 span { color: var(--green); }
+    .hero-desc { max-width: 390px; margin: 0; color: var(--muted); font-size: 14px; line-height: 1.9; }
+    .hero-features { display: flex; flex-wrap: wrap; gap: 19px; padding: 0; margin: 22px 0 0; list-style: none; }
+    .hero-features li { display: flex; align-items: center; gap: 6px; color: #536b60; font-size: 11px; }
+    .hero-features svg { width: 15px; height: 15px; color: var(--green); }
+    .access-art { position: relative; display: flex; align-items: center; justify-content: center; height: 189px; margin-top: 28px; overflow: hidden; border: 1px solid #e1e9dc; border-radius: 18px; background: radial-gradient(circle at 65% 50%, #e1edda, transparent 65%), #edf2e8; }
+    .orbit { position: absolute; width: 325px; height: 325px; border: 1px solid #d9e3d1; border-radius: 50%; }
+    .orbit::before, .orbit::after { content: ""; position: absolute; border: 1px solid #d9e3d1; border-radius: 50%; }
+    .orbit::before { inset: 27px; }
+    .orbit::after { inset: -27px; }
+    .access-ticket { position: relative; display: flex; width: 280px; height: 127px; color: #ecf5e5; border: 1px solid #3a6552; border-radius: 14px; background: #204f3f; box-shadow: 0 15px 25px #244a3a21; transform: rotate(-6deg); }
+    .ticket-body { flex: 1; padding: 19px 21px; }
+    .ticket-top { display: flex; align-items: center; gap: 7px; color: #d6efbe; font-size: 8px; letter-spacing: .13em; }
+    .ticket-top svg { width: 14px; height: 14px; }
+    .ticket-code { margin-top: 16px; font: 19px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .1em; }
+    .ticket-bottom { margin-top: 10px; color: #aac4b3; font-size: 8px; letter-spacing: .12em; }
+    .ticket-stub { width: 56px; display: flex; align-items: center; justify-content: center; border-left: 1px dashed #698570; }
+    .ticket-stub span { color: #cfe5ba; font-size: 10px; letter-spacing: .22em; writing-mode: vertical-rl; }
+    .art-badge { position: absolute; right: 34px; bottom: 22px; display: flex; align-items: center; gap: 6px; padding: 9px 12px; border: 1px solid #e5eadf; border-radius: 9px; background: #fff; color: #3d634d; box-shadow: 0 5px 18px #2944310a; font-size: 10px; transform: rotate(3deg); }
+    .art-badge svg { width: 14px; height: 14px; }
+    .art-spark { position: absolute; top: 29px; right: 42px; color: #6b9158; font-size: 28px; font-weight: 300; }
+    .redeem-card { min-width: 0; align-self: stretch; display: flex; flex-direction: column; padding: 32px; border: 1px solid #dfe6dc; border-radius: 22px; background: var(--surface); box-shadow: 0 14px 36px #233d2d06, 0 2px 5px #233d2d03; }
+    .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .section-kicker { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--green); font-weight: 600; }
+    .section-kicker svg { width: 16px; height: 16px; }
+    .private-label { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
+    .private-label svg { width: 13px; height: 13px; }
+    h2 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
+    .redeem-card h2 { margin-top: 24px; font-size: 25px; }
+    .card-desc { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+    .progress { display: flex; align-items: center; padding: 0; margin: 25px 0 28px; list-style: none; }
+    .progress li { display: flex; align-items: center; gap: 7px; flex: 1; color: #78837d; font-size: 10px; white-space: nowrap; }
+    .progress li:not(:last-child)::after { content: ""; height: 1px; flex: 1; margin: 0 11px 0 4px; background: var(--line); }
+    .progress li:last-child { flex: 0; }
+    .progress-number { display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--line); border-radius: 50%; font-size: 10px; }
+    .progress .active { color: var(--green); font-weight: 600; }
+    .progress .active .progress-number { color: #fff; border-color: var(--green); background: var(--green); }
+    .field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+    .field-label label { font-size: 12px; font-weight: 600; }
+    .field-label span { color: var(--muted); font-size: 10px; }
+    .input-wrap { position: relative; }
+    .input-wrap svg { position: absolute; left: 16px; top: 50%; width: 18px; height: 18px; color: #779082; transform: translateY(-50%); pointer-events: none; }
+    input { width: 100%; min-width: 0; height: 56px; padding: 0 16px 0 45px; color: var(--ink); border: 1px solid #dce4dc; border-radius: 11px; outline: none; background: #f9fbf8; font: 500 16px ui-monospace, SFMono-Regular, Consolas, monospace; transition: border-color .2s, box-shadow .2s, background .2s; }
+    input::placeholder { color: #88968c; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; font-weight: 400; }
+    input:focus { border-color: var(--green); background: #fff; box-shadow: 0 0 0 3px #23735b12; }
+    input[aria-invalid="true"] { border-color: #bd6053; }
+    input[aria-invalid="true"]:focus { box-shadow: 0 0 0 3px #bd605312; }
+    input:read-only { color: var(--muted); }
+    .input-hint { margin: 9px 0 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+    .quantity-field { margin-top: 18px; }
+    .quantity-field input { height: 46px; padding-left: 16px; }
+    .submit-button { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 52px; margin-top: 21px; padding: 12px 18px; color: #fff; border: 1px solid var(--green); border-radius: 11px; background: var(--green); font-size: 13px; font-weight: 600; box-shadow: 0 4px 8px #23735b12; transition: background .2s, transform .2s, box-shadow .2s; }
+    .submit-button svg { width: 17px; height: 17px; }
+    .submit-button:hover:not(:disabled) { background: var(--green-dark); transform: translateY(-1px); box-shadow: 0 6px 14px #23735b20; }
+    .submit-button:active:not(:disabled) { transform: translateY(0); }
+    button:disabled { cursor: wait; opacity: .7; }
+    .spinner { display: none; width: 16px; height: 16px; border: 2px solid #ffffff55; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+    .submit-button[aria-busy="true"] .spinner { display: block; }
+    .submit-button[aria-busy="true"] .submit-arrow { display: none; }
+    .form-meta { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 12px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+    .form-meta svg { width: 13px; height: 13px; }
+    .result { display: none; margin-top: 18px; padding: 14px 15px; border: 1px solid #cde3ce; border-radius: 10px; color: #285c43; background: #f0f8ed; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
     .result.show { display: block; }
-    .result.error { border-color: #fecaca; color: #b91c1c; background: #fef2f2; }
-    .download { display: inline-block; margin-top: 8px; color: #1d4ed8; font-weight: 800; text-decoration: none; }
-    .footer { display: flex; justify-content: space-between; gap: 12px; margin-top: 26px; color: #94a3b8; font-size: 12px; }
-    .footer a { color: #64748b; text-decoration: none; }
-    .footer a:hover { color: #3b66f5; }
-    .stock { margin-top: 22px; padding: 14px 16px; border: 1px solid #dbeafe; border-radius: 14px; background: #eff6ff; }
-    .stock-title { color: #1e40af; font-size: 13px; font-weight: 800; }
-    .stock-list { display: grid; gap: 8px; margin-top: 10px; }
-    .stock-row { display: flex; justify-content: space-between; gap: 16px; color: #334155; font-size: 13px; }
-    .stock-row strong { color: #1d4ed8; }
-    .stock-empty { color: #64748b; font-size: 12px; line-height: 1.5; }
-    @media (max-width: 520px) { .card { padding: 28px 22px; } }
+    .result.error { border-color: #f0d3cc; color: #9b4334; background: #fff7f3; }
+    .result strong { display: block; font-weight: 650; }
+    .result p { margin: 3px 0 0; }
+    .result-heading { margin: 0; font-size: 14px; font-weight: 650; }
+    .credentials { max-height: 280px; margin: 10px 0 0; padding: 12px; overflow: auto; border: 1px solid #cde3ce; border-radius: 7px; color: var(--ink); background: #fff; font: 12px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .download { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; color: #1b654a; font-weight: 650; text-underline-offset: 4px; }
+    .card-note { display: flex; align-items: flex-start; gap: 10px; margin-top: auto; padding-top: 24px; }
+    .card-note > svg { width: 16px; height: 16px; margin-top: 2px; color: #78906d; }
+    .card-note p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.8; }
+    .card-note strong { color: #4b6255; font-weight: 500; }
+    .info-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; margin-top: 32px; }
+    .info-card { min-width: 0; padding: 25px 27px; border: 1px solid var(--line); border-radius: 17px; background: #ffffffa6; }
+    .info-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .section-title { display: flex; align-items: center; gap: 9px; }
+    .section-title > svg { width: 18px; height: 18px; color: var(--green); }
+    .section-title h2 { font-size: 15px; }
+    .refresh-button { display: flex; align-items: center; gap: 5px; min-height: 32px; margin: -4px -7px -4px 0; padding: 4px 7px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; font-size: 11px; }
+    .refresh-button:hover:not(:disabled) { color: var(--green); background: #edf2e9; }
+    .refresh-button svg { width: 13px; height: 13px; }
+    .refresh-button[aria-busy="true"] svg { animation: spin 1s linear infinite; }
+    .side-desc { margin: 11px 0 17px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+    .stock-list { display: grid; gap: 7px; max-height: 224px; overflow-y: auto; scrollbar-width: thin; }
+    .stock-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; min-height: 43px; padding: 10px 13px; border: 1px solid #e8eee4; border-radius: 9px; background: #f5f8f1; font-size: 11px; }
+    .stock-name { min-width: 0; overflow-wrap: anywhere; }
+    .stock-count { display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; color: #426442; font-size: 10px; }
+    .stock-count strong { color: #2e623f; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .stock-row.empty { background: #f6f7f4; border-color: #e8ebe5; }
+    .stock-row.empty .stock-count, .stock-row.empty .stock-count strong { color: #768071; }
+    .stock-row.empty .status-dot { background: #9ca595; }
+    .stock-empty { display: flex; align-items: center; gap: 10px; min-height: 70px; padding: 14px; color: var(--muted); border: 1px dashed #dce4d7; border-radius: 9px; font-size: 11px; line-height: 1.8; }
+    .stock-empty strong { display: block; color: #4d6656; font-weight: 500; }
+    .stock-foot { display: flex; align-items: center; gap: 6px; margin-top: 12px; color: var(--muted); font-size: 10px; line-height: 1.6; }
+    .stock-foot svg { width: 12px; height: 12px; }
+    .section-caption { color: #7c897a; font-size: 9px; letter-spacing: .1em; }
+    .steps { display: grid; gap: 17px; margin: 23px 0 0; padding: 0; list-style: none; }
+    .step { display: flex; align-items: flex-start; gap: 13px; }
+    .step-number { position: relative; display: grid; place-items: center; width: 27px; height: 27px; flex-shrink: 0; border: 1px solid #dfe7d9; border-radius: 9px; color: #58734c; background: #f3f6ee; font: 11px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .step:not(:last-child) .step-number::after { content: ""; position: absolute; top: 31px; height: 19px; border-left: 1px dashed #dce4d7; }
+    .step h3 { margin: 0 0 4px; color: #3d5649; font-size: 12px; font-weight: 550; }
+    .step p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.7; }
+    .faq { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 34px; margin-top: 38px; padding: 29px 0; border-top: 1px solid var(--line); }
+    .faq-intro h2 { font-size: 16px; }
+    .faq-intro p { margin: 9px 0 0; color: var(--muted); font-size: 11px; }
+    details { border-bottom: 1px solid var(--line); }
+    details:last-child { border: 0; }
+    summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 0; color: #41594b; list-style: none; cursor: pointer; font-size: 12px; }
+    details:first-child summary { padding-top: 0; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; color: #7c8b78; font-size: 18px; font-weight: 300; }
+    details[open] summary::after { content: "−"; }
+    details p { max-width: 640px; margin: 0 0 15px; color: var(--muted); font-size: 11px; line-height: 1.9; }
+    .footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 0 25px; border-top: 1px solid var(--line); color: #758271; font-size: 10px; }
+    .footer-note, .footer a { display: flex; align-items: center; gap: 6px; }
+    .footer svg { width: 12px; height: 12px; }
+    .footer a { min-height: 28px; text-decoration: none; }
+    .footer a:hover { color: var(--green); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes enter { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    @media (prefers-reduced-motion: no-preference) { .workspace { animation: enter .5s ease both; } .info-grid { animation: enter .5s .08s ease both; } }
+    @media (max-width: 1000px) {
+      .workspace { gap: 30px; }
+      .redeem-card { padding: 27px; }
+      h1 { font-size: 44px; }
+      .art-badge { right: 17px; }
+      .info-card { padding: 23px; }
+    }
+    @media (max-width: 760px) {
+      .page-shell { width: calc(100% - 40px); max-width: 560px; }
+      .topbar { min-height: 84px; }
+      .topnav { gap: 18px; }
+      .topnav .nav-current { display: none; }
+      main { padding-top: 25px; }
+      .workspace { grid-template-columns: 1fr; gap: 26px; }
+      .hero { padding: 0; }
+      h1 { margin-top: 15px; margin-bottom: 12px; font-size: 39px; }
+      .hero-desc { max-width: none; font-size: 12px; }
+      .hero-features { margin-top: 14px; gap: 18px; }
+      .access-art { display: none; }
+      .redeem-card { padding: 26px; }
+      .redeem-card h2 { margin-top: 18px; font-size: 24px; }
+      .progress { margin: 22px 0 25px; }
+      .info-grid { grid-template-columns: 1fr; gap: 16px; margin-top: 22px; }
+      .faq { grid-template-columns: 1fr; gap: 22px; margin-top: 26px; padding: 24px 0; }
+      .faq-intro { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+      .faq-intro p { margin: 0; }
+    }
+    @media (max-width: 400px) {
+      .page-shell { width: calc(100% - 32px); }
+      .brand-copy strong { font-size: 13px; }
+      .brand-copy span { font-size: 8px; }
+      .brand { gap: 9px; }
+      .topnav { gap: 10px; font-size: 11px; }
+      .topnav a:first-of-type { display: none; }
+      h1 { font-size: 33px; }
+      .redeem-card { padding: 22px 20px; }
+      .redeem-card h2 { font-size: 22px; }
+      .progress li { gap: 5px; }
+      .progress li:not(:last-child)::after { margin-right: 7px; }
+      .info-card { padding: 21px; }
+      .footer { align-items: flex-start; }
+      .footer-note { max-width: 190px; line-height: 1.8; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
   </style>
 </head>
 <body>
-  <main class="card">
-    <div class="brand"><span class="brand-mark">✓</span><span>ACCOUNT INVENTORY</span></div>
-    <h1>兑换账号</h1>
-    <p class="desc">输入管理员发放的 CDK，系统会从对应分组库存中分配账号，并生成登录凭据文件供下载。每个 CDK 只能使用到生成时设定的名额。</p>
-    <form id="redeemForm" novalidate>
-      <label class="field" for="cdk">兑换 CDK
-        <input id="cdk" name="cdk" type="text" placeholder="CDK-XXXXXXXXXXXXXXXXXXXX" autocomplete="off" spellcheck="false" maxlength="80" required>
-      </label>
-      <button id="submit" type="submit">立即兑换并下载</button>
-    </form>
-    <div id="result" class="result" role="status" aria-live="polite"></div>
-    <section class="stock" aria-label="公开库存">
-      <div class="stock-title">公开库存</div>
-      <div id="publicStockList" class="stock-list"><div class="stock-empty">库存加载中…</div></div>
-    </section>
-    <p class="hint">登录凭据格式为：邮箱---密码---2FA 密钥。兑换完成后下载链接只能使用一次。页面只显示管理员公开的分组库存。</p>
-    <div class="footer"><span>请妥善保管下载文件</span><a href="/login">管理员入口</a></div>
-  </main>
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brand" href="/redeem" aria-label="账号兑换中心首页">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v4a2 2 0 0 0 0 4v3H4v-3a2 2 0 0 0 0-4V7Z"/><path d="M15 7v2m0 3v1m0 3v2M8 11h3m-3 3h2"/></svg></span>
+        <span class="brand-copy"><strong>账号兑换中心</strong><span>ACCOUNT REDEMPTION</span></span>
+      </a>
+      <nav class="topnav" aria-label="页面导航">
+        <span class="nav-current"><span class="status-dot" aria-hidden="true"></span>兑换中心</span>
+        <a href="#guide">兑换指南</a>
+        <a href="#faq">常见问题</a>
+      </nav>
+    </header>
+
+    <main>
+      <div class="workspace">
+        <section class="hero" aria-labelledby="pageTitle">
+          <div class="eyebrow">A LITTLE CODE. A NEW START.</div>
+          <h1 id="pageTitle">你的专属账号，<br><span>从这里开启。</span></h1>
+          <p class="hero-desc">准备好你的 CDK，剩下的交给我们。<br>输入兑换码，即可领取账号并下载登录凭据。</p>
+          <ul class="hero-features" aria-label="兑换特点">
+            <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 3-8 11h6l-1 7 9-12h-6l1-6Z"/></svg>自动分配</li>
+            <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg>凭据下载</li>
+            <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4v5c0 4-4 7-8 9-4-2-8-5-8-9V7l8-4Z"/><path d="m8 12 3 3 5-6"/></svg>10 分钟可恢复</li>
+          </ul>
+          <div class="access-art" aria-hidden="true">
+            <div class="orbit"></div><span class="art-spark">✳</span>
+            <div class="access-ticket">
+              <div class="ticket-body">
+                <div class="ticket-top"><svg viewBox="0 0 24 24"><path d="m12 3 8 4v5c0 4-4 7-8 9-4-2-8-5-8-9V7l8-4Z"/><path d="m8 12 3 3 5-6"/></svg>YOUR ACCOUNT ACCESS</div>
+                <div class="ticket-code">CDK ···· ····</div>
+                <div class="ticket-bottom">REDEEM &amp; ENJOY YOUR NEXT CHAPTER</div>
+              </div>
+              <div class="ticket-stub"><span>ACCESS PASS</span></div>
+            </div>
+            <div class="art-badge"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>一枚兑换码，一段新体验</div>
+          </div>
+        </section>
+
+        <section class="redeem-card" aria-labelledby="redeemTitle">
+          <div class="card-heading">
+            <span class="section-kicker"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v4a2 2 0 0 0 0 4v4H4v-4a2 2 0 0 0 0-4V6Z"/><path d="M15 6v3m0 3v1m0 3v2"/></svg>CDK 兑换</span>
+            <span class="private-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></svg>凭据请妥善保管</span>
+          </div>
+          <h2 id="redeemTitle">兑换你的专属账号</h2>
+          <p class="card-desc">只需一步，领取属于你的账号访问凭据。</p>
+          <ol class="progress" aria-label="兑换进度">
+            <li class="active" aria-current="step"><span class="progress-number">1</span>输入 CDK</li>
+            <li><span class="progress-number">2</span>验证兑换</li>
+            <li><span class="progress-number">3</span>查看凭据</li>
+          </ol>
+          <form id="redeemForm" novalidate>
+            <div class="field-label"><label for="cdk">你的兑换码</label><span>CDK CODE</span></div>
+            <div class="input-wrap">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="15" cy="8" r="5"/><path d="m11.5 11.5-8 8V22H7v-3h3v-3l3-3M16 7h.01"/></svg>
+              <input id="cdk" name="cdk" type="text" placeholder="在此粘贴你的 CDK 兑换码" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="80" aria-describedby="cdkHint" required>
+            </div>
+            <p id="cdkHint" class="input-hint">请完整复制管理员提供的兑换码，避免遗漏字符。</p>
+            <div class="quantity-field">
+              <div class="field-label"><label for="quantity">本次兑换数量</label><span>按需分次兑换</span></div>
+              <input id="quantity" name="quantity" type="number" min="1" max="1000" step="1" value="1" inputmode="numeric" aria-describedby="quantityHint" required>
+              <p id="quantityHint" class="input-hint">填写 1–1000 的整数，且不能超过 CDK 剩余名额。未使用的名额可下次兑换。</p>
+            </div>
+            <button id="submit" class="submit-button" type="submit" aria-busy="false"><span class="spinner" aria-hidden="true"></span><span id="submitLabel">立即兑换</span><svg class="submit-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></button>
+          </form>
+          <div class="form-meta"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>兑换成功后在页面查看凭据，可手动下载保存</div>
+          <div id="result" class="result" role="status" aria-live="polite" aria-atomic="true"></div>
+          <div id="redeemedResults" aria-label="已兑换的账号凭据" aria-live="polite" aria-relevant="additions"></div>
+          <div class="card-note"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/></svg><p><strong>一个小提醒</strong><br>请及时保存凭据。每批首次提交后 10 分钟内，可在同一标签页重新输入原 CDK 和原数量恢复；下载链接可重复使用，重试不会延长有效期。</p></div>
+          <noscript><p class="result show error">请启用浏览器 JavaScript 后使用 CDK 兑换功能。</p></noscript>
+        </section>
+      </div>
+
+      <div class="info-grid">
+        <section class="info-card" aria-labelledby="stockTitle">
+          <div class="info-heading">
+            <div class="section-title"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 5v9l9 5 9-5V8M12 13v9M7 5.8l9 5"/></svg><h2 id="stockTitle">公开库存</h2></div>
+            <button id="refreshStock" class="refresh-button" type="button" aria-label="刷新公开库存" aria-controls="publicStockList"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6"/></svg><span>刷新</span></button>
+          </div>
+          <p class="side-desc">仅展示已公开的分组，兑换数量以你的 CDK 为准。</p>
+          <div id="publicStockList" class="stock-list" role="status" aria-live="polite" aria-busy="true"><div class="stock-empty">正在获取最新库存…</div></div>
+          <div class="stock-foot"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span id="stockUpdated">未展示的分组也可凭有效 CDK 兑换</span></div>
+        </section>
+
+        <section id="guide" class="info-card" aria-labelledby="guideTitle">
+          <div class="info-heading"><div class="section-title"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6c-3-2-6-2-9-1v14c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Zm0 0v14"/></svg><h2 id="guideTitle">简单三步，即刻开启</h2></div><span class="section-caption">HOW IT WORKS</span></div>
+          <ol class="steps">
+            <li class="step"><span class="step-number">01</span><div><h3>粘贴兑换码</h3><p>复制收到的完整 CDK，粘贴到上方输入框。</p></div></li>
+            <li class="step"><span class="step-number">02</span><div><h3>选择数量并兑换</h3><p>填写本次需要的数量，系统从 CDK 对应分组分配账号。</p></div></li>
+            <li class="step"><span class="step-number">03</span><div><h3>查看并保存凭据</h3><p>在页面查看邮箱、密码及 2FA 密钥，按需下载凭据文件。</p></div></li>
+          </ol>
+        </section>
+      </div>
+
+      <section id="faq" class="faq" aria-labelledby="faqTitle">
+        <div class="faq-intro"><h2 id="faqTitle">你可能想了解</h2><p>关于兑换的几个小问题</p></div>
+        <div>
+          <details><summary>一个 CDK 可以兑换多少个账号？</summary><p>总名额由管理员创建 CDK 时设定。你可以填写本次兑换数量，按需分次领取；每次不能超过 CDK 剩余名额和对应分组的可用库存。成功后会显示本次数量和剩余名额。请先保存本批凭据，再点击“继续兑换下一批”领取新账号；刷新后的首次提交会先恢复上次结果。</p></details>
+          <details><summary>兑换成功后如何保存或恢复账号？</summary><p>登录凭据会直接显示在页面上，你可以复制保存，或点击对应批次的“下载本次登录凭据”。每批首次提交后 10 分钟内，下载链接可重复使用。遇到断网或刷新页面，请留在同一标签页，重新输入原 CDK 和原兑换数量以恢复原批次，恢复不会重复扣减名额，也不会延长有效期。请先保存凭据再领取下一批；浏览器会分别保留各 CDK 最近提交批次的恢复信息。超过期限、关闭标签页或清除浏览器数据后无法恢复时，请联系发放 CDK 的管理员。</p></details>
+          <details><summary>为什么兑换码无法使用？</summary><p>请先检查兑换码是否复制完整。兑换码过期、已停用、名额用尽或对应分组库存不足时，页面会显示具体原因。如需帮助，请联系发放 CDK 的管理员。</p></details>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer"><span class="footer-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4v5c0 4-4 7-8 9-4-2-8-5-8-9V7l8-4Z"/><path d="m8 12 3 3 5-6"/></svg>请妥善保管凭据，勿向他人分享</span><a href="/login">管理员入口<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg></a></footer>
+  </div>
+
   <script>
     const form = document.getElementById('redeemForm');
     const input = document.getElementById('cdk');
+    const quantityInput = document.getElementById('quantity');
     const button = document.getElementById('submit');
+    const buttonLabel = document.getElementById('submitLabel');
     const result = document.getElementById('result');
+    const redeemedResults = document.getElementById('redeemedResults');
     const stockList = document.getElementById('publicStockList');
+    const refreshButton = document.getElementById('refreshStock');
+    const stockUpdated = document.getElementById('stockUpdated');
+    const progressSteps = document.querySelectorAll('.progress li');
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-    async function loadPublicStock() {
+    const countValue = (value) => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : 0;
+    const legacyRecoveryStorageKey = 'redeem_recovery_v1';
+    const recoveryStoragePrefix = 'redeem_recovery_v2:';
+    const recoveryHint = '请保留本标签页，在首次提交后 10 分钟内重新输入原 CDK 和原兑换数量，恢复原批次结果；重试不会重复扣减或延长有效期。';
+    // Only an explicit next-batch action in this page may rotate the request ID.
+    // Reloading always starts by recovering the saved attempt, even if completed.
+    let completedBatch = null;
+    // Match Python str.split() whitespace removal before uppercasing the code.
+    const normalizeCdk = value => String(value || '').replace(/[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/g, '').toUpperCase();
+
+    function sha256Fallback(bytes) {
+      // FIPS 180-4 SHA-256. This digest is only a local storage index, never authentication.
+      const k = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+      ];
+      const state = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+      const padded = new Uint8Array(Math.ceil((bytes.length + 9) / 64) * 64);
+      padded.set(bytes);
+      padded[bytes.length] = 0x80;
+      const view = new DataView(padded.buffer);
+      view.setUint32(padded.length - 8, Math.floor(bytes.length / 0x20000000), false);
+      view.setUint32(padded.length - 4, (bytes.length * 8) >>> 0, false);
+      const words = new Uint32Array(64);
+      const rotate = (value, bits) => (value >>> bits) | (value << (32 - bits));
+      for (let offset = 0; offset < padded.length; offset += 64) {
+        for (let i = 0; i < 16; i++) words[i] = view.getUint32(offset + i * 4, false);
+        for (let i = 16; i < 64; i++) {
+          const x = words[i - 15], y = words[i - 2];
+          const s0 = rotate(x, 7) ^ rotate(x, 18) ^ (x >>> 3);
+          const s1 = rotate(y, 17) ^ rotate(y, 19) ^ (y >>> 10);
+          words[i] = (words[i - 16] + s0 + words[i - 7] + s1) >>> 0;
+        }
+        let [a, b, c, d, e, f, g, h] = state;
+        for (let i = 0; i < 64; i++) {
+          const sum1 = rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25);
+          const choice = (e & f) ^ (~e & g);
+          const first = (h + sum1 + choice + k[i] + words[i]) >>> 0;
+          const sum0 = rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22);
+          const majority = (a & b) ^ (a & c) ^ (b & c);
+          const second = (sum0 + majority) >>> 0;
+          h = g; g = f; f = e; e = (d + first) >>> 0;
+          d = c; c = b; b = a; a = (first + second) >>> 0;
+        }
+        [a, b, c, d, e, f, g, h].forEach((value, i) => { state[i] = (state[i] + value) >>> 0; });
+      }
+      return Array.from(state, value => value.toString(16).padStart(8, '0')).join('');
+    }
+
+    async function cdkRecoveryKey(cdk) {
+      const normalized = normalizeCdk(cdk);
+      const bytes = typeof TextEncoder !== 'undefined'
+        ? new TextEncoder().encode(normalized)
+        : Uint8Array.from(encodeURIComponent(normalized).replace(/%([0-9A-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16))), ch => ch.charCodeAt(0));
+      if (window.crypto?.subtle?.digest) {
+        try {
+          const hash = new Uint8Array(await window.crypto.subtle.digest('SHA-256', bytes));
+          if (hash.length === 32) return recoveryStoragePrefix + Array.from(hash, value => value.toString(16).padStart(2, '0')).join('');
+        } catch (_) { /* HTTP or restricted browsers use the same SHA-256 index below. */ }
+      }
+      return recoveryStoragePrefix + sha256Fallback(bytes);
+    }
+
+    function readRecoveryState(storageKey) {
       try {
-        const response = await fetch('/api/redeem/public-stock', {headers: {'Accept': 'application/json'}});
-        const body = await response.json().catch(() => ({}));
+        let raw = window.sessionStorage.getItem(storageKey);
+        // The old random ID may have been used for any code; never rotate or delete it.
+        if (raw === null) raw = window.sessionStorage.getItem(legacyRecoveryStorageKey);
+        if (raw === null) return null;
+        const state = JSON.parse(raw);
+        if (!state || typeof state.request_id !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(state.request_id) || typeof state.completed !== 'boolean') throw new Error('Invalid recovery state');
+        return {request_id: state.request_id, completed: state.completed};
+      } catch (_) {
+        throw new Error('无法读取本标签页的兑换恢复信息。请允许本站使用标签页存储后重试；若曾提交兑换，请保留页面并联系管理员核对。本次尚未提交。');
+      }
+    }
+
+    function saveRecoveryState(storageKey, state) {
+      try {
+        const raw = JSON.stringify({request_id: state.request_id, completed: state.completed});
+        window.sessionStorage.setItem(storageKey, raw);
+        if (window.sessionStorage.getItem(storageKey) !== raw) throw new Error('Recovery state was not saved');
+      } catch (_) {
+        throw new Error('浏览器未能保存兑换恢复信息。请允许本站使用标签页存储后重试，本次尚未提交兑换。');
+      }
+    }
+
+    function newRequestId() {
+      try {
+        const bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('');
+      } catch (_) {
+        throw new Error('浏览器无法生成兑换恢复凭证，请使用支持安全随机数的浏览器重试。本次尚未提交兑换。');
+      }
+    }
+
+    async function prepareRedemption(cdk) {
+      const storageKey = await cdkRecoveryKey(cdk);
+      let state = readRecoveryState(storageKey);
+      const continueBatch = completedBatch && completedBatch.cdk === normalizeCdk(cdk);
+      if (continueBatch && (!state || state.request_id !== completedBatch.request_id || !state.completed)) {
+        throw new Error('本标签页的恢复信息已变化，请刷新页面并先恢复上次兑换结果。本次尚未提交。');
+      }
+      if (!state || continueBatch) state = {request_id: newRequestId(), completed: false};
+      state.completed = false;
+      saveRecoveryState(storageKey, state);
+      completedBatch = null;
+      return {request_id: state.request_id, storage_key: storageKey};
+    }
+
+    function updateSubmitLabel() {
+      buttonLabel.textContent = completedBatch && completedBatch.cdk === normalizeCdk(input.value)
+        ? '继续兑换下一批' : '兑换 / 恢复原结果';
+    }
+
+    function setProgress(index) {
+      progressSteps.forEach((step, position) => {
+        step.classList.toggle('active', position <= index);
+        if (position === index) step.setAttribute('aria-current', 'step');
+        else step.removeAttribute('aria-current');
+      });
+    }
+
+    function showError(message, invalidField = null) {
+      result.className = 'result show error';
+      result.textContent = message;
+      if (invalidField) {
+        invalidField.setAttribute('aria-invalid', 'true');
+        invalidField.setAttribute('aria-describedby', `${invalidField.id}Hint result`);
+      }
+      setProgress(0);
+    }
+
+    function showRedemption(body) {
+      const batch = document.createElement('article');
+      batch.className = 'result show';
+      const heading = document.createElement('h3');
+      heading.className = 'result-heading';
+      heading.textContent = `${body.resumed ? '已恢复上次兑换' : '兑换成功'} · 本批 ${countValue(body.count)} 个账号`;
+      const detail = document.createElement('p');
+      detail.textContent = `${body.group_name ? `分组：${body.group_name} · ` : ''}兑换后 CDK 剩余 ${countValue(body.remaining)} 个名额。${body.resumed ? '本次恢复未重复扣减名额。' : ''}`;
+      const recovery = document.createElement('p');
+      recovery.textContent = `${recoveryHint} 下载链接在有效期内可重复使用。`;
+      batch.append(heading, detail, recovery);
+
+      if (Array.isArray(body.credentials) && body.credentials.length) {
+        const hint = document.createElement('p');
+        hint.textContent = '登录凭据：邮箱---密码---2FA 密钥（未设置时为空）';
+        const credentials = document.createElement('pre');
+        credentials.className = 'credentials';
+        credentials.tabIndex = 0;
+        credentials.setAttribute('aria-label', '本次兑换的登录凭据');
+        credentials.textContent = body.credentials.join('\n');
+        batch.append(hint, credentials);
+      } else {
+        const hint = document.createElement('p');
+        hint.textContent = '页面凭据暂不可用，请通过下方链接保存，或联系管理员确认结果。';
+        batch.append(hint);
+      }
+
+      let downloadUrl;
+      try {
+        const url = new URL(body.download_url, window.location.origin);
+        if (url.origin === window.location.origin && url.pathname.startsWith('/api/redeem/download/')) downloadUrl = url;
+      } catch (_) {}
+      if (downloadUrl) {
+        const link = document.createElement('a');
+        link.className = 'download';
+        link.href = downloadUrl.href;
+        link.download = body.filename || 'chatgpt-credentials.txt';
+        link.textContent = '下载本次登录凭据 →';
+        batch.append(link);
+      } else {
+        const hint = document.createElement('p');
+        hint.textContent = '下载链接暂不可用，请复制上方凭据保存。';
+        batch.append(hint);
+      }
+      redeemedResults.prepend(batch);
+    }
+
+    async function loadPublicStock() {
+      if (refreshButton.disabled) return;
+      refreshButton.disabled = true;
+      refreshButton.setAttribute('aria-busy', 'true');
+      stockList.setAttribute('aria-busy', 'true');
+      try {
+        const response = await fetch('/api/redeem/public-stock', {headers: {'Accept': 'application/json'}, cache: 'no-store'});
+        const body = await response.json();
         if (!response.ok) throw new Error(body.error || '库存暂时不可用');
         const groups = Array.isArray(body.groups) ? body.groups : [];
         stockList.innerHTML = groups.length
-          ? groups.map(group => `<div class="stock-row"><span>${escapeHtml(group.group_name)}</span><strong>${Number(group.redeemable || 0)} 个可兑换</strong></div>`).join('')
-          : '<div class="stock-empty">暂无公开展示的分组库存</div>';
+          ? groups.map(group => {
+              const count = countValue(group.redeemable);
+              return `<div class="stock-row${count ? '' : ' empty'}"><span class="stock-name">${escapeHtml(group.group_name)}</span><span class="stock-count"><span class="status-dot" aria-hidden="true"></span>${count ? `<strong>${count.toLocaleString('zh-CN')}</strong> 个可兑换` : '暂无库存'}</span></div>`;
+            }).join('')
+          : '<div class="stock-empty"><div><strong>暂无公开展示的库存</strong>你仍可在上方输入有效 CDK 进行兑换。</div></div>';
+        stockUpdated.textContent = '刚刚更新 · 未展示的分组也可凭有效 CDK 兑换';
       } catch (error) {
-        stockList.innerHTML = '<div class="stock-empty">库存暂时无法加载，可直接输入 CDK 兑换。</div>';
+        stockList.innerHTML = '<div class="stock-empty"><div><strong>暂时无法获取库存</strong>可点击刷新重试，或直接输入 CDK 兑换。</div></div>';
+        stockUpdated.textContent = '库存加载失败，不影响提交兑换码';
+      } finally {
+        refreshButton.disabled = false;
+        refreshButton.setAttribute('aria-busy', 'false');
+        stockList.setAttribute('aria-busy', 'false');
       }
     }
+
+    refreshButton.addEventListener('click', loadPublicStock);
     loadPublicStock();
+    [input, quantityInput].forEach(field => field.addEventListener('input', () => {
+      if (field === input && completedBatch && completedBatch.cdk !== normalizeCdk(input.value)) completedBatch = null;
+      if (!button.disabled) updateSubmitLabel();
+      field.removeAttribute('aria-invalid');
+      field.setAttribute('aria-describedby', `${field.id}Hint`);
+      if (result.classList.contains('error')) {
+        result.className = 'result';
+        result.textContent = '';
+      }
+    }));
+
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
+      if (button.disabled) return;
       const cdk = input.value.trim();
-      if (!cdk) { input.focus(); return; }
+      if (!cdk) {
+        showError('请先输入 CDK 兑换码，再开始兑换。', input);
+        input.focus();
+        return;
+      }
+      const quantity = Number(quantityInput.value);
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) {
+        showError('本次兑换数量必须是 1–1000 的整数。', quantityInput);
+        quantityInput.focus();
+        return;
+      }
+      let requestId, requestStorageKey;
       button.disabled = true;
-      button.textContent = '兑换处理中…';
+      button.setAttribute('aria-busy', 'true');
+      buttonLabel.textContent = '正在准备兑换…';
+      input.readOnly = true;
+      quantityInput.readOnly = true;
+      try {
+        const prepared = await prepareRedemption(cdk);
+        requestId = prepared.request_id;
+        requestStorageKey = prepared.storage_key;
+      } catch (error) {
+        completedBatch = null;
+        button.disabled = false;
+        button.setAttribute('aria-busy', 'false');
+        input.readOnly = false;
+        quantityInput.readOnly = false;
+        updateSubmitLabel();
+        showError(error.message);
+        return;
+      }
+      buttonLabel.textContent = '正在验证兑换码…';
+      [input, quantityInput].forEach(field => {
+        field.readOnly = true;
+        field.removeAttribute('aria-invalid');
+        field.setAttribute('aria-describedby', `${field.id}Hint`);
+      });
       result.className = 'result';
       result.textContent = '';
+      setProgress(1);
       try {
         const response = await fetch('/api/redeem', {
           method: 'POST',
           headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
-          body: JSON.stringify({cdk}),
+          body: JSON.stringify({cdk, quantity, request_id: requestId}),
+          cache: 'no-store',
         });
         const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(body.error || `兑换失败（${response.status}）`);
-        result.className = 'result show';
-        result.innerHTML = `${body.message || '兑换成功'}；CDK 剩余 ${Number(body.remaining || 0)} 个名额。<br><a class="download" href="${body.download_url}">如果没有自动下载，点击这里下载凭据</a>`;
-        input.value = '';
-        window.location.assign(body.download_url);
+        if (!response.ok) {
+          const error = new Error(body.error || `兑换失败（${response.status}），请稍后重试。`);
+          error.code = body.code;
+          error.status = response.status;
+          error.remaining = body.remaining;
+          throw error;
+        }
+        if (!body || !body.ok || !body.download_url) throw new Error(`未能读取完整兑换结果。${recoveryHint}`);
+        showRedemption(body);
+        const remaining = countValue(body.remaining);
+        try {
+          saveRecoveryState(requestStorageKey, {request_id: requestId, completed: true});
+          if (remaining) completedBatch = {cdk: normalizeCdk(cdk), request_id: requestId};
+        } catch (_) {
+          result.className = 'result show';
+          result.textContent = '兑换已成功，但浏览器未能保存完成状态。请先保存下方凭据，暂勿继续领取；重新提交会先恢复本批结果。';
+        }
+        input.value = remaining ? cdk : '';
+        quantityInput.value = String(completedBatch ? Math.min(quantity, remaining) : quantity);
+        setProgress(2);
+        loadPublicStock();
       } catch (error) {
-        result.className = 'result show error';
-        result.textContent = error.message || '兑换失败，请稍后重试';
+        const remaining = countValue(error.remaining);
+        if (error.status === 410 && error.code === 'delivery_expired' && remaining > 0) {
+          let message = `原批次下载已过期，请联系管理员找回原凭据。仍有 ${remaining} 个名额，可点击“继续兑换下一批”领取新账号；这会扣减剩余名额。`;
+          try {
+            saveRecoveryState(requestStorageKey, {request_id: requestId, completed: true});
+            completedBatch = {cdk: normalizeCdk(cdk), request_id: requestId};
+            quantityInput.value = String(Math.min(quantity, remaining));
+          } catch (_) {
+            message = `原批次下载已过期，请联系管理员找回原凭据。仍有 ${remaining} 个名额，但浏览器未能保存恢复信息，暂不能提交新批次。`;
+          }
+          showError(message);
+        } else {
+          const invalidField = ['invalid_quantity', 'insufficient_quota', 'request_conflict'].includes(error.code) ? quantityInput : null;
+          const message = error.code === 'request_conflict'
+            ? '请填写上次提交的兑换数量后重试，以恢复原批次；恢复不会重复扣减名额。'
+            : error instanceof TypeError || error.status >= 500
+              ? `暂未确认兑换结果，服务端可能已受理。${recoveryHint}`
+              : error.message || `兑换结果暂不可用。${recoveryHint}`;
+          showError(message, invalidField);
+        }
       } finally {
         button.disabled = false;
-        button.textContent = '立即兑换并下载';
+        button.setAttribute('aria-busy', 'false');
+        updateSubmitLabel();
+        input.readOnly = false;
+        quantityInput.readOnly = false;
       }
     });
   </script>

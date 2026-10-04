@@ -6,6 +6,8 @@
   <title>GPT 注册控制台</title>
   <link rel="stylesheet" href="{{ ui_asset_url('console.css') }}">
   <link rel="stylesheet" href="{{ ui_asset_url('extract-links.css') }}">
+  <link rel="stylesheet" href="{{ ui_asset_url('account-group-picker.css') }}">
+  <script defer src="{{ ui_asset_url('account-group-picker.js') }}"></script>
   <script defer src="{{ ui_asset_url('console.js') }}"></script>
   <script defer src="{{ ui_asset_url('extract-links.js') }}"></script>
 </head>
@@ -86,11 +88,17 @@
       <svg class="sidebar-footer-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v18M5 10h14M5 14h14"/></svg>
       <span>公开兑换页</span>
     </a>
+    <a href="/" title="切换到 Nuxt 新前端">
+      <svg class="sidebar-footer-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10.5V20h13v-9.5"/><path d="M9.5 20v-5h5v5"/>
+      </svg>
+      <span>Nuxt 新前端</span>
+    </a>
     <a href="/?ui=legacy" title="切换到历史版顶部导航 UI">
       <svg class="sidebar-footer-icon" viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M3 6h18M3 12h18M3 18h18"/>
       </svg>
-      <span>切换老 UI</span>
+      <span>历史版顶部导航</span>
     </a>
     <form class="sidebar-logout" method="post" action="/logout">
       <button type="submit">
@@ -161,7 +169,7 @@
       <div class="jobs-toolbar-v2" id="jobsToolbarV2">
         <button type="button" class="jobs-tb-btn jobs-tb-btn--retry" id="btnRetrySelectedJobsV2" disabled title="重试选中的失败、已停止或已取消任务">重试选中</button>
         <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedJobsV2" disabled title="删除选中的非运行中任务，并同时删除对应日志">删除选中</button>
-        <button type="button" class="jobs-tb-btn" id="btnCancelPendingV2" title="把所有排队任务标记为已取消">取消全部排队</button>
+        <button type="button" class="jobs-tb-btn" id="btnCancelPendingV2" title="仅取消排队注册任务（含 Codex 补跑），不影响运行中任务或账号任务（含支付）">取消排队注册任务</button>
         <button type="button" class="jobs-tb-btn" id="btnRefreshJobsV2" title="手动刷新任务列表">刷新</button>
         <label class="jobs-tb-field">注册数量
           <span class="el-input-number">
@@ -219,7 +227,7 @@
     <div class="task-center-heading">
       <div>
         <h1 class="register-title">任务中心</h1>
-        <p class="task-center-subtitle">集中查看所有进行中的任务，实时跟踪阶段进度并执行暂停、恢复和取消。</p>
+        <p class="task-center-subtitle">集中查看账号注册、Codex 补跑、开通 Plus、查活、查套餐、提链、扫码支付、开启 2FA、换绑邮箱和 Codex 授权的进度与历史。注册任务按状态支持暂停、恢复和取消；账号任务仅支持查看进度与日志。</p>
       </div>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRefreshTaskCenter">刷新任务</button>
     </div>
@@ -232,7 +240,7 @@
     <section class="jobs-panel-v2 task-center-panel" aria-label="进行中任务列表">
       <div class="jobs-toolbar-v2 task-center-toolbar">
         <div class="task-center-toolbar-title">进行中任务 <span id="taskCenterLastUpdated" class="muted">自动刷新中</span></div>
-        <button type="button" class="jobs-tb-btn" id="btnCancelPendingTaskCenter" title="取消全部排队任务">取消全部排队</button>
+        <button type="button" class="jobs-tb-btn" id="btnCancelPendingTaskCenter" title="仅取消排队注册任务（含 Codex 补跑），不影响运行中任务或账号任务（含支付）" disabled>取消排队注册任务（0）</button>
       </div>
       <div id="taskCenterHint"></div>
       <div class="jobs-table-v2-wrap">
@@ -243,36 +251,56 @@
         </table>
       </div>
     </section>
+    <section class="jobs-panel-v2 task-center-panel" aria-label="历史任务列表">
+      <div class="jobs-toolbar-v2 task-center-toolbar">
+        <div class="task-center-toolbar-title">历史任务 <span id="taskCenterHistoryCount" class="muted"></span></div>
+      </div>
+      <div class="jobs-table-v2-wrap">
+        <table class="jobs-table-v2 task-center-table">
+          <colgroup><col class="task-col-id"><col class="task-col-status"><col class="task-col-progress"><col class="task-col-email"><col class="task-col-stage"><col class="task-col-time"><col class="task-col-actions"></colgroup>
+          <thead><tr><th>任务</th><th>状态</th><th>结果</th><th>邮箱</th><th>结束阶段</th><th>完成时间</th><th>查看</th></tr></thead>
+          <tbody id="taskCenterHistoryBody"></tbody>
+        </table>
+      </div>
+      <div class="jobs-v2-pager" id="pager-task-center-history"></div>
+    </section>
   </div>
 
   <!-- ============ 账号 ============ -->
   <div id="tab-accounts" class="hidden">
-    <h1 class="register-title">账号</h1>
+    <div class="accounts-heading-v2 jobs-toolbar-v2" aria-label="账号页面工具">
+      <h1 class="register-title">账号</h1>
+      <div class="accounts-page-actions-v2">
+        <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportExistingAccountsV2" title="导入已有账号：邮箱---密码---2FA---AT">导入账号</button>
+        <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新列表</button>
+        <button type="button" class="jobs-tb-btn" data-extract-manage title="管理全局提链服务商和 CDK，无需选择账号">服务商 / CDK</button>
+        <details class="acc-v2-action-menu">
+          <summary class="jobs-tb-btn">复制当前页</summary>
+          <div class="acc-v2-action-menu-panel">
+            <p class="acc-v2-menu-scope" id="accountsPageScopeV2">仅当前页，不受勾选影响</p>
+            <button type="button" class="jobs-tb-btn" id="btnCopyAllTokensV2" disabled title="复制当前页所有 Token，每个账号一行">复制本页 Token</button>
+            <button type="button" class="jobs-tb-btn" id="btnCopyAllLinesV2" disabled title="复制当前页所有账号整行，每个账号一行">复制本页整行</button>
+          </div>
+        </details>
+      </div>
+    </div>
     <section class="accounts-panel-v2" id="accountsPanelV2" aria-label="账号列表">
       <div class="accounts-filter-v2" id="accountsFilterV2">
         <div class="acc-v2-btn-group acc-v2-search-wrap">
           <input id="qAccountsV2" type="search" placeholder="搜索邮箱、token、来源…" autocomplete="off">
         </div>
-        <div class="acc-v2-btn-group acc-v2-email-select-group" title="输入多个邮箱，支持换行、逗号、分号或空格分隔">
-          <textarea id="accountEmailsToSelectV2" class="acc-v2-email-select-input" rows="1" placeholder="输入邮箱，多个邮箱用换行、逗号或分号分隔" aria-label="批量选择账号邮箱"></textarea>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSelectAccountsByEmailV2">查找并选中</button>
-          <button type="button" class="jobs-tb-btn" id="btnClearAccountEmailSelectionV2">清空输入</button>
-          <span class="acc-v2-email-select-result" id="accountEmailSelectResultV2" aria-live="polite"></span>
-        </div>
+        <details class="acc-v2-email-picker">
+          <summary class="jobs-tb-btn">按邮箱选择</summary>
+          <div class="acc-v2-btn-group acc-v2-email-select-group" title="输入多个邮箱，支持换行、逗号、分号或空格分隔">
+            <p class="acc-v2-email-select-help">在当前筛选范围内跨页追加选择，不受搜索词限制。清空输入会保留已选账号。</p>
+            <textarea id="accountEmailsToSelectV2" class="acc-v2-email-select-input" rows="1" placeholder="输入邮箱，多个邮箱用换行、逗号或分号分隔" aria-label="批量选择账号邮箱"></textarea>
+            <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSelectAccountsByEmailV2">查找并追加选择</button>
+            <button type="button" class="jobs-tb-btn" id="btnClearAccountEmailSelectionV2">清空输入</button>
+            <span class="acc-v2-email-select-result" id="accountEmailSelectResultV2" aria-live="polite"></span>
+          </div>
+        </details>
 
-        <div class="acc-v2-btn-group">
-          <span class="acc-v2-selected" id="accountsSelectedHintV2">已选 0</span>
-          <label class="acc-v2-inline" title="批量补跑 Codex 的并发线程数">线程
-            <span class="el-input-number">
-              <input id="codexBulkWorkersV2" type="number" min="1" max="16" value="3" inputmode="numeric">
-              <button type="button" class="el-input-number__increase" data-step-for="codexBulkWorkersV2" data-step="1" aria-label="增加">
-                <svg viewBox="0 0 24 24"><polyline points="6 14 12 8 18 14"/></svg>
-              </button>
-              <button type="button" class="el-input-number__decrease" data-step-for="codexBulkWorkersV2" data-step="-1" aria-label="减少">
-                <svg viewBox="0 0 24 24"><polyline points="6 10 12 16 18 10"/></svg>
-              </button>
-            </span>
-          </label>
+        <div class="acc-v2-btn-group accounts-filter-options-v2">
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通套餐的账号">已开通套餐</button>
           <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">有套餐优惠</button>
@@ -316,45 +344,67 @@
             <input type="date" id="dateFromAccountsV2">
             <input type="date" id="dateToAccountsV2">
           </div>
-          <button type="button" class="jobs-tb-btn" id="btnRefreshAccountsV2" title="重新加载当前筛选条件和当前页账号列表">刷新账号</button>
-
         </div>
       </div>
-      <div class="jobs-toolbar-v2" id="accountsToolbarV2">
-        <div class="acc-v2-btn-group">
-          <span class="acc-v2-btn-group-title">套餐/提链</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedLiveV2" onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCheckSelectedPlansV2" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnExtractSelectedLinksV2" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置 PIX/UPI/KAKAO_PAY/IDEAL">提链</button>
-           <button type="button" class="jobs-tb-btn" data-extract-manage title="管理提链服务商、启停状态及 CDK">管理服务商 / CDK</button>
+      <div class="jobs-toolbar-v2" id="accountsToolbarV2" aria-label="已选账号批量操作" aria-describedby="accountsSelectionHelpV2">
+        <div class="acc-v2-selection-summary">
+          <strong id="accountsSelectedHintV2" aria-live="polite">已选 0 个账号</strong>
+          <span id="accountsSelectionScopeV2">勾选账号后可执行批量操作</span>
+          <label class="acc-v2-bulk-workers" title="用于批量查活、查套餐和补跑 Codex">任务并发
+            <input id="codexBulkWorkersV2" type="number" min="1" max="16" value="3" inputmode="numeric">
+          </label>
+          <button type="button" class="jobs-tb-btn" id="btnClearAccountSelectionV2" disabled>清空选择</button>
+          <p id="accountsSelectionHelpV2">以下操作仅作用于已选账号；翻页保留选择，修改筛选会清空。</p>
         </div>
-        <div class="acc-v2-btn-group">
-          <span class="acc-v2-btn-group-title">Codex</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRetrySelectedCodexV2" disabled title="给选中的账号批量补跑 Codex 授权">补跑</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedCpaV2" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载CPA</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" disabled title="停止选中账号中正在补跑的 Codex 授权">停止</button>
-        </div>
-        <div class="acc-v2-btn-group">
-          <span class="acc-v2-btn-group-title">批量</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnImportExistingAccountsV2" title="导入已有账号：邮箱---密码---2FA---AT">导入已有账号</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSetupSelectedTotpV2" disabled title="给选中的账号批量开启 2FA，并在完成后写回 TOTP 密钥">批量开2FA</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnChangeSelectedEmailsV2" disabled title="为选中的账号从指定邮箱来源领取新邮箱并换绑">批量换邮箱</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">备注</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnGroupSelectedAccountsV2" disabled title="把选中的账号移动到指定分组（兑换 CDK 按分组发放）">设置分组</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制行</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedTokensV2" disabled title="复制选中账号的 Token，每个账号一行">复制Token</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedEmailsV2" disabled title="复制选中账号的邮箱，每个账号一行">复制邮箱</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载TXT</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnDownloadSelectedFullExportV2" disabled title="把选中账号按“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式导出为 TXT 文件">完整导出</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedFullExportV2" disabled title="把选中账号的“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式复制到剪贴板">复制完整导出</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopySelectedLoginCredentialsV2" disabled title="把选中账号按“邮箱---密码---2FA密钥”格式复制到剪贴板">复制登录凭据</button>
-          <button type="button" class="jobs-tb-btn" id="btnArchiveSelectedAccountsV2" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档选中</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedAccountsV2" disabled title="删除选中的本地账号/token记录">删除</button>
-        </div>
-        <div class="acc-v2-btn-group">
-          <span class="acc-v2-btn-group-title">全部</span>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnCopyAllTokensV2" title="复制当前页所有 Token，每个账号一行">复制Token</button>
-          <button type="button" class="jobs-tb-btn jobs-tb-btn--good" id="btnCopyAllLinesV2" title="复制当前页所有账号整行，每个账号一行">复制整行</button>
+        <div class="acc-v2-bulk-actions">
+          <button type="button" class="jobs-tb-btn" id="btnCheckSelectedLiveV2" disabled onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>
+          <button type="button" class="jobs-tb-btn" id="btnCheckSelectedPlansV2" disabled title="查询选中账号当前套餐；free 账号会检查 Plus 试用资格">查套餐</button>
+          <button type="button" class="jobs-tb-btn" id="btnGroupSelectedAccountsV2" disabled title="在弹窗中勾选已有分组，将选中账号移入该分组">设置分组</button>
+          <details class="acc-v2-action-menu">
+            <summary class="jobs-tb-btn">套餐与支付</summary>
+            <div class="acc-v2-action-menu-panel">
+              <p class="acc-v2-menu-scope" data-account-selection-scope>仅对已选账号操作</p>
+              <button type="button" class="jobs-tb-btn" id="btnActivateSelectedPlusV2" disabled title="配置提链服务商、CDK 和支付平台，一次提交选中账号；后台使用 UPI 零元 Checkout 并核验真实 Plus">开通 Plus</button>
+              <button type="button" class="jobs-tb-btn" id="btnExtractSelectedLinksV2" disabled title="给选中的 free(可Plus试用) 账号批量提链，类型按配置 PIX/UPI/KAKAO_PAY/IDEAL">提链</button>
+              <button type="button" class="jobs-tb-btn" id="btnSubmitSelectedPaymentsV2" disabled title="选择已提链的 UPI 账号和支付服务商，输入本次使用的 CDK 逐个提交；关闭窗口即清除 CDK">提交支付</button>
+              <button type="button" class="jobs-tb-btn" id="btnQuerySelectedPaymentsV2" disabled title="输入支付 CDK 查询选中账号的原提交记录；无需任务 ID，查询不会重新提交支付">查询支付</button>
+            </div>
+          </details>
+          <details class="acc-v2-action-menu">
+            <summary class="jobs-tb-btn">Codex 授权</summary>
+            <div class="acc-v2-action-menu-panel">
+              <p class="acc-v2-menu-scope" data-account-selection-scope>仅对已选账号操作</p>
+              <button type="button" class="jobs-tb-btn" id="btnRetrySelectedCodexV2" disabled title="给选中的账号批量补跑 Codex 授权">补跑 Codex</button>
+              <button type="button" class="jobs-tb-btn" id="btnDownloadSelectedCpaV2" disabled title="从 CPA auth-files 下载选中账号的 Codex JSON，并打包 ZIP">下载 CPA</button>
+              <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnStopSelectedCodexV2" disabled title="停止选中账号中正在补跑的 Codex 授权">停止补跑</button>
+            </div>
+          </details>
+          <details class="acc-v2-action-menu">
+            <summary class="jobs-tb-btn">复制与导出</summary>
+            <div class="acc-v2-action-menu-panel">
+              <p class="acc-v2-menu-scope" data-account-selection-scope>仅对已选账号操作</p>
+              <button type="button" class="jobs-tb-btn" id="btnCopySelectedEmailsV2" disabled title="复制选中账号的邮箱，每个账号一行">复制邮箱</button>
+              <button type="button" class="jobs-tb-btn" id="btnCopySelectedTokensV2" disabled title="复制选中账号的 Token，每个账号一行">复制 Token</button>
+              <button type="button" class="jobs-tb-btn" id="btnCopySelectedLinesV2" disabled title="复制选中账号的完整整行，每个账号一行">复制整行</button>
+              <button type="button" class="jobs-tb-btn" id="btnCopySelectedLoginCredentialsV2" disabled title="把选中账号按“邮箱---密码---2FA密钥”格式复制到剪贴板">复制登录凭据</button>
+              <button type="button" class="jobs-tb-btn" id="btnCopySelectedFullExportV2" disabled title="把选中账号的“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式复制到剪贴板">复制完整导出</button>
+              <hr>
+              <button type="button" class="jobs-tb-btn" id="btnDownloadSelectedTxtV2" disabled title="把选中账号的完整整行保存为 TXT 文件，每个账号一行">下载整行 TXT</button>
+              <button type="button" class="jobs-tb-btn" id="btnDownloadSelectedFullExportV2" disabled title="把选中账号按“邮箱---邮箱接码API---密码---https://2fa.run/----2FA:密钥”格式导出为 TXT 文件">下载完整导出</button>
+            </div>
+          </details>
+          <details class="acc-v2-action-menu">
+            <summary class="jobs-tb-btn">更多批量操作</summary>
+            <div class="acc-v2-action-menu-panel">
+              <p class="acc-v2-menu-scope" data-account-selection-scope>仅对已选账号操作</p>
+              <button type="button" class="jobs-tb-btn" id="btnSetupSelectedTotpV2" disabled title="给选中的账号批量开启 2FA，并在完成后写回 TOTP 密钥">开启 2FA</button>
+              <button type="button" class="jobs-tb-btn" id="btnChangeSelectedEmailsV2" disabled title="为选中的账号从指定邮箱来源领取新邮箱并换绑">换绑邮箱</button>
+              <button type="button" class="jobs-tb-btn" id="btnNoteSelectedAccountsV2" disabled title="给选中的账号统一设置备注，留空可清空备注">设置备注</button>
+              <hr>
+              <button type="button" class="jobs-tb-btn" id="btnArchiveSelectedAccountsV2" disabled title="归档选中的账号；默认账号列表将不再查询/显示这些账号">归档选中</button>
+              <button type="button" class="jobs-tb-btn jobs-tb-btn--danger" id="btnDeleteSelectedAccountsV2" disabled title="删除选中的本地账号/token记录">删除选中账号</button>
+            </div>
+          </details>
         </div>
       </div>
       <div class="accounts-table-v2-wrap">
@@ -366,7 +416,7 @@
           </colgroup>
           <thead>
             <tr>
-              <th class="col-check"><input type="checkbox" id="accountsSelectAllV2" title="全选/取消全选当前页账号" disabled></th>
+              <th class="col-check"><input type="checkbox" id="accountsSelectAllV2" title="全选/取消全选当前页账号；保留其他页的选择" aria-label="全选当前页账号" disabled></th>
               <th class="col-id">ID</th>
               <th class="col-email">邮箱</th>
               <th class="col-source">来源</th>
@@ -377,7 +427,7 @@
               <th class="col-small">2FA</th>
               <th class="col-status">Codex</th>
               <th class="col-time">创建时间</th>
-              <th class="col-actions">操作</th>
+              <th class="col-actions" title="仅作用于所在行账号">本行操作</th>
             </tr>
           </thead>
           <tbody id="accountsBodyV2"></tbody>
@@ -701,7 +751,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="accountImportTitleV2">导入已有账号</h3>
-        <p>每行一个账号，格式：邮箱---密码---2FA 密钥---AT。也兼容四个短横线分隔；导入后直接出现在账号页，不会进入邮箱池。</p>
+        <p>每行一个账号，格式：邮箱---密码---2FA 密钥---AT。也兼容四个短横线分隔；导入时会通过 AT 获取最新用户名，查询失败仍保留账号并提示原因。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseAccountImportV2" aria-label="关闭">×</button>
     </div>
@@ -736,6 +786,7 @@
 </div>
 <div class="body hidden" id="logPanel">
   <h3>任务 #<span id="logJobId"></span> 日志 <button class="btn" id="btnCloseLog" style="float:right;min-height:28px;">关闭</button></h3>
+  <div id="logTaskDetails" class="task-log-details hidden"></div>
   <div class="log" id="logContent">加载中…</div>
 </div>
 <div id="qrPanel" class="body hidden">

@@ -19,7 +19,7 @@ _SECRET_KEYS = {
     "cdk", "code", "secret", "token", "access_token", "refresh_token", "password",
     "authorization", "api_key", "apikey", "client_secret",
 }
-_ACTIONS = {"refresh", "cancel", "blik-code"}
+_ACTIONS = {"refresh", "cancel", "blik-code", "qr"}
 
 
 def _json_object() -> dict:
@@ -206,10 +206,18 @@ def register_extract_routes(app):
                     raise ValueError("blik_code 必须是非空字符串")
             else:
                 blik_code = None
-            result = service.task_action(account_id, action, blik_code=blik_code)
-            return jsonify({"ok": True, **(result if isinstance(result, dict) else {"result": result})}), _result_status(result)
+            code = data.get("cdk")
+            if code is not None and (not isinstance(code, str) or not code.strip()):
+                raise ValueError("cdk 必须是非空字符串")
+            kwargs = {"blik_code": blik_code}
+            if code is not None:
+                kwargs["cdk"] = code
+            result = service.task_action(account_id, action, **kwargs)
+            # Task ok=False describes a failed extraction, not a failed refresh.
+            response = jsonify({**(result if isinstance(result, dict) else {"result": result}), "ok": True})
+            return _no_store(response), _result_status(result)
         except Exception as exc:
-            secret = (data.get("blik_code"),) if isinstance(data, dict) and isinstance(data.get("blik_code"), str) else ()
-            return _error(exc, secrets=secret)
+            secrets = tuple(data.get(k) for k in ("blik_code", "cdk")) if isinstance(data, dict) else ()
+            return _error(exc, upstream=True, secrets=secrets)
 
     return app

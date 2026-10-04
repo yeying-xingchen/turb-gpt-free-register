@@ -12,6 +12,8 @@ _ASSETS = {
     "console.js": "text/javascript",
     "extract-links.css": "text/css",
     "extract-links.js": "text/javascript",
+    "account-group-picker.css": "text/css",
+    "account-group-picker.js": "text/javascript",
 }
 
 

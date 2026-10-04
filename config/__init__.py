@@ -17,6 +17,7 @@ config 包的统一入口。
     config.register          注册默认信息（邮箱、密码、名称、生日）
     config.email             Outlook 邮箱账号池 + OTP 轮询
     config.twofa             2FA 开关
+    config.live_check        账号查活驱动（protocol / cloak）
 """
 
 # ---------- 浏览器 / HTTP ----------
@@ -110,6 +111,8 @@ from config.proxy import (
     PLAN_CHECK_TIMEOUT,
     PLAN_CHECK_MAX_ATTEMPTS,
     PLAN_CHECK_RETRY_DELAY,
+    LIVE_CHECK_MAX_ATTEMPTS,
+    LIVE_CHECK_RETRY_DELAY,
     PLAN_CHECK_REGISTRATION_RECHECK_DELAY,
     PLAN_CHECK_WORKERS,
     PLAN_CHECK_QUEUE_LIMIT,
@@ -127,6 +130,7 @@ from config.register import (
     AUTO_PLAN_CHECK_AFTER_REGISTER,
     PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL,
     POST_REGISTER_DWELL_SECONDS_RANGE,
+    REGISTRATION_WORKERS,
 )
 
 # ---------- 邮箱服务 ----------
@@ -174,6 +178,7 @@ from config.email import (
     REMAIL_SUPPLY_POLICY,
     REMAIL_ORDER_WAIT_SECONDS,
     REMAIL_REQUEST_TIMEOUT,
+    EMAIL_CHANGE_WORKERS,
 )
 
 # ---------- 2FA ----------
@@ -185,6 +190,14 @@ from config.twofa import (
     TWOFA_WORKERS,
     TWOFA_QUEUE_LIMIT,
 )
+
+
+# ---------- 账号查活 ----------
+from config.live_check import LIVE_CHECK_DRIVER, LIVE_CHECK_WORKERS
+
+# ---------- Codex Agent / 开通 Plus 并发 ----------
+from config.codex import CODEX_AGENT_WORKERS
+from config.scan_api import PLUS_ACTIVATION_WORKERS
 
 
 # ---------- 热加载支持 ----------
@@ -201,6 +214,7 @@ _RELOADABLE_SUBMODULES = (
     "config.register",
     "config.email",
     "config.twofa",
+    "config.live_check",
     "config.roxybrowser",
     "config.cloakbrowser",
     "config.browser_use",
@@ -208,6 +222,7 @@ _RELOADABLE_SUBMODULES = (
     "config.flow_trigger",
     "config.codex",
     "config.extract_link",
+    "config.scan_api",
     "config.sub2api",
     "config.humanize",
 )
@@ -239,9 +254,9 @@ def reload_all() -> list[str]:
 def _refresh_top_level_constants() -> None:
     """把刚 reload 的子模块的常量重新拷一份到 config 包顶层。"""
     import config as _self
-    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger
+    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, live_check, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, scan_api, sub2api, humanize, flow_trigger
     # 简单粗暴：枚举一遍重要常量，覆盖到 _self
-    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger):
+    for src in (browser, openai_protocol, _proxy, register, email, twofa, live_check, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, scan_api, sub2api, humanize, flow_trigger):
         for k in dir(src):
             if k.isupper() or k in ("pick_proxy", "pick_browser_profile", "build_browser_environment", "validate_browser_profile"):
                 setattr(_self, k, getattr(src, k))
@@ -272,6 +287,7 @@ __all__ = [
     # proxy
     "PROXY_POOL", "PROXY_POOL_UPSTREAM_PROXY", "PLAN_CHECK_PROXY_MODE", "PLAN_CHECK_PROXY", "PLAN_CHECK_UPSTREAM_PROXY",
     "PLAN_CHECK_TIMEOUT", "PLAN_CHECK_MAX_ATTEMPTS", "PLAN_CHECK_RETRY_DELAY",
+    "LIVE_CHECK_MAX_ATTEMPTS", "LIVE_CHECK_RETRY_DELAY",
     "PLAN_CHECK_REGISTRATION_RECHECK_DELAY", "PLAN_CHECK_WORKERS", "PLAN_CHECK_QUEUE_LIMIT",
     "PLAN_CHECK_MIN_INTERVAL", "PLAN_CHECK_JITTER", "pick_proxy", "PROXY",
     # register
@@ -291,6 +307,10 @@ __all__ = [
     "CLOUDMAIL_AUTO_ADD_USER", "CLOUDMAIL_RANDOM_LOCAL_LENGTH",
     "REMAIL_API_BASE", "REMAIL_API_KEY", "REMAIL_PROJECT_ID", "REMAIL_EMAIL_SUFFIX", "REMAIL_SERVICE_MODE",
     "REMAIL_SUPPLY_POLICY", "REMAIL_ORDER_WAIT_SECONDS", "REMAIL_REQUEST_TIMEOUT",
+    # live_check
+    "LIVE_CHECK_DRIVER", "LIVE_CHECK_WORKERS",
+    # 任务中心可调并发（register / codex / email / scan_api）
+    "REGISTRATION_WORKERS", "CODEX_AGENT_WORKERS", "EMAIL_CHANGE_WORKERS", "PLUS_ACTIVATION_WORKERS",
     # twofa
     "ENABLE_2FA", "TWOFA_PROXY_MODE", "TWOFA_REAUTH_MAX_ATTEMPTS", "TWOFA_REAUTH_RETRY_DELAY",
     "TWOFA_WORKERS", "TWOFA_QUEUE_LIMIT",

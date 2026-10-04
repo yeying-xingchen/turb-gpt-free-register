@@ -7,7 +7,7 @@ Flask 本地控制台。
     core.registration_service   —— 线程池批量注册 + 任务日志
     webui.config_editor         —— 安全读写 config/*.py
 
-所有接口返回 JSON；前端使用 Jinja 模板及可缓存的原生 JS/CSS 静态资源。
+所有接口返回 JSON；前端使用 Nuxt / Vue，由 Flask 提供生成后的静态页面。
 默认绑定 127.0.0.1，仅本地访问。
 """
 import logging
@@ -24,10 +24,14 @@ import pyotp
 from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service
 from webui.auth import init_auth, register_auth_routes
 from webui.assets import init_ui_assets
+from webui.frontend import frontend_page, register_frontend
 from core import registration_service as svc
-from core.account_import import parse_existing_account_text
+from core.account_import import import_existing_accounts, parse_existing_account_text
 from webui import config_editor
 from webui.extract_routes import register_extract_routes
+from webui.payment_provider_routes import register_payment_provider_routes
+from webui.scan_routes import register_scan_routes
+from webui.task_routes import register_task_routes
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +101,11 @@ def _compact_account_for_list(row: dict) -> dict:
         "codex_agent_has_token": bool(str(row.get("codex_agent_token") or "").strip()),
     }
 
+    # 兑换状态来自 redeem_claims：始终返回布尔值，方便列表区分「未兑换」和字段缺失。
+    out["redeemed"] = bool(row.get("redeemed"))
+    if out["redeemed"] and row.get("redeemed_at"):
+        out["redeemed_at"] = row.get("redeemed_at")
+
     extra_raw = row.get("extra_json")
     extra = {}
     if isinstance(extra_raw, str) and extra_raw.strip():
@@ -111,8 +120,7 @@ def _compact_account_for_list(row: dict) -> dict:
         or row.get("registration_password")
         or ""
     ).strip()
-    if password:
-        out["password"] = password
+    out["has_password"] = bool(password)
 
     # 这些是列表固定列直接展示字段。
     for key in (
@@ -132,6 +140,10 @@ def _compact_account_for_list(row: dict) -> dict:
     optional_keys = (
         # 套餐展示补充：付费到期/折扣/失败原因。
         "plan_check_error", "plan_expires_at", "plan_renews_at", "renews_at",
+        # 套餐查询元信息：与旧版一致地展示查询时间、最近成功时间和网络路径。
+        # 都是非敏感字符串，不包含 Token、代理凭据或邮箱密码。
+        "plan_check_trigger", "plan_checked_at", "plan_last_success_at",
+        "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
         "is_delinquent",
@@ -145,8 +157,16 @@ def _compact_account_for_list(row: dict) -> dict:
         "live_check_proxy_used", "live_check_fingerprint_text",
         # 提链成功/失败时才需要。
         "extract_link_status", "extract_link_type", "extract_link_message", "extract_link_error",
-        "extract_link_long_url", "extract_link_copy_paste", "extract_link_image_url_png",
+        "extract_link_long_url", "extract_link_hosted_instructions_url", "extract_link_copy_paste", "extract_link_image_url_png",
         "extract_link_image_url_svg", "extract_link_expires_at",
+        "extract_link_job_id", "extract_link_task_id", "extract_link_provider_id",
+        "extract_link_provider_type", "extract_link_provider_name", "extract_link_cdk_id",
+        "extract_link_cdk_suffix", "extract_link_progress", "extract_link_payment_status",
+        # 支付任务状态；不返回支付 CDK 或账号 AT。
+        "scan_request_provider", "scan_request_status", "scan_request_ok", "scan_request_task_id", "scan_request_message",
+        "scan_request_error", "scan_request_error_code", "scan_request_retryable",
+        "scan_request_duplicate", "scan_request_request_id", "scan_request_checked_at",
+        "plus_activation_status", "plus_activation_message", "plus_activation_updated_at",
         # Codex / Agent 状态提示。
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
@@ -156,7 +176,7 @@ def _compact_account_for_list(row: dict) -> dict:
     )
     for key in optional_keys:
         value = row.get(key)
-        if value is not None and value != "":
+        if (value is not None and value != "") or (key.startswith("scan_request_") and row.get("scan_request_status")):
             out[key] = value
     plan = str(row.get("current_plan_type") or row.get("plan_type") or "").lower()
     if any(x in plan for x in ("plus", "pro", "team", "go")):
@@ -297,7 +317,10 @@ def _read_log_tail(path, *, max_bytes: int, default_running: bool = False, runni
             pass
     return {"ok": True, "log": content, "running": running}
 
-def create_app(auth_code: str | None = None) -> Flask:
+def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
+    """Construct routes without recovering tasks or opening the business database."""
+    if data_dir is not None:
+        db.configure_storage(data_dir)
     app = Flask(__name__, template_folder="templates")
     app.config["AUTH_PUBLIC_ENDPOINTS"] = {
         "public_redeem_page",
@@ -326,7 +349,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     def _take_prepared_download(download_id: str):
         item = _prepared_downloads.pop(str(download_id or ""), None)
-        if not item:
+        if not item or time.time() - float(item.get("created_at") or 0) >= 600:
             return None
         content = item.get("content") or b""
         filename = item.get("filename") or "download.zip"
@@ -353,32 +376,25 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/redeem/download/<download_id>", endpoint="public_redeem_download")
     def api_public_redeem_download(download_id: str):
-        item = _take_prepared_download(download_id)
+        from core.redeem_delivery import read_download
+        item = read_download(download_id)
         if item is None:
-            return jsonify({"ok": False, "error": "下载已过期或不存在，请重新兑换"}), 404
-        return item
+            return jsonify({"ok": False, "error": "下载已过期或不存在，请联系管理员恢复交付"}), 404
+        return Response(item["content"], mimetype="text/plain", headers={
+            "Content-Disposition": f'attachment; filename="{item["filename"]}"',
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        })
 
     init_auth(app, auth_code=auth_code)
     register_auth_routes(app)
     register_extract_routes(app)
-    recovered_plan_checks = db.recover_interrupted_plan_checks()
-    if recovered_plan_checks:
-        logger.warning("已恢复 %s 个因 WebUI 重启中断的套餐查询状态", recovered_plan_checks)
-    recovered_extract_links = db.recover_interrupted_extract_links()
-    if recovered_extract_links:
-        logger.warning("已恢复 %s 个因 WebUI 重启中断的提链状态", recovered_extract_links)
-    recovered_live_checks = db.recover_interrupted_live_checks()
-    if recovered_live_checks:
-        logger.warning("已恢复 %s 个因 WebUI 重启中断的查活状态", recovered_live_checks)
-    recovered_codex_agents = db.recover_interrupted_codex_agents()
-    if recovered_codex_agents:
-        logger.warning("已恢复 %s 个因 WebUI 重启中断的 Codex Agent Token 状态", recovered_codex_agents)
-    recovered_totp_setups = db.recover_interrupted_totp_setups()
-    if recovered_totp_setups:
-        logger.warning("已恢复 %s 个因 WebUI 重启中断的 2FA 状态", recovered_totp_setups)
-    recovered_email_changes = db.recover_interrupted_email_changes()
-    if recovered_email_changes:
-        logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
+    register_scan_routes(app)
+    register_payment_provider_routes(app)
+    register_task_routes(app)
+    register_frontend(app)
 
     # ----------------------------------------------------------
     # 页面
@@ -386,12 +402,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/")
     def index():
         requested_ui = (request.args.get("ui") or "").strip().lower()
-        if requested_ui in {"legacy", "modern"}:
-            ui_mode = requested_ui
-        else:
-            ui_mode = (request.cookies.get("ui_mode") or "modern").strip().lower()
-            if ui_mode not in {"legacy", "modern"}:
-                ui_mode = "modern"
+        if requested_ui not in {"legacy", "modern"}:
+            return frontend_page()
+        ui_mode = requested_ui
 
         template_name = "index_legacy.html" if ui_mode == "legacy" else "index.html"
         resp = make_response(render_template(template_name))
@@ -401,44 +414,45 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/redeem", endpoint="public_redeem_page")
     def public_redeem_page():
-        return render_template("redeem.html")
+        return frontend_page()
 
     @app.post("/api/redeem", endpoint="api_redeem")
     def api_redeem():
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求内容必须是 JSON 对象"}), 400
         code = str(data.get("cdk") or data.get("code") or "").strip()
         if not code:
             return jsonify({"ok": False, "error": "请输入 CDK"}), 400
+        if "quantity" in data and (type(data["quantity"]) is not int or not 1 <= data["quantity"] <= 1000):
+            return jsonify({"ok": False, "code": "invalid_quantity", "error": "兑换数量必须是 1~1000 的整数"}), 400
         try:
-            result = db.redeem_plus_accounts(code)
+            result = db.redeem_plus_accounts(code, quantity=data.get("quantity"), request_id=data.get("request_id"))
         except db.RedeemError as exc:
-            return jsonify({"ok": False, "code": exc.code, "error": str(exc)}), exc.status
+            error = {"ok": False, "code": exc.code, "error": str(exc)}
+            if exc.code == "delivery_expired":
+                error["remaining"] = int(getattr(exc, "remaining", 0))
+            return jsonify(error), exc.status
         except Exception:
             logger.exception("公开兑换失败")
-            return jsonify({"ok": False, "error": "兑换服务暂时不可用，请稍后重试"}), 500
+            return jsonify({"ok": False, "error": "兑换服务暂时不可用，请稍后使用原请求重试"}), 500
 
-        lines = [
-            f"# ChatGPT 登录凭据（分组：{result.get('group_name') or '默认分组'}）",
-            "# 格式：邮箱---密码---2FA密钥（没有 2FA 时最后一段为空）",
-            *result["lines"],
-            "",
-        ]
-        content = "\n".join(lines).encode("utf-8")
-        filename = f"chatgpt-credentials-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
-        download_id = _put_prepared_download(content, filename, "text/plain")
         response = jsonify({
             "ok": True,
             "count": result["count"],
+            "credentials": result["lines"],
             "remaining": result["remaining"],
             "group_name": result.get("group_name") or "",
-            "download_url": url_for("public_redeem_download", download_id=download_id),
-            "filename": filename,
-            "message": f"兑换成功，已准备 {result['count']} 个登录凭据",
+            "download_url": url_for("public_redeem_download", download_id=result["download_id"]),
+            "filename": result["filename"],
+            "expires_at": result["delivery_expires_at"],
+            "resumed": result["resumed"],
+            "message": ("已恢复原兑换结果" if result["resumed"] else "兑换成功") + f"，已准备 {result['count']} 个登录凭据",
         })
         response.headers["Cache-Control"] = "no-store, max-age=0"
-
-        # 发货优先：库存已扣减、凭据已生成，这里再异步补查套餐，不阻塞公开兑换响应。
-        _enqueue_plan_checks_after_redeem(result.get("accounts") or [])
+        # Recovery never consumes stock or enqueues a second post-delivery check.
+        if not result["resumed"]:
+            _enqueue_plan_checks_after_redeem(result.get("accounts") or [])
         return response
 
     # ----------------------------------------------------------
@@ -618,6 +632,12 @@ def create_app(auth_code: str | None = None) -> Flask:
         ).strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
         group_filter = str(request.args.get("group", default="") or "").strip()
+        redemption_filter = str(
+            request.args.get("redemption")
+            or request.args.get("redeem_status")
+            or request.args.get("redeemed")
+            or ""
+        ).strip().lower()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
         # 新分页接口：传 page/page_size 或 paged=1 时返回 {items,total,page,page_size,...}
@@ -628,11 +648,12 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter)
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
             result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
-        return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter))
+        rows = db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
+        return jsonify([_compact_account_for_list(row) for row in rows])
 
     @app.post("/api/accounts/lookup")
     def api_accounts_lookup():
@@ -669,6 +690,9 @@ def create_app(auth_code: str | None = None) -> Flask:
         codex_filter = str(data.get("codex_status") or "").strip().lower()
         totp_filter = str(data.get("totp_status") or "").strip().lower()
         group_filter = str(data.get("group") or "").strip()
+        redemption_filter = str(
+            data.get("redemption") or data.get("redeem_status") or ""
+        ).strip().lower()
         date_from = str(data.get("date_from") or "").strip() or None
         date_to = str(data.get("date_to") or "").strip() or None
         rows = db.find_accounts_by_emails(
@@ -680,6 +704,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             date_to=date_to,
             totp_filter=totp_filter,
             group_filter=group_filter,
+            redemption_filter=redemption_filter,
         )
 
         by_email = {}
@@ -750,7 +775,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/accounts/import")
     def api_accounts_import():
-        """导入已有账号：邮箱---密码---2FA---AT，每行一个账号。"""
+        """导入已有账号：邮箱--密码--2FA--AT（分隔符可用 --、--- 或 ----），每行一个账号。"""
         data = request.get_json(silent=True) or {}
         text = data.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -762,15 +787,19 @@ def create_app(auth_code: str | None = None) -> Flask:
         if not records:
             return jsonify({
                 "ok": False,
-                "error": "未解析到有效账号行，请使用：邮箱---密码---2FA---AT",
+                "error": "未解析到有效账号行，请使用：邮箱--密码--2FA--AT（分隔符可用 --、--- 或 ----）",
                 "parsed": 0,
                 "inserted": 0,
                 "skipped": len(parse_errors),
                 "errors": parse_errors,
             }), 400
 
-        inserted, skipped_details = db.import_existing_accounts(records)
+        inserted, skipped_details, name_details = import_existing_accounts(records)
         details = parse_errors + skipped_details
+        name_warnings = [
+            {"email": item["email"], "reason": "账号已导入，用户名获取失败：" + item["error"]}
+            for item in name_details if not item["ok"]
+        ]
         return jsonify({
             "ok": True,
             "parsed": len(records),
@@ -779,6 +808,8 @@ def create_app(auth_code: str | None = None) -> Flask:
             "errors": parse_errors,
             "skipped_details": skipped_details,
             "details": details,
+            "user_names_fetched": sum(1 for item in name_details if item["ok"]),
+            "user_name_warnings": name_warnings,
         })
 
     @app.get("/api/accounts/<int:acc_id>/secret")
@@ -1187,7 +1218,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.post("/api/accounts/check-live-bulk")
     def api_accounts_check_live_bulk():
-        """批量查活：加入后台队列；协议 BrowserSession 指纹环境重新登录并刷新最新 AT。"""
+        """批量查活：加入后台队列；按查活驱动重新登录并刷新最新 AT。"""
         data = request.get_json(silent=True) or {}
         ids = data.get("account_ids") or data.get("ids") or []
         if not isinstance(ids, list) or not ids:
@@ -1376,7 +1407,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.post("/api/accounts/extract-link")
     def api_account_extract_link():
         """单账号提链。Body {account_id|id, link_type?, cdk?}。"""
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "JSON 请求体必须是对象"}), 400
         acc_id = data.get("account_id") or data.get("id")
         try:
             acc = db.get_account(int(acc_id))
@@ -1401,6 +1434,10 @@ def create_app(auth_code: str | None = None) -> Flask:
                 cdk_id=data.get("cdk_id"),
                 proxy_url=data.get("proxyUrl") or data.get("proxy_url"),
                 payment_amount=data.get("payment_amount", 0),
+                payment_provider_id=data.get("payment_provider_id"),
+                entry_proxies=data.get("entry_proxies"),
+                use_promo=data.get("use_promo"),
+                promo_campaign=data.get("promo_campaign"),
             )
         except Exception as exc:
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
@@ -1413,7 +1450,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.post("/api/accounts/extract-link-bulk")
     def api_accounts_extract_link_bulk():
         """批量提链。Body {account_ids:[...], link_type?, cdk?}。"""
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "JSON 请求体必须是对象"}), 400
         ids = data.get("account_ids") or data.get("ids") or []
         if not isinstance(ids, list) or not ids:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
@@ -1425,6 +1464,8 @@ def create_app(auth_code: str | None = None) -> Flask:
         failed = []
         skipped = []
         seen = set()
+        accounts = []
+        proxy_url = data.get("proxyUrl") or data.get("proxy_url")
         for raw in ids:
             try:
                 acc_id = int(raw)
@@ -1446,31 +1487,29 @@ def create_app(auth_code: str | None = None) -> Flask:
             if not token:
                 skipped.append({"id": acc_id, "email": email, "reason": "缺少 access_token"})
                 continue
+            accounts.append({"account_id": acc_id, "email": email or "", "access_token": token, "proxy_url": proxy_url})
+        if accounts:
             try:
-                queued = extract_link_service.enqueue_account_extract(
-                    account_id=acc_id,
-                    email=email or "",
-                    access_token=token,
+                result = extract_link_service.enqueue_account_extract_bulk(
+                    accounts=accounts,
                     trigger="manual_bulk",
                     link_type=data.get("link_type"),
                     cdk=data.get("cdk"),
-                 provider_id=data.get("provider_id"),
-                 cdk_id=data.get("cdk_id"),
-                 proxy_url=data.get("proxyUrl") or data.get("proxy_url"),
-                 payment_amount=data.get("payment_amount", 0),
-                                     )
+                    provider_id=data.get("provider_id"),
+                    cdk_id=data.get("cdk_id"),
+                    payment_provider_id=data.get("payment_provider_id"),
+                    entry_proxies=data.get("entry_proxies"),
+                    payment_amount=data.get("payment_amount", 0),
+                    use_promo=data.get("use_promo"),
+                    promo_campaign=data.get("promo_campaign"),
+                )
             except Exception as exc:
-                failed.append({"id": acc_id, "email": email, "error": f"{type(exc).__name__}: {exc}"})
-                continue
-            item = {"id": acc_id, "email": email, **{k: v for k, v in queued.items() if k != "future"}}
-            if queued.get("accepted"):
-                started.append(item)
-            elif queued.get("busy"):
-                busy.append(item)
-            else:
-                failed.append(item)
+                return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+            started = result.get("started") or []
+            busy = result.get("busy") or []
+            failed = result.get("failed") or []
         return jsonify({
-            "ok": True,
+            "ok": bool(started) or not (accounts and failed and not busy),
             "started": started,
             "started_count": len(started),
             "busy": busy,
@@ -1479,7 +1518,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             "failed_count": len(failed),
             "skipped": skipped,
             "skipped_count": len(skipped),
-        }), 202
+        }), (503 if accounts and not started and not busy and failed else 202)
 
     @app.post("/api/accounts/codex-agent")
     def api_account_codex_agent():
@@ -2901,7 +2940,7 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     @app.get("/api/jobs/active")
     def api_jobs_active():
-        """任务中心快照：只返回排队、运行、暂停和停止中的任务。"""
+        """注册队列快照；跨类型任务中心使用 /api/tasks/active。"""
         from config import email as _email_cfg
         manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
         rows = db.list_active_jobs(limit=5000)
@@ -2914,6 +2953,22 @@ def create_app(auth_code: str | None = None) -> Flask:
             "total": len(rows),
             "status_counts": db.job_status_counts(),
         })
+
+    @app.get("/api/jobs/history")
+    def api_jobs_history():
+        """注册历史分页；跨类型任务中心使用 /api/tasks/history。"""
+        page = max(1, request.args.get("page", default=1, type=int) or 1)
+        page_size = max(1, min(100, request.args.get("page_size", default=20, type=int) or 20))
+        from config import email as _email_cfg
+        manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
+        result = db.list_history_jobs_page(limit=page_size, offset=(page - 1) * page_size)
+        rows = result.get("items") or []
+        for row in rows:
+            row["manual_otp_required"] = manual_otp_required
+            row.update(svc.get_retry_info(row))
+        result["items"] = [_compact_job_for_list(row) for row in rows]
+        result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
+        return jsonify(result)
 
     @app.post("/api/jobs")
     def api_jobs_create():

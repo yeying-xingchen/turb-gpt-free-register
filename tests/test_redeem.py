@@ -48,6 +48,10 @@ class RedeemTests(unittest.TestCase):
                     extra={"registration_password": "free-password"},
                 )
                 app = create_app(auth_code="admin-secret")
+                dist = root / "nuxt"
+                dist.mkdir()
+                (dist / "index.html").write_text('<div id="__nuxt"></div>')
+                app.config["NUXT_DIST_DIR"] = dist
                 client = app.test_client()
 
                 self.assertEqual(client.get("/redeem").status_code, 200)
@@ -71,7 +75,7 @@ class RedeemTests(unittest.TestCase):
                 self.assertEqual(download.status_code, 200)
                 self.assertIn("plus@example.test---plus-password---TOTPSECRET", download.get_data(as_text=True))
                 self.assertNotIn("at-plus", download.get_data(as_text=True))
-                self.assertEqual(client.get(body["download_url"]).status_code, 404)
+                self.assertEqual(client.get(body["download_url"]).data, download.data)
                 self.assertEqual(client.post("/api/redeem", json={"cdk": code}).status_code, 410)
 
                 listing = client.get("/api/redeem/codes", headers={"X-Auth-Code": "admin-secret"}).get_json()

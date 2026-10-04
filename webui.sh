@@ -40,6 +40,7 @@ usage() {
 用法：$0 <command>
 
 commands:
+  build      安装依赖并构建 Nuxt 前端
   start      启动 WebUI
   stop       关闭 WebUI
   restart    重启 WebUI
@@ -120,6 +121,15 @@ collect_running_pids() {
   printf '%s\n' "${unique[@]:-}"
 }
 
+cmd_build() {
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "构建 Nuxt 前端需要 Node.js 22.12+ 和 npm，请先安装。" >&2
+    return 1
+  fi
+  npm --prefix "$ROOT_DIR/frontend" ci
+  npm --prefix "$ROOT_DIR/frontend" run build
+}
+
 cmd_start() {
   local old_pid py pid
   old_pid="$(read_pid)"
@@ -130,6 +140,10 @@ cmd_start() {
   rm -f "$PID_FILE"
 
   py="$(get_python)"
+  if [[ ! -f "$ROOT_DIR/frontend/.output/public/index.html" ]]; then
+    echo "首次启动：构建 Nuxt 前端…"
+    cmd_build
+  fi
 
   local args=("web.py" "--host" "$HOST" "--port" "$PORT")
   if [[ "$OPEN_BROWSER" == "1" || "$OPEN_BROWSER" == "true" ]]; then
@@ -235,6 +249,7 @@ cmd_logs() {
 
 cmd="${1:-}"
 case "$cmd" in
+  build) cmd_build ;;
   start) cmd_start ;;
   stop) cmd_stop ;;
   restart) cmd_restart ;;

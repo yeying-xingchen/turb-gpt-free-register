@@ -8,7 +8,7 @@ WebUI 启动入口。
     python web.py --port 8000     # 换端口
     python web.py --host 0.0.0.0  # 允许局域网访问（敏感工具，自行评估）
 
-与 CLI（python main.py）完全平行，互不影响。
+与 CLI（python main.py）共用业务数据库；同一数据库同时只允许一个业务进程。
 """
 import argparse
 import logging
@@ -93,7 +93,18 @@ def main() -> None:
         logger.error(str(exc))
         raise SystemExit(2) from exc
 
-    app = create_app(auth_code=args.auth_code)
+    from core.runtime import acquire_runtime_owner, recover_startup
+    runtime_owner = None
+    try:
+        runtime_owner = acquire_runtime_owner()
+        app = create_app(auth_code=args.auth_code)
+        recover_startup(runtime_owner)
+    except Exception as exc:
+        if runtime_owner is not None:
+            runtime_owner.close()
+        _release_single_instance(instance_lock)
+        logger.error("WebUI 初始化失败：%s", exc)
+        raise SystemExit(2) from exc
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
     logger.info(f"WebUI 已启动：{url}")
     if is_generated_code():

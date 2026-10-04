@@ -1,29 +1,45 @@
 # -*- coding: utf-8 -*-
-"""账号查活后台队列：协议 BrowserSession 指纹环境 + 独立日志。"""
+"""账号查活后台队列：协议或 CloakBrowser 重新登录 + 独立日志。"""
 from __future__ import annotations
 
 import logging
+import math
 import random
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
 from datetime import datetime
 from pathlib import Path
 
-from core import db
-from core.account_liveness import check_account_liveness, log_path
+from core import db, task_control
+from core.account_liveness import _failure_result, check_account_liveness, log_path
+from core.openai_auth import AccountUnusableError, detect_account_unusable_text
 from core.chatgpt_plan import _mask_proxy, open_plan_check_proxy, resolve_plan_check_route
 
 logger = logging.getLogger(__name__)
 
-_WORKERS = 3
+KIND = "live_check"
+_MAX_WORKERS = task_control.MAX_WORKERS
+
+
+def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
+    from config import live_check as live_cfg
+    try:
+        value = int(getattr(live_cfg, name, default) or default)
+    except (TypeError, ValueError, OverflowError):
+        value = default
+    return max(lower, min(upper, value))
+
+
+_WORKERS = _int_setting("LIVE_CHECK_WORKERS", 3, 1, _MAX_WORKERS)
 _QUEUE_LIMIT = 500
-_EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="live-check")
+_EXECUTOR = task_control.register_pool(KIND, _WORKERS, max_workers=_MAX_WORKERS)
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 _RUNNING: set[int] = set()
 _LOCK = threading.Lock()
 _NETWORK_RETRY_HINTS = (
-    "403", "429", "502", "503", "504", "proxy", "socks", "timeout",
-    "timed out", "connection", "closed", "reset",
+    "403", "408", "425", "429", "500", "502", "503", "504", "proxy", "socks",
+    "timeout", "timed out", "connection", "closed", "reset", "ssl", "tls",
+    "temporarily unavailable",
 )
 
 
@@ -50,7 +66,34 @@ def _retryable_live_check_result(result: dict) -> bool:
     if result.get("ok") or result.get("status") == "deactivated":
         return False
     text = str(result.get("error") or "").lower()
+    if detect_account_unusable_text(text) or detect_account_unusable_text(str(result.get("error_code") or "")):
+        return False
+    retryable = result.get("retryable")
+    if isinstance(retryable, bool):
+        return retryable
+    # 兼容旧调用方：HTTP 业务错误不能因错误文案包含 proxy 等词而重试。
+    try:
+        status = int(result.get("http_status") or 0)
+    except (TypeError, ValueError, OverflowError):
+        status = 0
+    if status:
+        return status in {403, 408, 425, 429} or 500 <= status <= 599
     return any(hint in text for hint in _NETWORK_RETRY_HINTS)
+
+
+def _live_retry_settings(proxy_cfg) -> tuple[int, float]:
+    """读取独立的查活重试设置；次数包含首次执行。"""
+    try:
+        attempts = int(getattr(proxy_cfg, "LIVE_CHECK_MAX_ATTEMPTS", 3))
+    except (TypeError, ValueError, OverflowError):
+        attempts = 3
+    try:
+        delay = float(getattr(proxy_cfg, "LIVE_CHECK_RETRY_DELAY", 2.0))
+    except (TypeError, ValueError, OverflowError):
+        delay = 2.0
+    if not math.isfinite(delay):
+        delay = 2.0
+    return max(1, min(5, attempts)), max(0.0, min(60.0, delay))
 
 
 def is_checking(email: str) -> bool:
@@ -72,6 +115,7 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
 def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: str) -> dict:
     relay = None
     try:
+        task_control.checkpoint(KIND, account_id)
         with _LOCK:
             _RUNNING.add(int(account_id))
         if not db.mark_account_live_check_running(account_id):
@@ -103,59 +147,78 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             f"proxy_mode={route.get('proxy_mode')} proxy_used={route.get('proxy_used') or '-'} "
             f"fallback_reason={route.get('proxy_fallback_reason') or '-'}"
         )
-        # 每个代理出口使用独立 BrowserSession/指纹/Cookie。网络类失败后换池中
-        # 尚未使用的代理；池非空时绝不直连。
-        max_routes = max(1, int(getattr(proxy_cfg, "PLAN_CHECK_MAX_ATTEMPTS", 3) or 3))
+        # 整链重试与阶段内重试分开计数。每轮使用独立会话，池非空时绝不直连。
+        max_attempts, retry_delay = _live_retry_settings(proxy_cfg)
         used_proxies: set[str] = set()
         result: dict = {"ok": False, "status": "failed", "error": "查活未执行"}
-        for route_attempt in range(1, max_routes + 1):
+        for attempt in range(1, max_attempts + 1):
+            task_control.checkpoint(KIND, account_id)
             selected_proxy = str(route.get("proxy") or "").strip()
             if selected_proxy:
                 used_proxies.add(selected_proxy)
-            effective_proxy, relay = open_plan_check_proxy(
-                route, selected_proxy, timeout=timeout,
-            )
             _append_log(
                 email,
-                f"[查活] 网络出口尝试 {route_attempt}/{max_routes}："
+                f"[查活] 完整登录尝试 {attempt}/{max_attempts}："
                 f"{_mask_proxy(selected_proxy) or 'direct'}",
             )
-            result = check_account_liveness(
-                email,
-                proxy=effective_proxy,
-                clear_log=False,
-                email_source=email_source,
-                fingerprint_state={"force_fresh": route_attempt > 1},
-            )
-            if relay is not None:
-                relay.close()
-                relay = None
+            try:
+                effective_proxy, relay = open_plan_check_proxy(
+                    route, selected_proxy, timeout=timeout,
+                )
+                result = dict(check_account_liveness(
+                    email,
+                    proxy=effective_proxy,
+                    clear_log=False,
+                    email_source=email_source,
+                    fingerprint_state={"force_fresh": attempt > 1},
+                ))
+            except Exception as exc:
+                dead_code = (
+                    getattr(exc, "error_code", "") if isinstance(exc, AccountUnusableError)
+                    else detect_account_unusable_text(str(exc))
+                )
+                if isinstance(exc, AccountUnusableError) or dead_code:
+                    result = {
+                        "ok": False, "status": "deactivated", "error": dead_code or "account_deactivated",
+                        "checked_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                else:
+                    result = _failure_result(exc, datetime.now().isoformat(timespec="seconds"))
+            finally:
+                if relay is not None:
+                    current_relay, relay = relay, None
+                    try:
+                        current_relay.close()
+                    except Exception:
+                        logger.warning("[查活] 关闭代理中继失败", exc_info=True)
+            result.update({"attempts": attempt, "max_attempts": max_attempts})
             if not _retryable_live_check_result(result):
+                break
+            if attempt >= max_attempts:
+                _append_log(email, f"[查活] 自动重试次数已用尽（{attempt}/{max_attempts}）")
                 break
 
             remaining = [item for item in candidates if item not in used_proxies]
-            if remaining and route_attempt < max_routes:
+            if remaining:
                 next_proxy = random.choice(remaining)
-                _append_log(
-                    email,
-                    "[查活] 当前代理发生网络/403错误，放弃该会话并随机切换下一代理："
-                    f"{_mask_proxy(next_proxy)}",
-                )
                 route = _live_proxy_route(next_proxy, proxy_cfg)
-                continue
-
-            if candidates:
-                break
-
-            # 没有任何代理池数据时，保留原先的一次直连兜底行为。
-            if selected_proxy and route_attempt < max_routes:
-                _append_log(
-                    email,
-                    "[查活] 未配置可替换代理，启动独立直连会话兜底一次",
-                )
+                retry_action = f"切换代理 {_mask_proxy(next_proxy)}"
+            elif candidates:
+                retry_action = "当前代理池已无未用出口，使用新会话重试当前代理"
+            elif selected_proxy:
+                # 未配置代理池时保留原有直连兜底；之后可继续在直连出口有限重试。
                 route = resolve_plan_check_route(explicit_proxy="")
-                continue
-            break
+                retry_action = "使用新会话直连兜底"
+            else:
+                retry_action = "使用新会话重试直连"
+            delay = min(60.0, retry_delay * (2 ** (attempt - 1)))
+            _append_log(
+                email,
+                f"[查活] 第 {attempt} 次失败：{str(result.get('error') or '临时认证失败')[:300]}；"
+                f"{delay:g}s 后进行第 {attempt + 1}/{max_attempts} 次尝试，{retry_action}",
+            )
+            if delay > 0:
+                task_control.sleep(KIND, account_id, delay)
         result.update({
             "network_route": route.get("network_route"),
             "proxy_used": _mask_proxy(selected_proxy) or None,
@@ -170,6 +233,14 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             _append_log(email, f"[查活] 完成：账号已废 {result.get('error') or ''}")
         else:
             _append_log(email, f"[查活] 完成：失败 {result.get('error') or ''}")
+        return result
+    except task_control.TaskCancelled:
+        result = {"ok": False, "status": "cancelled", "checked_at": datetime.now().isoformat(timespec="seconds"), "error": "用户取消查活任务"}
+        try:
+            db.update_account_liveness(account_id, result)
+            _append_log(email, "[查活] 已取消：用户手动取消")
+        except Exception:
+            logger.exception("[查活] 写入取消状态失败: account_id=%s", account_id)
         return result
     except Exception as exc:
         result = {
@@ -194,6 +265,31 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         with _LOCK:
             _RUNNING.discard(int(account_id))
         _QUEUE_SLOTS.release()
+        task_control.release(KIND, account_id)
+
+
+def _cancel_pending_live_check(account_id: int) -> None:
+    """排队中的查活任务被取消：释放队列槽位并写回取消状态。"""
+    with _LOCK:
+        _RUNNING.discard(int(account_id))
+    try:
+        _QUEUE_SLOTS.release()
+    except ValueError:
+        pass
+    _release_pending_live_check(account_id)
+
+
+def _release_pending_live_check(account_id: int) -> None:
+    try:
+        db.update_account_liveness(int(account_id), {
+            "ok": False,
+            "status": "cancelled",
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "用户取消查活任务",
+        })
+    except Exception:
+        logger.exception("[查活] 写入取消状态失败: account_id=%s", account_id)
+    task_control.release(KIND, account_id)
 
 
 def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "manual", proxy: str | None = None) -> dict:
@@ -208,15 +304,21 @@ def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "m
         return {"accepted": False, "busy": True, "error": "该账号正在查活"}
 
     _append_log(email, f"[查活] 已入队 account_id={account_id} trigger={trigger}", clear=True)
+    handle = task_control.control(KIND, account_id)
     try:
-        _EXECUTOR.submit(
+        accepted = _EXECUTOR.submit(
             _run_live_check,
             account_id=account_id,
             email=email,
             proxy=proxy,
             trigger=str(trigger or "manual"),
+            control=handle,
+            on_cancel=lambda: _cancel_pending_live_check(account_id),
         )
+        if accepted is False:
+            raise RuntimeError("查活队列已关闭")
     except Exception as exc:
+        task_control.release(KIND, account_id)
         _QUEUE_SLOTS.release()
         result = {
             "ok": False,
@@ -236,6 +338,14 @@ def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "m
         "status": "queued",
         "trigger": str(trigger or "manual"),
     }
+
+
+def apply_settings() -> dict:
+    """热加载查活并发数并立即对运行中的批次生效。"""
+    global _WORKERS
+    _WORKERS = _int_setting("LIVE_CHECK_WORKERS", 3, 1, _MAX_WORKERS)
+    _EXECUTOR.set_workers(_WORKERS)
+    return queue_settings()
 
 
 def queue_settings() -> dict:

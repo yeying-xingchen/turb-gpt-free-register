@@ -45,6 +45,11 @@ PLAN_CHECK_TIMEOUT = 15.0
 PLAN_CHECK_MAX_ATTEMPTS = 3
 PLAN_CHECK_RETRY_DELAY = 2.0
 
+# 查活全链登录使用独立的有限重试配置。总尝试次数含首次，运行时限定 1–5；1 关闭整链自动重试，阶段内重试/轮询保留。
+LIVE_CHECK_MAX_ATTEMPTS = 3
+# 基础间隔单位为秒，运行时限定 0–60；按 1、2、4 倍指数退避，单次延迟最多 60 秒。
+LIVE_CHECK_RETRY_DELAY = 2.0
+
 # 新注册账号的权益可能存在短暂同步延迟。首次查询失败，或返回 free 且暂未发现
 # Plus 试用资格时，等待该秒数后再复查一次；设为 0 可关闭复查。
 PLAN_CHECK_REGISTRATION_RECHECK_DELAY = 2.0
@@ -114,6 +119,8 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_TIMEOUT': 'float',
     'PLAN_CHECK_MAX_ATTEMPTS': 'int',
     'PLAN_CHECK_RETRY_DELAY': 'float',
+    'LIVE_CHECK_MAX_ATTEMPTS': 'int',
+    'LIVE_CHECK_RETRY_DELAY': 'float',
     'PLAN_CHECK_REGISTRATION_RECHECK_DELAY': 'float',
     'PLAN_CHECK_WORKERS': 'int',
     'PLAN_CHECK_QUEUE_LIMIT': 'int',

@@ -6,12 +6,12 @@ import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import db
+from config import email as email_cfg
+from core import db, task_control
 from core.email_provider import (
     acquire_email_from_source, email_material_line,
     release_email_if_unconsumed, wait_for_otp,
@@ -19,15 +19,40 @@ from core.email_provider import (
 from core.session import BrowserSession, close_browser_session
 
 logger = logging.getLogger(__name__)
-_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="email-change")
+KIND = "email_change"
+_MAX_WORKERS = task_control.MAX_WORKERS
+
+
+def _workers_setting() -> int:
+    try:
+        value = int(getattr(email_cfg, "EMAIL_CHANGE_WORKERS", 3) or 3)
+    except (TypeError, ValueError, OverflowError):
+        value = 3
+    return max(1, min(_MAX_WORKERS, value))
+
+
+_WORKERS = _workers_setting()
+_EXECUTOR = task_control.register_pool(KIND, _WORKERS, max_workers=_MAX_WORKERS)
 _SLOTS = threading.BoundedSemaphore(100)
 _RUNNING: set[int] = set()
 _LOCK = threading.Lock()
-_LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
+_LOG_DIR: Path | None = None  # None follows the process-bound database log directory.
+
+
+def apply_settings() -> dict:
+    """热加载换绑并发数并立即对运行中的批次生效。"""
+    global _WORKERS
+    _WORKERS = _workers_setting()
+    _EXECUTOR.set_workers(_WORKERS)
+    return {"workers": _WORKERS}
+
+
+def queue_settings() -> dict:
+    return {"workers": _WORKERS}
 
 
 def log_path(account_id: int) -> Path:
-    return _LOG_DIR / f"email-change-{int(account_id)}.log"
+    return (_LOG_DIR or db._LOG_DIR) / f"email-change-{int(account_id)}.log"
 
 
 def _append_log(account_id: int, message: str, *, clear: bool = False) -> None:
@@ -387,6 +412,7 @@ def _run(account_id: int, source: str) -> dict:
     with _LOCK:
         _RUNNING.add(account_id)
     try:
+        task_control.checkpoint(KIND, account_id)
         _append_log(account_id, f"任务执行开始：account_id={account_id} source={source}")
         stage = "读取账号"
         account = db.get_account(account_id)
@@ -405,6 +431,7 @@ def _run(account_id: int, source: str) -> dict:
             raise RuntimeError("换绑任务状态已失效")
 
         stage = "创建网络会话"
+        task_control.checkpoint(KIND, account_id)
         saved_proxy = _proxy(account.get("proxy_used"))
         # 账号没有可复用的真实代理 URL 时，先按全局代理池选路，而不是直接裸连。
         current_email = str(account.get("email") or "").strip()
@@ -433,6 +460,7 @@ def _run(account_id: int, source: str) -> dict:
             f"新邮箱验证码发送成功，开始等待 OTP；reauth={'yes' if reauthenticated else 'no'}",
         )
         stage = "等待新邮箱 OTP"
+        task_control.checkpoint(KIND, account_id)
         otp_started = time.monotonic()
         otp = wait_for_otp(new_email, after_ts=after_ts, email_source=source, force_service=True)
         _append_log(account_id, f"新邮箱 OTP 获取成功：source={source} cost={_cost(otp_started)}（验证码不写入日志）")
@@ -480,6 +508,20 @@ def _run(account_id: int, source: str) -> dict:
             "live_check_mode": live_mode,
             "live_check_error": None if (live_result.get("ok") or live_result.get("accepted")) else live_result.get("error"),
         }
+    except task_control.TaskCancelled:
+        message = "用户取消邮箱换绑"
+        db.finish_account_email_change(
+            account_id, ok=False, new_email=new_email or None, source=source,
+            error=message, status="cancelled",
+        )
+        _append_log(account_id, f"换绑已取消：stage={stage} total={_cost(task_started)}")
+        if new_email:
+            try:
+                release_email_if_unconsumed(new_email, note=f"账号 #{account_id} 换绑取消")
+                _append_log(account_id, f"取消后邮箱处理完成：已请求回收 email={new_email}")
+            except Exception:
+                logger.exception("[邮箱换绑] 取消失败后回收新邮箱异常: %s", new_email)
+        return {"ok": False, "id": account_id, "error": message, "cancelled": True}
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         db.finish_account_email_change(account_id, ok=False, new_email=new_email or None, source=source, error=error)
@@ -497,6 +539,22 @@ def _run(account_id: int, source: str) -> dict:
         with _LOCK:
             _RUNNING.discard(account_id)
         _SLOTS.release()
+        task_control.release(KIND, account_id)
+
+
+def _cancel_pending_email_change(account_id: int) -> None:
+    """排队中的换绑任务被取消：释放队列槽位并写回取消状态。"""
+    try:
+        _SLOTS.release()
+    except ValueError:
+        pass
+    try:
+        db.finish_account_email_change(
+            int(account_id), ok=False, error="用户取消邮箱换绑", status="cancelled",
+        )
+    except Exception:
+        logger.exception("[邮箱换绑] 写回取消状态失败: account_id=%s", account_id)
+    task_control.release(KIND, account_id)
 
 
 def enqueue(account_id: int, source: str, trigger: str = "manual") -> dict:
@@ -509,9 +567,16 @@ def enqueue(account_id: int, source: str, trigger: str = "manual") -> dict:
         return {"accepted": False, "busy": True, "error": "账号正在换绑或不存在"}
     _append_log(account_id, f"换绑任务已入队：source={source} trigger={trigger}", clear=True)
     try:
-        future = _EXECUTOR.submit(_run, account_id, source)
+        future = _EXECUTOR.submit(
+            _run, account_id, source,
+            control=task_control.control(KIND, account_id),
+            on_cancel=lambda: _cancel_pending_email_change(account_id),
+        )
+        if future is False:
+            raise RuntimeError("邮箱换绑队列已关闭")
         return {"accepted": True, "future": future}
     except Exception as exc:
+        task_control.release(KIND, account_id)
         _SLOTS.release()
         db.finish_account_email_change(account_id, ok=False, error=str(exc))
         _append_log(account_id, f"换绑任务提交失败：{type(exc).__name__}: {exc}")

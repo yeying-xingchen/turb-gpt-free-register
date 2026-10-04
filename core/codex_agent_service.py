@@ -6,17 +6,18 @@ import logging
 import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from config import codex as codex_cfg
 from config import proxy as proxy_cfg
-from core import db
+from core import db, task_control
 from core.session import close_browser_session
 
 logger = logging.getLogger(__name__)
 
+KIND = "codex_agent"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -48,9 +49,20 @@ def _int_setting(name: str, default: int, lower: int, upper: int) -> int:
     return max(lower, min(upper, value))
 
 
-_WORKERS = _int_setting("PLAN_CHECK_WORKERS", 3, 1, 16)
+_MAX_WORKERS = task_control.MAX_WORKERS
+
+
+def _agent_workers_setting() -> int:
+    try:
+        value = int(getattr(codex_cfg, "CODEX_AGENT_WORKERS", 3) or 3)
+    except (TypeError, ValueError, OverflowError):
+        value = 3
+    return max(1, min(_MAX_WORKERS, value))
+
+
+_WORKERS = _agent_workers_setting()
 _QUEUE_LIMIT = _int_setting("PLAN_CHECK_QUEUE_LIMIT", 500, _WORKERS, 5000)
-_EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="codex-agent")
+_EXECUTOR = task_control.register_pool(KIND, _WORKERS, max_workers=_MAX_WORKERS)
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 _RATE_LOCK = threading.Lock()
 _NEXT_REQUEST_AT = 0.0
@@ -116,6 +128,7 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
     attempts = 0
     attempt_count = 0
     try:
+        task_control.checkpoint(KIND, account_id)
         if not db.mark_account_codex_agent_running(account_id):
             return {"ok": False, "error": "账号已删除或 Codex Agent 状态已被重置"}
         from core.codex_agent import create_codex_agent_identity
@@ -131,7 +144,9 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         auth_json = None
         for attempt in range(1, attempts + 1):
             attempt_count = attempt
+            task_control.checkpoint(KIND, account_id)
             _wait_for_rate_slot()
+            task_control.checkpoint(KIND, account_id)
             try:
                 effective_proxy, relay = open_plan_check_proxy(
                     route, route["proxy"], timeout=timeout_seconds,
@@ -182,7 +197,7 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
                     str(exc)[:180],
                 )
                 if wait_seconds > 0:
-                    time.sleep(wait_seconds)
+                    task_control.sleep(KIND, account_id, wait_seconds)
         if not isinstance(auth_json, dict):
             raise RuntimeError(f"Codex Agent 生成未返回 auth_json: {last_exc}")
         identity = auth_json.get("agent_identity") if isinstance(auth_json, dict) else {}
@@ -272,6 +287,18 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         db.update_account_codex_agent(account_id, result)
         logger.info("[CodexAgent] 生成成功: %s runtime=%s", email, result.get("agent_runtime_id") or "-")
         return result
+    except task_control.TaskCancelled:
+        result = {
+            "ok": False,
+            "status": "cancelled",
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "用户取消 Codex Agent 生成",
+        }
+        try:
+            db.update_account_codex_agent(account_id, result)
+        except Exception:
+            logger.exception("[CodexAgent] 写入取消状态异常: account_id=%s", account_id)
+        return result
     except Exception as exc:
         result = {
             "ok": False,
@@ -301,6 +328,37 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         if relay is not None:
             relay.close()
         _QUEUE_SLOTS.release()
+        task_control.release(KIND, account_id)
+
+
+def _cancel_pending_agent(account_id: int) -> None:
+    """排队中的 Agent 生成任务被取消：释放队列槽位并写回取消状态。"""
+    try:
+        _QUEUE_SLOTS.release()
+    except ValueError:
+        pass
+    try:
+        db.update_account_codex_agent(int(account_id), {
+            "ok": False,
+            "status": "cancelled",
+            "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "error": "用户取消 Codex Agent 生成",
+        })
+    except Exception:
+        logger.exception("[CodexAgent] 写入取消状态异常: account_id=%s", account_id)
+    task_control.release(KIND, account_id)
+
+
+def apply_settings() -> dict:
+    """热加载 Agent 生成并发数并立即对运行中的批次生效。"""
+    global _WORKERS
+    _WORKERS = _agent_workers_setting()
+    _EXECUTOR.set_workers(_WORKERS)
+    return {"workers": _WORKERS, "queue_limit": _QUEUE_LIMIT}
+
+
+def queue_settings() -> dict:
+    return {"workers": _WORKERS, "queue_limit": _QUEUE_LIMIT}
 
 
 def enqueue_account_codex_agent(*, account_id: int, email: str, access_token: str, trigger: str = "manual", verify_task: bool = True) -> dict:
@@ -317,8 +375,13 @@ def enqueue_account_codex_agent(*, account_id: int, email: str, access_token: st
             access_token=access_token,
             trigger=trigger,
             verify_task=verify_task,
+            control=task_control.control(KIND, account_id),
+            on_cancel=lambda: _cancel_pending_agent(account_id),
         )
+        if fut is False:
+            raise RuntimeError("Codex Agent 队列已关闭")
         return {"accepted": True, "busy": False, "future": fut}
     except Exception:
+        task_control.release(KIND, account_id)
         _QUEUE_SLOTS.release()
         raise

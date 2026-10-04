@@ -334,6 +334,10 @@ def follow_oauth_callback(session: BrowserSession, continue_url: str, referer: s
     return resp.url
 
 
+class SessionNotReadyError(RuntimeError):
+    """Session 返回正常 JSON，但登录令牌尚未就绪。"""
+
+
 def fetch_session(session: BrowserSession) -> dict:
     """
     GET https://chatgpt.com/api/auth/session
@@ -354,9 +358,20 @@ def fetch_session(session: BrowserSession) -> dict:
     resp.raise_for_status()
     data = resp.json()
 
-    if not data.get("accessToken"):
-        logger.error(f"[Session] 响应中没有 accessToken: {data}")
-        raise RuntimeError("未拿到 accessToken，登录态可能未建立")
+    if not isinstance(data, dict):
+        raise RuntimeError("Session 返回非 JSON 对象，无法确认登录状态")
+    if data.get("error"):
+        from core.openai_auth import AccountUnusableError, detect_account_unusable_text
+        code = detect_account_unusable_text(json.dumps(data["error"], ensure_ascii=False))
+        if code:
+            raise AccountUnusableError(f"Session：账号已停用（{code}）", error_code=code)
+        raise RuntimeError("Session 返回认证错误，未建立有效登录态")
+    token = data.get("accessToken")
+    if token is not None and not isinstance(token, str):
+        raise RuntimeError("Session accessToken 格式无效")
+    if not token or not token.strip():
+        logger.debug("[Session] accessToken 尚未就绪")
+        raise SessionNotReadyError("未拿到 accessToken，登录态可能未建立")
 
     user = data.get("user") or {}
     account = data.get("account") or {}

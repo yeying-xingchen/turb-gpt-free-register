@@ -10,7 +10,7 @@ from core import db
 
 logger = logging.getLogger(__name__)
 
-_LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
+_LOG_DIR: Path | None = None  # None follows the process-bound database log directory.
 _RETRYING: set[str] = set()
 _RETRYING_LOCK = threading.Lock()
 _STOP_REQUESTED: set[str] = set()
@@ -40,7 +40,7 @@ def _clear_state_locked(key: str) -> None:
 
 def log_path(email: str) -> Path:
     safe = email.replace("/", "_").replace("\\", "_").replace(":", "_")
-    return _LOG_DIR / f"codex-retry-{safe}.log"
+    return (_LOG_DIR or db._LOG_DIR) / f"codex-retry-{safe}.log"
 
 
 def reserve(email: str) -> bool:

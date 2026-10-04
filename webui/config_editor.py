@@ -62,6 +62,32 @@ EDITABLE_FIELDS = [
         "key": "PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL", "file": "register.py", "type": "bool", "group": "注册方式",
         "label": "同邮箱保持协议指纹", "help": "仅影响纯协议注册；开启后同一邮箱重复任务复用稳定设备指纹，关闭后每次任务创建全新指纹",
     },
+    {
+        "key": "REGISTRATION_WORKERS", "file": "register.py", "type": "int", "group": "注册方式",
+        "label": "注册并发数", "help": "注册任务的后台线程数，默认 4，范围 1–16；提交任务时填写「并发线程」会临时覆盖，任务中心也可运行中调整",
+    },
+
+    # ---- 账号查活 ----
+    {
+        "key": "LIVE_CHECK_DRIVER", "file": "live_check.py", "type": "str", "group": "账号查活",
+        "label": "查活驱动", "help": "默认 protocol=纯协议；cloak=CloakBrowser 浏览器。独立配置，不自动跟随注册或 Codex。Cloak 复用无头、humanize、GeoIP 等设置，每次使用临时独立上下文并在结束时关闭；代理服从现有查活网络路由",
+        "choices": [
+            {"value": "protocol", "label": "纯协议（默认）"},
+            {"value": "cloak", "label": "CloakBrowser"},
+        ],
+    },
+    {
+        "key": "LIVE_CHECK_MAX_ATTEMPTS", "file": "proxy.py", "type": "int", "group": "账号查活",
+        "label": "查活总尝试次数", "help": "含首次，默认 3，运行时限定 1–5；1 关闭整链自动重试，阶段内重试/轮询保留。瞬时网络错误、403/408/429/5xx 或 Session 尚未就绪时有限重登；密码/密钥等明确凭据错误及废号不重复整链登录",
+    },
+    {
+        "key": "LIVE_CHECK_RETRY_DELAY", "file": "proxy.py", "type": "float", "group": "账号查活",
+        "label": "查活重试基础间隔(秒)", "help": "默认 2 秒，运行时限定 0–60；按 1、2、4 倍指数退避，单次延迟最多 60 秒。优先未用代理；单代理或代理耗尽时以独立会话重试原出口，代理池非空不回退直连",
+    },
+    {
+        "key": "LIVE_CHECK_WORKERS", "file": "live_check.py", "type": "int", "group": "账号查活",
+        "label": "查活并发数", "help": "批量查活后台线程数，默认 3，范围 1–16；保存后立即生效，也可在任务中心运行中调整",
+    },
 
     # ---- CloakBrowser ----
     {
@@ -86,7 +112,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CLOAK_USE_PROXY", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",
-        "label": "Cloak使用代理", "help": "把本项目传入或代理池抽取的代理传给 CloakBrowser",
+        "label": "Cloak使用代理", "help": "把本项目传入或代理池抽取的代理传给 CloakBrowser；查活始终使用查活网络路由，本开关不影响查活出口",
     },
     {
         "key": "CLOAK_LICENSE_KEY", "file": "cloakbrowser.py", "type": "str", "group": "CloakBrowser",
@@ -98,7 +124,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CLOAK_USER_DATA_DIR", "file": "cloakbrowser.py", "type": "str", "group": "CloakBrowser",
-        "label": "Cloak用户目录", "help": "留空使用临时上下文；填写路径则持久化 cookies/cache",
+        "label": "Cloak用户目录", "help": "留空使用临时上下文；填写路径则持久化 cookies/cache；查活忽略此项，始终使用临时独立上下文",
     },
     {
         "key": "CLOAK_SELENIUM_TIMEOUT", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
@@ -106,7 +132,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "CLOAK_KEEP_BROWSER_OPEN", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",
-        "label": "保留Cloak浏览器", "help": "调试时开启，任务结束后不自动关闭",
+        "label": "保留Cloak浏览器", "help": "调试时开启，任务结束后不自动关闭；查活忽略此项，成功或失败均关闭浏览器",
     },
 
     # ---- Browser Use Cloud ----
@@ -306,6 +332,10 @@ EDITABLE_FIELDS = [
     {
         "key": "TWOFA_QUEUE_LIMIT", "file": "twofa.py", "type": "int", "group": "功能开关",
         "label": "2FA队列容量", "help": "允许排队和执行中的2FA任务总数，默认200；保存后立即生效",
+    },
+    {
+        "key": "EMAIL_CHANGE_WORKERS", "file": "email.py", "type": "int", "group": "功能开关",
+        "label": "换绑邮箱并发数", "help": "批量换绑邮箱的后台线程数，默认 3，范围 1–16；保存后立即生效",
     },
     {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
@@ -617,6 +647,10 @@ EDITABLE_FIELDS = [
         "label": "套餐查询队列上限", "help": "防止异常批量操作无限堆积，建议 100-1000",
     },
     {
+        "key": "CODEX_AGENT_WORKERS", "file": "codex.py", "type": "int", "group": "代理池",
+        "label": "Agent生成并发数", "help": "Codex Agent Token 生成的后台线程数，默认 3，范围 1–16；保存后立即生效，也可在任务中心运行中调整",
+    },
+    {
         "key": "PLAN_CHECK_MIN_INTERVAL", "file": "proxy.py", "type": "float", "group": "代理池",
         "label": "套餐/Agent请求最小间隔(秒)", "help": "限制查套餐和生成 Agent Token 的请求启动频率，降低 429 风险",
     },
@@ -641,6 +675,63 @@ EDITABLE_FIELDS = [
     {
         "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",
         "label": "提链并发数", "help": "批量提链后台线程数，建议 1-4",
+    },
+    {
+        "key": "EXTRACT_LOG_ENABLED", "file": "extract_link.py", "type": "bool", "group": "提链",
+        "label": "提链完整日志", "help": "每个账号写一份 extract-link-<id>.log，记录请求、响应、事件流与最终结果；任务中心可查看",
+    },
+    {
+        "key": "EXTRACT_LOG_CREDENTIALS", "file": "extract_link.py", "type": "bool", "group": "提链",
+        "label": "提链日志记录凭据明文", "help": "开启后提链 CDK、账号 AT、租户会话 token、入口代理以明文写入本地日志；日志泄露等于凭据泄露",
+    },
+    {
+        "key": "EXTRACT_LOG_VALUE_LIMIT", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "提链日志单字段上限(字符)", "help": "请求体、响应体、SSE 事件的单行截断长度",
+    },
+    {
+        "key": "EXTRACT_LOG_MAX_BYTES", "file": "extract_link.py", "type": "int", "group": "提链",
+        "label": "提链日志文件上限(字节)", "help": "超出后轮转为 <文件>.1，避免批次日志无限增长",
+    },
+    # ---- 支付任务提交 ----
+    {
+        "key": "ORDERHUB_API_BASE", "file": "scan_api.py", "type": "str", "group": "支付提交",
+        "label": "UPI OrderHub API 地址", "help": "默认 https://upi.xxsyun.xyz/api/v1；支持 API Key 和数字雇主账号登录，提交所选账号完整 AT",
+    },
+    {
+        "key": "MASI_API_BASE", "file": "scan_api.py", "type": "str", "group": "支付提交",
+        "label": "masi 支付 API 地址", "help": "默认 https://masi.cc.cd；此平台提交选中账号的完整 AT，CDK 在支付弹窗中输入",
+    },
+    {
+        "key": "SCAN_API_BASE", "file": "scan_api.py", "type": "str", "group": "支付提交",
+        "label": "Astra Scan Workbench API 地址", "help": "Astra Scan Workbench 地址，默认 https://scan-qr.hixinghai.com/api/v1；不要填写 CDK",
+    },
+    {
+        "key": "SEASHORE_API_BASE", "file": "scan_api.py", "type": "str", "group": "支付提交",
+        "label": "发布者 API 地址", "help": "seashore 发布者 API，默认 https://seashore.lol/api/publisher；CDK 直接作为 Bearer 凭据，可保存后直接选择",
+    },
+    {
+        "key": "SCAN_API_TIMEOUT", "file": "scan_api.py", "type": "int", "group": "支付提交",
+        "label": "支付 API 超时(秒)", "help": "提交或查询公共支付任务的网络超时；超时后结果可能待核实，不会自动重提",
+    },
+    {
+        "key": "PLUS_ACTIVATION_WORKERS", "file": "scan_api.py", "type": "int", "group": "支付提交",
+        "label": "开通Plus并发数", "help": "「开通 Plus」批次的后台线程数，默认 4，范围 1–16；保存后立即生效，也可在任务中心运行中调整",
+    },
+    {
+        "key": "PAYMENT_LOG_ENABLED", "file": "scan_api.py", "type": "bool", "group": "支付提交",
+        "label": "支付完整日志", "help": "每个账号写一份 scan-payment-<id>.log，记录请求、响应、任务 ID 与最终归类；任务中心可查看",
+    },
+    {
+        "key": "PAYMENT_LOG_CREDENTIALS", "file": "scan_api.py", "type": "bool", "group": "支付提交",
+        "label": "支付日志记录凭据明文", "help": "开启后支付 CDK、OrderHub API Key、账号 AT 以明文写入本地日志；日志泄露等于凭据泄露",
+    },
+    {
+        "key": "PAYMENT_LOG_VALUE_LIMIT", "file": "scan_api.py", "type": "int", "group": "支付提交",
+        "label": "支付日志单字段上限(字符)", "help": "请求体、响应体的单行截断长度",
+    },
+    {
+        "key": "PAYMENT_LOG_MAX_BYTES", "file": "scan_api.py", "type": "int", "group": "支付提交",
+        "label": "支付日志文件上限(字节)", "help": "超出后轮转为 <文件>.1，避免长期追加导致文件过大",
     },
     # ---- Codex 配置 ----
     {

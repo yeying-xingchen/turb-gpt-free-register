@@ -12,6 +12,20 @@ let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
 let SHOW_FREE_ACCOUNTS_ONLY = false;
 const ACCOUNT_SELECTED = new Set();
 const ACCOUNT_SELECTED_ROWS = new Map();
+let accountSelectionRevision = 0;
+function clearAccountSelection() {
+  accountSelectionRevision++;
+  ACCOUNT_SELECTED.clear();
+  ACCOUNT_SELECTED_ROWS.clear();
+  document.querySelectorAll('#accountsBodyV2 .account-row-check').forEach(cb => { cb.checked = false; });
+  const resultEl = document.getElementById('accountEmailSelectResultV2');
+  if (resultEl) {
+    resultEl.textContent = '';
+    resultEl.title = '';
+    resultEl.classList.remove('has-missing');
+  }
+  updateAccountSelectionUi();
+}
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
 let JOBS_TOTAL = 0;
@@ -19,8 +33,15 @@ let JOB_STATUS_COUNTS = {};
 let jobsRenderSignature = '';
 const JOB_SELECTED = new Set();
 let TASK_CENTER_JOBS = [];
+let TASK_CENTER_HISTORY = [];
+let TASK_CENTER_HISTORY_TOTAL = 0;
 let taskCenterLoading = false;
-let activeLogJob = null, logTimer = null, jobsTimer = null;
+let taskCenterActiveRequest = null;
+let taskCenterHistoryRequest = 0;
+let taskCenterHistoryPage = 1;
+let taskCenterHistorySize = 20;
+let activeLogJob = null, activeLogTask = null, logTimer = null, jobsTimer = null;
+let logViewRevision = 0;
 
 // ---------- 分页状态 ----------
 const PAGERS = {
@@ -464,6 +485,7 @@ function activateTab(tab, persist=true) {
     refreshJobs({refreshSummary: false});
   }
   if (tab === 'task-center') refreshTaskCenter();
+  else refreshTaskCenterBadge();
 }
 $$('nav button').forEach(b => b.addEventListener('click', () => activateTab(b.dataset.tab)));
 
@@ -492,7 +514,7 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn) {
     const ok = confirm(
       `当前任务表里已有 ${activeCount} 个任务在跑或排队，` +
       `这次会再加 ${count} 个，合计 ${activeCount + count} 个，确定继续？\n\n` +
-      `（如果只是想跑这 ${count} 个，建议先点"取消所有排队"清掉残留再提交）`
+      `（如果只是想跑这 ${count} 个，建议先点"取消排队注册任务"清掉残留再提交）`
     );
     if (!ok) return;
   }
@@ -514,16 +536,15 @@ async function startRegistrationFromInputs(countEl, workersEl, startBtn) {
   }
   finally { setTimeout(restoreBtn, 3000); }
 }
-async function cancelAllPendingJobs(btn) {
-  const pendingCount = Number(JOB_STATUS_COUNTS.pending || 0);
+async function cancelAllPendingJobs(btn, pendingCount = Number(JOB_STATUS_COUNTS.pending || 0)) {
   const msg = pendingCount > 0
-    ? `确定取消 ${pendingCount} 个排队中的任务吗？已运行中的任务不受影响。`
-    : '当前页没有排队任务；仍要请求后端取消所有排队任务吗？';
+    ? `确定取消 ${pendingCount} 个排队中的注册任务吗？包含 Codex 补跑，不影响运行中任务和账号任务（含支付）。`
+    : '当前没有已知排队注册任务；仍要请求后端取消所有排队注册任务吗？不影响账号任务（含支付）。';
   if (!confirm(msg)) return;
   if (btn) btn.disabled = true;
   try {
     const r = await api('/api/jobs/cancel-pending', { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}' });
-    showToast(`已取消 ${r.cancelled} 个排队任务`);
+    showToast(`已取消 ${r.cancelled} 个排队注册任务`);
     refreshJobs();
     refreshTaskCenter();
   } catch(e) { showToast('取消失败: ' + e.message); }
@@ -679,7 +700,6 @@ async function refreshJobs({refreshSummary = true} = {}) {
     const nextJobs = res.items || [];
     JOBS_TOTAL = Number(res.total || nextJobs.length || 0);
     JOB_STATUS_COUNTS = res.status_counts || {};
-    updateTaskCenterSummary(JOB_STATUS_COUNTS);
     const totalPages = Math.max(1, Math.ceil(JOBS_TOTAL / p.size));
     if (p.page > totalPages) { p.page = totalPages; return refreshJobs({refreshSummary}); }
     const nextSignature = JSON.stringify({items: nextJobs, total: JOBS_TOTAL, status_counts: JOB_STATUS_COUNTS, page: p.page, size: p.size});
@@ -690,6 +710,34 @@ async function refreshJobs({refreshSummary = true} = {}) {
     }
     if (refreshSummary) loadSummary();
   } catch(e) {}
+}
+
+function taskCenterLabel(task) {
+  const labels = {
+    plus_activation: '开通 Plus', live_check: '查活', plan_check: '查套餐',
+    extract_link: '提链', scan_payment: '扫码支付', totp_setup: '开启 2FA',
+    email_change: '换绑邮箱', codex_agent: 'Codex 授权',
+    registration: '账号注册', codex_retry: 'Codex 补跑',
+  };
+  return task.label || labels[task.job_type] || task.job_type || '任务';
+}
+
+function taskCenterStatus(task) {
+  if (task.source_status === 'deactivated') return 'deactivated';
+  if (task.source_status === 'needs_attention') return 'needs_attention';
+  return String(task.display_status || task.status || '');
+}
+
+function taskCenterStatusPill(task) {
+  const status = taskCenterStatus(task);
+  if (status === 'needs_attention') return '<span class="jobs-v2-pill task-status--attention">待核实</span>';
+  if (status === 'deactivated') return '<span class="jobs-v2-pill jobs-v2-pill--failed">账号已废</span>';
+  return pillV2(status);
+}
+
+function pendingRegistrationTaskCount() {
+  return TASK_CENTER_JOBS.filter(task => String(task.id).startsWith('registration-')
+    && task.status === 'pending' && task.capabilities?.cancel === true).length;
 }
 
 function taskCenterProgress(job) {
@@ -714,28 +762,56 @@ function updateTaskCenterSummary(counts = {}) {
   }
 }
 
+function captureTaskOtpInputs(body) {
+  // 任务中心每 3 秒重绘一次表格；重绘会丢掉正在输入的验证码和焦点。
+  const inputs = typeof body.querySelectorAll === 'function'
+    ? Array.from(body.querySelectorAll('input.task-otp-input')) : [];
+  return inputs.map(input => ({
+    job: input.dataset?.otpJob || '',
+    value: input.value || '',
+    focused: typeof document.activeElement !== 'undefined' && document.activeElement === input,
+    start: input.selectionStart,
+    end: input.selectionEnd,
+  })).filter(item => item.job && (item.value || item.focused));
+}
+
+function restoreTaskOtpInputs(items) {
+  for (const item of items) {
+    const input = document.getElementById(`task-otp-${item.job}`);
+    if (!input) continue;
+    input.value = item.value;
+    if (!item.focused || typeof input.focus !== 'function') continue;
+    input.focus();
+    if (typeof input.setSelectionRange !== 'function') continue;
+    const position = Number.isInteger(item.start) ? item.start : item.value.length;
+    try { input.setSelectionRange(position, Number.isInteger(item.end) ? item.end : position); } catch (error) {}
+  }
+}
+
 function renderTaskCenter() {
   const body = document.getElementById('taskCenterBody');
   if (!body) return;
-  const icons = jobsV2OpIcons();
+  const pendingOtp = captureTaskOtpInputs(body);
   body.innerHTML = TASK_CENTER_JOBS.map(job => {
-    const id = Number(job.id);
+    const id = String(job.id);
     const progress = taskCenterProgress(job);
     const status = String(job.status || '');
-    const paused = status === 'paused';
-    const stopping = status === 'stopping';
+    const capabilities = job.capabilities || {};
     const stage = job.progress_message || job.stage || (status === 'pending' ? '等待执行' : '执行中');
     const started = formatDateTime(job.started_at || job.created_at);
+    const manualOtp = job.job_id != null && job.manual_otp_required === true && status === 'running';
     const actionButtons = [
+      manualOtp ? `<input id="task-otp-${esc(job.job_id)}" class="manual-otp-input task-otp-input" data-otp-email="${esc(job.email || '')}" data-otp-job="${esc(job.job_id)}" placeholder="邮箱验证码" maxlength="8" title="打开邮箱后把 6 位验证码贴这里，再点提交验证码">` : '',
+      manualOtp ? `<button type="button" class="task-action-btn task-action-btn--otp" data-task-otp="${esc(id)}">提交验证码</button>` : '',
       `<button type="button" class="task-action-btn task-action-btn--view" data-task-view-log="${esc(id)}">查看进度</button>`,
-      paused
-        ? `<button type="button" class="task-action-btn task-action-btn--resume" data-task-resume="${esc(id)}">恢复</button>`
-        : (!stopping ? `<button type="button" class="task-action-btn task-action-btn--pause" data-task-pause="${esc(id)}">暂停</button>` : ''),
-      !stopping ? `<button type="button" class="task-action-btn task-action-btn--cancel" data-task-cancel="${esc(id)}">取消</button>` : '<span class="task-center-stopping">取消中…</span>',
+      capabilities.pause === true ? `<button type="button" class="task-action-btn task-action-btn--pause" data-task-pause="${esc(id)}">暂停</button>` : '',
+      capabilities.resume === true ? `<button type="button" class="task-action-btn task-action-btn--resume" data-task-resume="${esc(id)}">恢复</button>` : '',
+      capabilities.cancel === true ? `<button type="button" class="task-action-btn task-action-btn--cancel" data-task-cancel="${esc(id)}">取消</button>` : '',
+      status === 'stopping' ? '<span class="task-center-stopping">取消中…</span>' : '',
     ].filter(Boolean).join('');
     return `<tr>
-      <td class="task-col-id"><strong>#${esc(id)}</strong>${job.job_type === 'codex_retry' ? '<div class="sub-cell">Codex 补跑</div>' : ''}</td>
-      <td class="task-col-status">${pillV2(status)}</td>
+      <td class="task-col-id"><strong>${esc(taskCenterLabel(job))}</strong><div class="sub-cell">#${esc(id)}</div></td>
+      <td class="task-col-status">${taskCenterStatusPill(job)}</td>
       <td class="task-col-progress">
         <div class="task-progress-line"><div class="task-progress-track"><span style="width:${progress}%"></span></div><strong>${progress}%</strong></div>
         <div class="task-progress-message" title="${esc(stage)}">${esc(stage)}</div>
@@ -746,15 +822,93 @@ function renderTaskCenter() {
       <td class="task-col-actions"><div class="task-center-actions">${actionButtons}</div></td>
     </tr>`;
   }).join('') || '<tr><td colspan="7" class="task-center-empty">当前没有进行中的任务</td></tr>';
+  restoreTaskOtpInputs(pendingOtp);
+}
+
+function renderTaskCenterHistory() {
+  const body = document.getElementById('taskCenterHistoryBody');
+  if (!body) return;
+  body.innerHTML = TASK_CENTER_HISTORY.map(job => {
+    const id = String(job.id);
+    const status = taskCenterStatus(job);
+    const stage = job.progress_message || job.stage || (status === 'success' ? '已完成' : '任务结束');
+    const completed = formatDateTime(job.completed_at || job.started_at || job.created_at);
+    const result = status === 'deactivated' ? '账号已废'
+      : status === 'needs_attention' ? (job.error_message || job.progress_message || '待核实')
+      : status === 'success' ? '100%' : (job.error_message || stage);
+    return `<tr>
+      <td class="task-col-id"><strong>${esc(taskCenterLabel(job))}</strong><div class="sub-cell">#${esc(id)}</div></td>
+      <td class="task-col-status">${taskCenterStatusPill(job)}</td>
+      <td class="task-col-progress" title="${esc(result)}">${esc(result)}</td>
+      <td class="task-col-email" title="${esc(job.email || '-')}">${esc(job.email || '-')}</td>
+      <td class="task-col-stage" title="${esc(stage)}">${esc(stage)}</td>
+      <td class="task-col-time" title="${esc(completed)}">${esc(completed)}</td>
+      <td class="task-col-actions"><button type="button" class="task-action-btn task-action-btn--view" data-task-history-log="${esc(id)}">查看日志</button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" class="task-center-empty">暂无历史任务</td></tr>';
+  const count = document.getElementById('taskCenterHistoryCount');
+  if (count) count.textContent = `共 ${TASK_CENTER_HISTORY_TOTAL} 条`;
+  const pager = document.getElementById('pager-task-center-history');
+  if (pager) {
+    const pages = Math.max(1, Math.ceil(TASK_CENTER_HISTORY_TOTAL / taskCenterHistorySize));
+    pager.innerHTML = `<button type="button" onclick="taskCenterHistoryGo(-1)"${taskCenterHistoryPage <= 1 ? ' disabled' : ''}>‹</button><span class="pager-info">第 ${taskCenterHistoryPage} / ${pages} 页</span><button type="button" onclick="taskCenterHistoryGo(1)"${taskCenterHistoryPage >= pages ? ' disabled' : ''}>›</button>`;
+  }
+}
+
+function taskCenterHistoryGo(delta) {
+  const pages = Math.max(1, Math.ceil(TASK_CENTER_HISTORY_TOTAL / taskCenterHistorySize));
+  taskCenterHistoryPage = Math.max(1, Math.min(pages, taskCenterHistoryPage + delta));
+  refreshTaskCenterHistory().catch(error => {
+    const hint = document.getElementById('taskCenterHint');
+    if (hint) hint.innerHTML = `<div class="banner warn">历史任务加载失败：${esc(error.message)}</div>`;
+  });
+}
+
+async function refreshTaskCenterHistory() {
+  const request = ++taskCenterHistoryRequest;
+  const result = await api(`/api/tasks/history?page=${taskCenterHistoryPage}&page_size=${taskCenterHistorySize}`);
+  if (request !== taskCenterHistoryRequest) return;
+  TASK_CENTER_HISTORY = result.items || [];
+  TASK_CENTER_HISTORY_TOTAL = Number(result.total || 0);
+  taskCenterHistoryPage = Math.max(1, Number(result.page) || 1);
+  taskCenterHistorySize = Math.max(1, Number(result.page_size) || taskCenterHistorySize);
+  renderTaskCenterHistory();
+}
+
+function refreshTaskCenterActive() {
+  if (taskCenterActiveRequest) return taskCenterActiveRequest;
+  taskCenterActiveRequest = (async () => {
+    try {
+      const result = await api('/api/tasks/active');
+      TASK_CENTER_JOBS = result.items || [];
+      updateTaskCenterSummary(result.status_counts || {});
+      const cancelButton = document.getElementById('btnCancelPendingTaskCenter');
+      if (cancelButton) {
+        const pendingCount = pendingRegistrationTaskCount();
+        cancelButton.textContent = `取消排队注册任务（${pendingCount}）`;
+        cancelButton.disabled = pendingCount === 0;
+      }
+      return result;
+    } finally {
+      taskCenterActiveRequest = null;
+    }
+  })();
+  return taskCenterActiveRequest;
+}
+
+async function refreshTaskCenterBadge() {
+  if (document.hidden) return;
+  try { await refreshTaskCenterActive(); } catch (error) {}
 }
 
 async function refreshTaskCenter() {
   if (taskCenterLoading) return;
   taskCenterLoading = true;
   try {
-    const result = await api('/api/jobs/active');
-    TASK_CENTER_JOBS = result.items || [];
-    updateTaskCenterSummary(result.status_counts || {});
+    await Promise.all([
+      refreshTaskCenterActive(),
+      refreshTaskCenterHistory(),
+    ]);
     const hint = document.getElementById('taskCenterHint');
     if (hint) hint.innerHTML = '';
     renderTaskCenter();
@@ -768,13 +922,13 @@ async function refreshTaskCenter() {
   }
 }
 
-async function handleTaskCenterAction(jobId, action, button) {
-  const job = TASK_CENTER_JOBS.find(item => Number(item.id) === Number(jobId));
-  if (!job) return;
-  if (action === 'cancel' && !confirm(`确定取消任务 #${jobId}？\n\n运行中的任务会在当前检查点停止，排队任务会直接取消。`)) return;
+async function handleTaskCenterAction(taskId, action, button) {
+  const job = TASK_CENTER_JOBS.find(item => String(item.id) === String(taskId));
+  if (!job || !['pause', 'resume', 'cancel'].includes(action) || job.capabilities?.[action] !== true) return;
+  if (action === 'cancel' && !confirm(`确定取消注册任务 #${taskId}？\n\n运行中的任务会在当前检查点停止，排队任务会直接取消。`)) return;
   if (button) button.disabled = true;
   try {
-    const result = await api(`/api/jobs/${jobId}/${action}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+    const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
     showToast(result.message || (action === 'pause' ? '任务已暂停' : action === 'resume' ? '任务已恢复' : '已发送取消信号'));
     refreshTaskCenter();
     refreshJobs({refreshSummary: false});
@@ -784,25 +938,55 @@ async function handleTaskCenterAction(jobId, action, button) {
   }
 }
 
+async function submitTaskManualOtp(taskId, button) {
+  const job = TASK_CENTER_JOBS.find(item => String(item.id) === String(taskId));
+  if (!job || job.job_id == null || job.manual_otp_required !== true) return;
+  const input = document.getElementById(`task-otp-${job.job_id}`);
+  const code = (input?.value || '').trim();
+  if (!/^\d{4,8}$/.test(code)) { showToast('请输入 4–8 位数字邮箱验证码'); return; }
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/manual-otp', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ email: job.email || '', code, job_id: job.job_id }),
+    });
+    showToast(result.ok ? `已提交验证码给 ${job.email || ('#' + job.job_id)}` : (result.error || '提交失败'));
+    if (input) input.value = '';
+  } catch (error) {
+    showToast('提交验证码失败：' + error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 const taskCenterBody = document.getElementById('taskCenterBody');
 if (taskCenterBody) {
   taskCenterBody.addEventListener('click', (event) => {
     const view = event.target.closest('[data-task-view-log]');
-    if (view) { openLog(Number(view.dataset.taskViewLog)); return; }
+    if (view) { openTaskLog(view.dataset.taskViewLog); return; }
+    const otp = event.target.closest('[data-task-otp]');
+    if (otp) { submitTaskManualOtp(otp.dataset.taskOtp, otp); return; }
     const pause = event.target.closest('[data-task-pause]');
-    if (pause) { handleTaskCenterAction(Number(pause.dataset.taskPause), 'pause', pause); return; }
+    if (pause) { handleTaskCenterAction(pause.dataset.taskPause, 'pause', pause); return; }
     const resume = event.target.closest('[data-task-resume]');
-    if (resume) { handleTaskCenterAction(Number(resume.dataset.taskResume), 'resume', resume); return; }
+    if (resume) { handleTaskCenterAction(resume.dataset.taskResume, 'resume', resume); return; }
     const cancel = event.target.closest('[data-task-cancel]');
-    if (cancel) handleTaskCenterAction(Number(cancel.dataset.taskCancel), 'cancel', cancel);
+    if (cancel) handleTaskCenterAction(cancel.dataset.taskCancel, 'cancel', cancel);
+  });
+}
+
+const taskCenterHistoryBody = document.getElementById('taskCenterHistoryBody');
+if (taskCenterHistoryBody) {
+  taskCenterHistoryBody.addEventListener('click', (event) => {
+    const view = event.target.closest('[data-task-history-log]');
+    if (view) openTaskLog(view.dataset.taskHistoryLog);
   });
 }
 
 document.getElementById('btnRefreshTaskCenter')?.addEventListener('click', refreshTaskCenter);
 document.getElementById('btnCancelPendingTaskCenter')?.addEventListener('click', (event) => {
-  const counts = TASK_CENTER_JOBS.reduce((acc, job) => { acc[job.status] = (acc[job.status] || 0) + 1; return acc; }, {});
-  JOB_STATUS_COUNTS.pending = counts.pending || 0;
-  cancelAllPendingJobs(event.currentTarget);
+  cancelAllPendingJobs(event.currentTarget, pendingRegistrationTaskCount());
 });
 
 let modalScrollY = 0;
@@ -815,7 +999,8 @@ function updateModalScrollLock() {
     || !$('#qrPanel').classList.contains('hidden')
     || !$('#outlookImportModal').classList.contains('hidden')
     || !$('#emailChangeModalV2').classList.contains('hidden')
-    || !$('#accountImportModalV2').classList.contains('hidden');
+    || !$('#accountImportModalV2').classList.contains('hidden')
+    || !!document.querySelector('.account-group-overlay');
   const locked = document.body.classList.contains('modal-open');
   if (opened && !locked) {
     modalScrollY = window.scrollY || document.documentElement.scrollTop || 0;
@@ -831,6 +1016,8 @@ function updateModalScrollLock() {
 }
 function closeLogModal() {
   activeLogJob = null;
+  activeLogTask = null;
+  logViewRevision++;
   clearInterval(logTimer);
   $('#logPanel').classList.add('hidden');
   updateModalScrollLock();
@@ -991,25 +1178,76 @@ async function retrySelectedJobs() {
 }
 
 function openLog(jobId) {
+  activeLogTask = null;
   activeLogJob = jobId;
+  logViewRevision++;
   $('#logJobId').textContent = jobId;
+  const details = $('#logTaskDetails');
+  if (details) { details.textContent = ''; details.classList.add('hidden'); }
   $('#logPanel').classList.remove('hidden');
   updateModalScrollLock();
   $('#logContent').textContent = '加载中…';
-  pollLog();
   clearInterval(logTimer);
   logTimer = setInterval(pollLog, 5000);
+  pollLog();
 }
 async function pollLog() {
-  if (activeLogJob == null) return;
+  if (activeLogJob == null || activeLogTask != null) return;
+  const jobId = activeLogJob;
+  const revision = logViewRevision;
   try {
-    const r = await api(`/api/jobs/${activeLogJob}/log`);
+    const r = await api(`/api/jobs/${jobId}/log`);
+    if (revision !== logViewRevision || activeLogJob !== jobId || activeLogTask != null) return;
     const c = $('#logContent');
     const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
     c.textContent = r.log || '(暂无日志)';
     if (atBottom) c.scrollTop = c.scrollHeight;
-    if (r.job && ['success','failed','stopped','cancelled'].includes(r.job.status)) clearInterval(logTimer);
+    if (r.job && ['success','partial_success','failed','stopped','cancelled'].includes(r.job.status)) clearInterval(logTimer);
   } catch(e) {}
+}
+
+function renderTaskLogDetails(task) {
+  const details = $('#logTaskDetails');
+  if (!details) return;
+  const message = task.error_message || task.progress_message || task.stage || '';
+  details.innerHTML = `<strong>${esc(taskCenterLabel(task))}</strong> ${taskCenterStatusPill(task)}
+    <span>${esc(task.email || '未分配邮箱')}</span>${message ? `<div>${esc(message)}</div>` : ''}`;
+  details.classList.remove('hidden');
+}
+
+function openTaskLog(taskId) {
+  activeLogJob = null;
+  activeLogTask = String(taskId);
+  logViewRevision++;
+  $('#logJobId').textContent = activeLogTask;
+  const task = [...TASK_CENTER_JOBS, ...TASK_CENTER_HISTORY].find(item => String(item.id) === activeLogTask);
+  renderTaskLogDetails(task || {});
+  $('#logPanel').classList.remove('hidden');
+  updateModalScrollLock();
+  $('#logContent').textContent = '加载中…';
+  clearInterval(logTimer);
+  logTimer = setInterval(pollTaskLog, 5000);
+  pollTaskLog();
+}
+
+async function pollTaskLog() {
+  if (activeLogTask == null) return;
+  const taskId = activeLogTask;
+  const revision = logViewRevision;
+  try {
+    const r = await api(`/api/tasks/${encodeURIComponent(taskId)}/log`);
+    if (revision !== logViewRevision || activeLogTask !== taskId) return;
+    const c = $('#logContent');
+    const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
+    c.textContent = r.log || '(暂无日志)';
+    if (atBottom) c.scrollTop = c.scrollHeight;
+    if (r.job) {
+      renderTaskLogDetails(r.job);
+      if (!['pending', 'running', 'paused', 'stopping'].includes(r.job.status)) clearInterval(logTimer);
+    }
+  } catch (error) {
+    if (revision === logViewRevision && activeLogTask === taskId) $('#logContent').textContent = `日志加载失败：${error.message}`;
+  }
 }
 
 // ---------- 账号 ----------
@@ -1072,12 +1310,14 @@ async function selectAccountsByEmail() {
     btn.disabled = true;
     btn.textContent = '查找中…';
   }
+  const selectionRevision = accountSelectionRevision;
   try {
     const r = await api('/api/accounts/lookup', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({emails, ...getAccountLookupFilters()}),
     });
+    if (selectionRevision !== accountSelectionRevision) return;
     const matches = r.matches || [];
     matches.forEach(row => {
       const id = Number(row.id);
@@ -1190,6 +1430,9 @@ async function pollAccountPlanStatuses() {
         const isChecking = ['queued', 'running'].includes(item.plan_check_status);
         const wasExtracting = ['queued', 'running'].includes(account?.extract_link_status);
         const isExtracting = ['queued', 'running'].includes(item.extract_link_status);
+        const wasActivating = ['queued', 'checking', 'extracting', 'paying', 'verifying'].includes(account?.plus_activation_status);
+        const isActivating = ['queued', 'checking', 'extracting', 'paying', 'verifying'].includes(item.plus_activation_status);
+        if (wasActivating && !isActivating) needsFullReload = true;
         const wasAgenting = ['queued', 'running'].includes(account?.codex_agent_status);
         const isAgenting = ['queued', 'running'].includes(item.codex_agent_status);
         if (wasChecking && !isChecking) needsFullReload = true;
@@ -1464,6 +1707,12 @@ function _extractLinkCell(r) {
   }
   return '';
 }
+function _activationCell(r) {
+  return window.ExtractLinks?.activationCell ? window.ExtractLinks.activationCell(r) : '';
+}
+function _paymentCell(r) {
+  return window.ExtractLinks?.paymentCell ? window.ExtractLinks.paymentCell(r) : '';
+}
 function _extractLinkAction(r) {
   const s = r.extract_link_status || '';
   if (['queued','running'].includes(s)) return `<button disabled title="${esc(r.extract_link_message || '提链任务执行中')}">提链中…</button>`;
@@ -1542,6 +1791,10 @@ function positionAccountsV2MoreMenu(wrap) {
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
 }
+function _passwordCell(r) {
+  if (!r.has_password) return '<span class="muted">-</span>';
+  return `<span class="mono" data-account-password-value>••••••••</span> <button type="button" data-account-show-password="${esc(r.id)}" aria-expanded="false">查看</button> <button type="button" data-account-copy-secret="password" data-account-id="${esc(r.id)}">复制</button>`;
+}
 function renderAccounts() {
   const total = ACCOUNTS_TOTAL;
   const rows = ACCOUNTS;
@@ -1552,7 +1805,7 @@ function renderAccounts() {
   const rowHtmlV2 = (r) => `
     <tr>
       <td class="col-check"><input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''}></td>
-      <td class="col-id">#${esc(r.id)}</td>
+      <td class="col-id" data-label="ID">#${esc(r.id)}</td>
       <td class="col-email" title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}">
         <div class="acc-v2-email">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>
         ${r.original_email ? `<div class="acc-v2-email-history">原邮箱: ${esc(r.original_email)}</div>` : ''}
@@ -1560,17 +1813,17 @@ function renderAccounts() {
         <div class="acc-v2-email-user">${esc(r.user_name || '-')}</div>
         ${['queued','running'].includes(r.email_change_status) ? '<div class="acc-v2-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? `<div class="acc-v2-email-status" title="${esc(r.email_change_error || '')}">换绑失败: ${esc(r.email_change_error || '-')}</div>` : '')}
       </td>
-      <td class="col-source">${esc(r.email_source || '-')}</td>
-      <td class="col-token">${_tokenCellV2(r)}</td>
-      <td class="col-password">${r.password ? `<span class="mono" title="${esc(r.password)}">${esc(short(r.password, 18))}</span>` : '<span class="acc-v2-muted">-</span>'}</td>
-      <td class="col-plan">${_planCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div></td>
-      <td class="col-note" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
-      <td class="col-small">${_totpCellV2(r)}</td>
-      <td class="col-status">${_codexCellV2(r)}</td>
-      <td class="col-time" title="${esc(r.created_at || '-')}">${esc(r.created_at || '-')}</td>
-      <td class="col-actions">
+      <td class="col-source" data-label="来源">${esc(r.email_source || '-')}</td>
+      <td class="col-token" data-label="Token">${_tokenCellV2(r)}</td>
+      <td class="col-password" data-label="密码">${_passwordCell(r)}</td>
+      <td class="col-plan" data-label="套餐">${_planCell(r)}${_activationCell(r)}<div class="acc-v2-sub">${_extractLinkCell(r)}</div>${_paymentCell(r)}</td>
+      <td class="col-note" data-label="备注" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
+      <td class="col-small" data-label="2FA">${_totpCellV2(r)}</td>
+      <td class="col-status" data-label="Codex">${_codexCellV2(r)}</td>
+      <td class="col-time" data-label="创建时间" title="${esc(r.created_at || '-')}">${esc(r.created_at || '-')}</td>
+      <td class="col-actions" data-label="本行操作">
         <div class="acc-v2-actions">
-          <button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}">删除</button>
+          <button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}" title="仅删除本行账号">删除</button>
           <div class="acc-v2-more">
             <button type="button" class="acc-v2-more-btn" data-acc-more-toggle aria-haspopup="true" aria-expanded="false">更多</button>
             <div class="acc-v2-more-menu" role="menu">${_accountsV2MoreMenu(r)}</div>
@@ -1588,14 +1841,32 @@ function renderAccounts() {
 }
 
 function updateAccountSelectionUi(pageRows = null) {
+  if (!pageRows) pageRows = ACCOUNTS;
+  const pageIds = pageRows.map(r => Number(r.id));
+  const checkedCount = pageIds.filter(id => ACCOUNT_SELECTED.has(id)).length;
+  const offPageCount = ACCOUNT_SELECTED.size - checkedCount;
   const none = ACCOUNT_SELECTED.size === 0;
   const hintV2 = $('#accountsSelectedHintV2');
-  if (hintV2) hintV2.textContent = `已选 ${ACCOUNT_SELECTED.size}`;
+  if (hintV2) hintV2.textContent = `已选 ${ACCOUNT_SELECTED.size} 个账号`;
+  const scopeV2 = $('#accountsSelectionScopeV2');
+  if (scopeV2) scopeV2.textContent = none
+    ? '勾选账号后可执行批量操作'
+    : `本页选中 ${checkedCount} / ${pageIds.length} · 其他页已选 ${offPageCount}`;
+  document.querySelectorAll('[data-account-selection-scope]').forEach(el => {
+    el.textContent = none ? '请先选择账号' : `作用于已选 ${ACCOUNT_SELECTED.size} 个账号（含其他页 ${offPageCount} 个）`;
+  });
+  const pageScope = $('#accountsPageScopeV2');
+  if (pageScope) pageScope.textContent = `仅当前页 ${pageIds.length} 个账号，不受勾选影响`;
+  const copyPageTokens = $('#btnCopyAllTokensV2');
+  if (copyPageTokens) copyPageTokens.disabled = !pageRows.some(row => row.has_access_token);
+  const copyPageLines = $('#btnCopyAllLinesV2');
+  if (copyPageLines) copyPageLines.disabled = pageIds.length === 0;
 
   const archiveLabel = SHOW_ARCHIVED_ACCOUNTS ? '恢复选中' : '归档选中';
   const archiveTitle = SHOW_ARCHIVED_ACCOUNTS ? '把选中的归档账号恢复到默认账号列表' : '归档选中的账号；默认账号列表将不再查询/显示这些账号';
   const v2Ids = [
-    'btnCheckSelectedPlansV2', 'btnExtractSelectedLinksV2',
+    'btnCheckSelectedLiveV2', 'btnClearAccountSelectionV2',
+    'btnCheckSelectedPlansV2', 'btnActivateSelectedPlusV2', 'btnExtractSelectedLinksV2', 'btnSubmitSelectedPaymentsV2', 'btnQuerySelectedPaymentsV2',
     'btnRetrySelectedCodexV2', 'btnDownloadSelectedCpaV2', 'btnStopSelectedCodexV2',
     'btnSetupSelectedTotpV2', 'btnChangeSelectedEmailsV2', 'btnNoteSelectedAccountsV2', 'btnGroupSelectedAccountsV2', 'btnCopySelectedLinesV2', 'btnCopySelectedTokensV2', 'btnCopySelectedEmailsV2',
     'btnDownloadSelectedTxtV2', 'btnDownloadSelectedFullExportV2', 'btnCopySelectedFullExportV2', 'btnCopySelectedLoginCredentialsV2', 'btnArchiveSelectedAccountsV2', 'btnDeleteSelectedAccountsV2',
@@ -1610,9 +1881,6 @@ function updateAccountSelectionUi(pageRows = null) {
     }
   });
 
-  if (!pageRows) pageRows = ACCOUNTS;
-  const pageIds = pageRows.map(r => Number(r.id));
-  const checkedCount = pageIds.filter(id => ACCOUNT_SELECTED.has(id)).length;
   const cbAll = document.getElementById('accountsSelectAllV2');
   if (cbAll) {
     cbAll.checked = pageIds.length > 0 && checkedCount === pageIds.length;
@@ -1769,6 +2037,12 @@ async function onAccountsBodyClick(e) {
     closeAccountsV2MoreMenus();
   }
 
+  const passwordBtn = e.target.closest('[data-account-show-password]');
+  if (passwordBtn) {
+    await toggleAccountPassword(passwordBtn);
+    return;
+  }
+
   const copySecretBtn = e.target.closest('[data-account-copy-secret]');
   if (copySecretBtn) {
     const id = Number(copySecretBtn.dataset.accountId);
@@ -1779,6 +2053,7 @@ async function onAccountsBodyClick(e) {
       if (!value) { showToast('可复制内容为空'); return; }
       copyText(value);
       showToast(
+        field === 'password' ? '密码已复制' :
         field === 'access_token' ? 'Token 已复制' :
         field === 'codex_agent_token' ? 'Agent Token 已复制' :
         field === 'login_credentials' ? '邮箱、注册密码和 2FA 密钥已复制' :
@@ -2025,7 +2300,7 @@ function setAccountsFilterToggle(el, on) {
 async function applyAccountsArchivedFilter(on) {
   SHOW_ARCHIVED_ACCOUNTS = !!on;
   setAccountsFilterToggle($('#showArchivedAccountsV2'), SHOW_ARCHIVED_ACCOUNTS);
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2039,7 +2314,7 @@ async function applyAccountsPlusFilter(on) {
   setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
   setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
   setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), SHOW_FREE_ACCOUNTS_ONLY);
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2053,7 +2328,7 @@ async function applyAccountsPlusTrialFilter(on) {
   setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
   setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
   setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), SHOW_FREE_ACCOUNTS_ONLY);
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2067,7 +2342,7 @@ async function applyAccountsFreeFilter(on) {
   setAccountsFilterToggle($('#showPlusAccountsOnlyV2'), SHOW_PLUS_ACCOUNTS_ONLY);
   setAccountsFilterToggle($('#showPlusTrialAccountsOnlyV2'), SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
   setAccountsFilterToggle($('#showFreeAccountsOnlyV2'), SHOW_FREE_ACCOUNTS_ONLY);
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2093,7 +2368,7 @@ async function refreshAccountsList(btn) {
 (function bindAccountsFilterV2() {
   const qV2 = $('#qAccountsV2');
   if (qV2) qV2.addEventListener('input', debounce(() => {
-    ACCOUNT_SELECTED.clear();
+    clearAccountSelection();
     PAGERS.accounts.page = 1;
     loadAccounts();
   }, 250));
@@ -2110,20 +2385,20 @@ async function refreshAccountsList(btn) {
   if (clearAccountEmailSelectionV2) clearAccountEmailSelectionV2.addEventListener('click', clearAccountEmailSelectionInput);
   const codexV2 = $('#codexStatusFilterV2');
   if (codexV2) codexV2.addEventListener('change', () => {
-    ACCOUNT_SELECTED.clear();
+    clearAccountSelection();
     PAGERS.accounts.page = 1;
     loadAccounts();
   });
   const totpV2 = $('#totpStatusFilterV2');
   if (totpV2) totpV2.addEventListener('change', () => {
-    ACCOUNT_SELECTED.clear();
+    clearAccountSelection();
     PAGERS.accounts.page = 1;
     loadAccounts();
   });
 
   const groupV2 = $('#groupFilterV2');
   if (groupV2) groupV2.addEventListener('change', () => {
-    ACCOUNT_SELECTED.clear();
+    clearAccountSelection();
     PAGERS.accounts.page = 1;
     loadAccounts();
   });
@@ -2160,7 +2435,7 @@ async function refreshAccountsList(btn) {
     panelId: 'dateFilterPanelAccountsV2',
     fromId: 'dateFromAccountsV2',
     toId: 'dateToAccountsV2',
-    onApply: () => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); },
+    onApply: () => { clearAccountSelection(); PAGERS.accounts.page = 1; loadAccounts(); },
   });
 })();
 
@@ -2177,8 +2452,33 @@ async function fetchAccountSecrets(ids, field) {
 }
 
 async function fetchOneAccountSecret(id, field) {
-  const r = await api(`/api/accounts/${encodeURIComponent(id)}/secret?field=${encodeURIComponent(field)}`);
+  const r = await api(`/api/accounts/${encodeURIComponent(id)}/secret?field=${encodeURIComponent(field)}`, {cache: 'no-store'});
   return r.value || '';
+}
+
+async function toggleAccountPassword(btn) {
+  const valueEl = btn.closest('td')?.querySelector('[data-account-password-value]');
+  if (!valueEl || btn.disabled) return;
+  if (btn.getAttribute('aria-expanded') === 'true') {
+    valueEl.textContent = '••••••••';
+    btn.setAttribute('aria-expanded', 'false');
+    btn.textContent = '查看';
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const value = await fetchOneAccountSecret(Number(btn.dataset.accountShowPassword), 'password');
+    // A refresh may replace this row while its request is pending.
+    if (!btn.isConnected) return;
+    if (!value) { showToast('当前密码为空'); return; }
+    valueEl.textContent = value;
+    btn.setAttribute('aria-expanded', 'true');
+    btn.textContent = '隐藏';
+  } catch (err) {
+    showToast('获取密码失败: ' + err.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function fetchAccountTotpCode(id) {
@@ -2611,6 +2911,20 @@ async function extractSelectedLinks() {
   }
 }
 
+async function submitSelectedPayments() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!window.ExtractLinks?.submitPayment) { showToast('支付提交模块尚未加载，请刷新页面'); return; }
+  await window.ExtractLinks.submitPayment(ids);
+}
+
+async function querySelectedPayments() {
+  const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+  if (!ids.length) { showToast('请先选择账号'); return; }
+  if (!window.ExtractLinks?.queryPayment) { showToast('支付查询模块尚未加载，请刷新页面'); return; }
+  await window.ExtractLinks.queryPayment(ids);
+}
+
 async function generateOneCodexAgent(id, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   if (!acc) { showToast('账号不存在'); return; }
@@ -2806,7 +3120,7 @@ async function checkSelectedLive(idsArg = null, btnArg = null) {
   const workers = getCodexBulkWorkers();
   const msg = idsArg ? `确定查活这个账号并刷新最新 AT/accessToken 吗？` : `确定查活选中的 ${ids.length} 个账号吗？
 
-会重新登录邮箱 OTP；登录成功且未封号则标记正常，并刷新最新 AT/accessToken。
+会使用配置的查活驱动重新登录，按需完成密码、邮箱验证码或 2FA 验证；登录成功并取得新 AT 后标记正常。
 
 并发线程数：${workers}`;
   if (!confirm(msg)) return;
@@ -2836,7 +3150,7 @@ async function checkSelectedLive(idsArg = null, btnArg = null) {
   } finally {
     if (btn) {
       btn.textContent = old;
-      btn.disabled = false;
+      btn.disabled = btnArg ? false : ACCOUNT_SELECTED.size === 0;
     }
   }
 }
@@ -2973,66 +3287,29 @@ async function noteSelectedAccounts() {
   }
 }
 
-async function groupSelectedAccounts() {
-  const ids = Array.from(ACCOUNT_SELECTED);
-  if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const options = accountGroupOptions();
-  const names = ACCOUNT_GROUPS.map(g => g.group_name);
-  while (true) {
-    const input = prompt(`把选中的 ${ids.length} 个账号移动到哪个分组？\n\n现有分组：${names.join('、') || '默认分组'}\n输入新名称会创建新分组。`, names[0] || '默认分组');
-    if (input === null) return;
-    const name = String(input || '').trim();
-    if (!name) { showToast('分组名不能为空'); continue; }
-    if (name.length > 60) { showToast('分组名最长 60 个字符'); continue; }
-    const btn = $('#btnGroupSelectedAccountsV2');
-    if (btn) btn.disabled = true;
-    try {
-      const r = await api('/api/accounts/group-bulk', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({account_ids: ids, group_name: name}),
-      });
-      ACCOUNT_GROUPS = r.groups || [];
-      fillAccountGroupSelects();
-      showToast(`已移动 ${r.updated_count || 0} 个账号到「${name}」`);
-      loadAccounts();
-    } catch (err) {
-      showToast('设置分组失败: ' + err.message);
-      updateAccountSelectionUi();
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-    return;
-  }
+function onAccountGroupSaved(result, name) {
+  ACCOUNT_GROUPS = result.groups || [];
+  fillAccountGroupSelects();
+  const skipped = (result.skipped || []).length;
+  showToast(`已移动 ${result.updated_count || 0} 个账号到「${name}」${skipped ? `，跳过 ${skipped} 个` : ''}`);
+  loadAccounts();
 }
 
-async function setSingleAccountGroup() {
-  const btn = arguments.length ? arguments[0] : null;
-  const id = btn ? Number(btn.dataset.accountSetGroup || 0) : 0;
+function groupSelectedAccounts() {
+  const ids = Array.from(ACCOUNT_SELECTED);
+  if (ids.length === 0) { showToast('请先选择账号'); return; }
+  window.AccountGroupPicker.open({accountIds: ids, request: api, onSaved: onAccountGroupSaved});
+}
+
+function setSingleAccountGroup(btn) {
+  const id = Number(btn?.dataset.accountSetGroup || 0);
   if (!id) return;
-  const current = btn.dataset.group || '';
-  const names = ACCOUNT_GROUPS.map(g => g.group_name);
-  const input = prompt(`设置账号 #${id} 的分组（当前：${current || '默认分组'}）\n\n现有分组：${names.join('、') || '默认分组'}\n输入新名称会创建新分组。`, current || '默认分组');
-  if (input === null) return;
-  const name = String(input || '').trim();
-  if (!name) { showToast('分组名不能为空'); return; }
-  if (name.length > 60) { showToast('分组名最长 60 个字符'); return; }
-  btn.disabled = true;
-  try {
-    const r = await api('/api/accounts/group-bulk', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({account_ids: [id], group_name: name}),
-    });
-    ACCOUNT_GROUPS = r.groups || [];
-    fillAccountGroupSelects();
-    showToast(`账号 #${id} 已移动到「${name}」`);
-    loadAccounts();
-  } catch (err) {
-    showToast('设置分组失败: ' + err.message);
-  } finally {
-    btn.disabled = false;
-  }
+  window.AccountGroupPicker.open({
+    accountIds: [id],
+    currentGroup: btn.dataset.group || '默认分组',
+    request: api,
+    onSaved: onAccountGroupSaved,
+  });
 }
 
 
@@ -3138,7 +3415,7 @@ async function submitEmailChange() {
     const body = ids.length === 1 ? {source} : {source, account_ids: ids};
     const r = await api(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     closeEmailChangeModal();
-    ACCOUNT_SELECTED.clear();
+    clearAccountSelection();
     showToast(ids.length === 1 ? '邮箱换绑任务已开始' : `已开始 ${r.started_count || 0} 个换绑任务，跳过 ${(r.skipped || []).length} 个`);
     planStatusRevision = '';
     loadAccounts();
@@ -3151,13 +3428,73 @@ $('#btnCloseEmailChangeV2').addEventListener('click', closeEmailChangeModal);
 $('#btnCancelEmailChangeV2').addEventListener('click', closeEmailChangeModal);
 $('#btnSubmitEmailChangeV2').addEventListener('click', submitEmailChange);
 $('#emailChangeModalV2').addEventListener('click', e => { if (e.target.id === 'emailChangeModalV2') closeEmailChangeModal(); });
+function closeAccountActionMenus(except = null) {
+  document.querySelectorAll('#tab-accounts .acc-v2-action-menu[open]').forEach(menu => {
+    if (menu !== except) menu.open = false;
+  });
+}
+function positionAccountActionMenu(menu) {
+  const trigger = menu.querySelector('summary');
+  const panel = menu.querySelector('.acc-v2-action-menu-panel');
+  if (!trigger || !panel) return;
+  const rect = trigger.getBoundingClientRect();
+  const width = Math.min(252, window.innerWidth - 16);
+  const height = Math.min(panel.scrollHeight, window.innerHeight - 16);
+  panel.style.width = `${width}px`;
+  panel.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
+  const top = rect.bottom + height + 6 <= window.innerHeight - 8 ? rect.bottom + 6 : rect.top - height - 6;
+  panel.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+}
+(function bindAccountActionMenus() {
+  document.querySelectorAll('#tab-accounts .acc-v2-action-menu').forEach(menu => {
+    menu.addEventListener('toggle', () => {
+      if (!menu.open) return;
+      closeAccountActionMenus(menu);
+      closeAccountsV2MoreMenus();
+      positionAccountActionMenu(menu);
+    });
+    menu.addEventListener('focusout', e => {
+      if (!menu.contains(e.relatedTarget)) menu.open = false;
+    });
+  });
+  document.addEventListener('click', e => {
+    const menu = e.target.closest('#tab-accounts .acc-v2-action-menu');
+    if (!menu) { closeAccountActionMenus(); return; }
+    if (e.target.closest('.acc-v2-action-menu-panel button')) {
+      menu.open = false;
+      if (menu.contains(document.activeElement)) menu.querySelector('summary').focus();
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const menu = document.querySelector('#tab-accounts .acc-v2-action-menu[open]');
+    if (!menu) return;
+    e.preventDefault();
+    menu.open = false;
+    menu.querySelector('summary').focus();
+  });
+  window.addEventListener('resize', () => closeAccountActionMenus());
+  window.addEventListener('scroll', e => {
+    if (e.target instanceof Element && e.target.closest('.acc-v2-action-menu-panel')) return;
+    closeAccountActionMenus();
+  }, true);
+})();
 (function bindAccountsToolbarV2() {
   const bind = (id, fn) => {
     const el = document.getElementById(id);
     if (el) el.addEventListener('click', fn);
   };
+  bind('btnClearAccountSelectionV2', clearAccountSelection);
   bind('btnCheckSelectedPlansV2', checkSelectedPlans);
+  bind('btnActivateSelectedPlusV2', () => {
+    const ids = Array.from(ACCOUNT_SELECTED).map(Number);
+    if (!ids.length) return;
+    if (!window.ExtractLinks?.activatePlus) { showToast('Plus 开通模块尚未加载，请刷新页面'); return; }
+    window.ExtractLinks.activatePlus(ids);
+  });
   bind('btnExtractSelectedLinksV2', extractSelectedLinks);
+  bind('btnSubmitSelectedPaymentsV2', submitSelectedPayments);
+  bind('btnQuerySelectedPaymentsV2', querySelectedPayments);
   bind('btnRetrySelectedCodexV2', retrySelectedCodex);
   bind('btnDownloadSelectedCpaV2', downloadSelectedCpa);
   bind('btnStopSelectedCodexV2', stopSelectedCodex);
@@ -3545,13 +3882,13 @@ function closeAccountImportModal() {
   modal.classList.add('hidden');
   updateModalScrollLock();
 }
-function renderAccountImportDetails(details) {
+function renderAccountImportDetails(details, moreHint = '条请修正后重新导入。') {
   const rows = (details || []).slice(0, 20).map(item => {
     const line = item.line ? `第 ${item.line} 行` : (item.email || '账号');
     return `${esc(line)}：${esc(item.reason || '跳过')}`;
   });
   if (!rows.length) return '';
-  const more = details.length > rows.length ? `<div class="outlook-import-hint">其余 ${details.length - rows.length} 条请修正后重新导入。</div>` : '';
+  const more = details.length > rows.length ? `<div class="outlook-import-hint">其余 ${details.length - rows.length} ${esc(moreHint)}</div>` : '';
   return `<div class="banner warn"><div>${rows.join('<br>')}</div>${more}</div>`;
 }
 async function doImportExistingAccounts() {
@@ -3561,6 +3898,7 @@ async function doImportExistingAccounts() {
   const text = textEl ? textEl.value : '';
   if (!text.trim()) { showToast('请粘贴已有账号内容'); return; }
   if (submitBtn) submitBtn.disabled = true;
+  if (resultEl) resultEl.innerHTML = '<div class="banner info">正在导入并通过 AT 获取用户名，请稍候…</div>';
   try {
     const r = await api('/api/accounts/import', {
       method: 'POST',
@@ -3568,16 +3906,17 @@ async function doImportExistingAccounts() {
       body: JSON.stringify({text}),
     });
     const details = r.details || [];
-    const msg = `导入完成：解析 ${r.parsed || 0} 行，新增 ${r.inserted || 0} 个，跳过 ${r.skipped || 0} 个`;
-    if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>${renderAccountImportDetails(details)}`;
+    const nameWarnings = r.user_name_warnings || [];
+    const msg = `导入完成：解析 ${r.parsed || 0} 行，新增 ${r.inserted || 0} 个，跳过 ${r.skipped || 0} 个；已获取用户名 ${r.user_names_fetched || 0} 个${nameWarnings.length ? `，用户名获取失败 ${nameWarnings.length} 个` : ''}`;
+    if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>${renderAccountImportDetails(details)}${renderAccountImportDetails(nameWarnings, '条用户名获取失败信息未展开。')}`;
     if (textEl) textEl.value = '';
-    ACCOUNT_SELECTED.clear();
+    clearAccountSelection();
     PAGERS.accounts.page = 1;
     planStatusRevision = '';
     await loadAccounts();
     loadSummary();
     showToast(msg);
-    if (!details.length) setTimeout(closeAccountImportModal, 700);
+    if (!details.length && !nameWarnings.length) setTimeout(closeAccountImportModal, 700);
   } catch (e) {
     const details = e.payload?.errors || e.payload?.details || [];
     if (resultEl) resultEl.innerHTML = `<div class="banner warn">${esc(e.message)}</div>${renderAccountImportDetails(details)}`;
@@ -5025,10 +5364,12 @@ activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false)
 jobsTimer = setInterval(() => {
   if (isTabVisible('register')) refreshJobs();
   if (isTabVisible('task-center')) refreshTaskCenter();
+  else refreshTaskCenterBadge();
 }, 3000);
 setInterval(() => { if (isTabVisible('accounts')) pollAccountPlanStatuses(); }, 10000);
 document.addEventListener('visibilitychange', () => {
   if (isTabVisible('register')) refreshJobs();
   if (isTabVisible('task-center')) refreshTaskCenter();
+  else refreshTaskCenterBadge();
   if (isTabVisible('accounts')) pollAccountPlanStatuses();
 });

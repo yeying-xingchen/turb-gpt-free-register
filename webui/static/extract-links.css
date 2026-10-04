@@ -1,6 +1,446 @@
-/* Supporting styles for the extract-link controls used by the modern console. */
-.extract-link-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; }
-.extract-link-cell .el-row-detail { flex-basis: 100%; color: #667085; font-size: 12px; white-space: normal; }
-.extract-link-error { flex-basis: 100%; color: #c2413a; font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
-.extract-link-btn { display: inline-flex; align-items: center; min-height: 26px; padding: 0 10px; border: 1px solid #b9dfc9; border-radius: 999px; background: #f0fbf5; color: #166534; font-size: 12px; font-weight: 700; cursor: pointer; }
-.extract-link-btn:hover { background: #e3f5ea; }
+/* Modern checkout and provider management dialog.  Keep this scoped so it follows console.css without changing legacy UI. */
+.el-dialog {
+  width: min(860px, calc(100vw - 32px));
+  max-width: 860px;
+  max-height: min(900px, calc(100vh - 32px));
+  margin: auto;
+  padding: 0;
+  border: 1px solid #ebeef5;
+  border-radius: 12px;
+  color: #303133;
+  background: #fff;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, .22), 0 0 0 1px rgba(15, 23, 42, .03);
+  overflow: hidden;
+  font-size: 14px;
+}
+.el-dialog::backdrop { background: rgba(15, 23, 42, .46); backdrop-filter: blur(2px); }
+.el-dialog[open] { animation: el-dialog-in .18s ease-out both; }
+@keyframes el-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.el-dialog[aria-busy="true"] { cursor: progress; }
+.el-dialog:focus { outline: none; }
+.el-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 68px;
+  padding: 16px 22px;
+  border-bottom: 1px solid #ebeef5;
+  background: linear-gradient(180deg, #fff, #fbfcfe);
+}
+.el-header h2 {
+  min-width: 0;
+  margin: 0;
+  color: #303133;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -.01em;
+}
+.el-dialog .el-close {
+  flex: 0 0 auto;
+  width: 32px;
+  min-height: 32px;
+  height: 32px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #909399;
+  background: transparent;
+  font: inherit;
+  font-size: 0;
+  cursor: pointer;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
+}
+.el-close::before,
+.el-close::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 1.5px;
+  margin: 7px 0 0 -7px;
+  border-radius: 2px;
+  background: currentColor;
+}
+.el-close { position: relative; }
+.el-close::before { transform: rotate(45deg); }
+.el-close::after { transform: rotate(-45deg); }
+.el-close:hover:not(:disabled) { color: #409eff; border-color: #c6e2ff; background: #ecf5ff; }
+.el-close:disabled { opacity: .45; cursor: not-allowed; }
+.el-body {
+  max-height: calc(min(900px, 100vh - 32px) - 68px);
+  padding: 20px 22px 22px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: #fff;
+}
+.el-body > .el-hint:first-child,
+.el-body > p.el-hint:first-child {
+  margin: -2px 0 16px;
+}
+.el-hint {
+  margin: 0;
+  color: #909399;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.el-body > .el-hint { color: #606266; }
+.el-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #ebeef5;
+}
+.el-dialog button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  color: #606266;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease;
+}
+.el-dialog button:hover:not(:disabled) { color: #409eff; border-color: #c6e2ff; background: #ecf5ff; }
+.el-dialog button:focus-visible,
+.el-dialog input:focus-visible,
+.el-dialog select:focus-visible,
+.el-dialog textarea:focus-visible {
+  outline: 2px solid rgba(64, 158, 255, .3);
+  outline-offset: 1px;
+}
+.el-dialog button:disabled { color: #c0c4cc; border-color: #e4e7ed; background: #f5f7fa; cursor: not-allowed; }
+.el-dialog button.el-primary,
+.el-dialog button.el-primary:hover:not(:disabled) {
+  color: #fff;
+  border-color: #377dff;
+  background: #377dff;
+}
+.el-dialog button.el-primary:hover:not(:disabled) { background: #5a94ff; border-color: #5a94ff; box-shadow: 0 4px 10px rgba(55, 125, 255, .18); }
+.el-dialog button.el-danger,
+.el-dialog button.el-danger:hover:not(:disabled) {
+  color: #e64545;
+  border-color: #fbc4c4;
+  background: #fff;
+}
+.el-dialog button.el-danger:hover:not(:disabled) { color: #fff; border-color: #f56c6c; background: #f56c6c; }
+.el-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.el-field { min-width: 0; }
+.el-field > label:not(.el-check) {
+  display: block;
+  color: #606266;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.el-dialog input[type="text"],
+.el-dialog input[type="password"],
+.el-dialog input[type="url"],
+.el-dialog input[type="number"],
+.el-dialog select,
+.el-dialog textarea {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  margin: 7px 0 0;
+  padding: 8px 11px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  color: #606266;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  box-sizing: border-box;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.el-dialog textarea { min-height: 76px; resize: vertical; }
+.el-dialog input:hover,
+.el-dialog select:hover,
+.el-dialog textarea:hover { border-color: #c0c4cc; }
+.el-dialog input:focus,
+.el-dialog select:focus,
+.el-dialog textarea:focus { border-color: #409eff; box-shadow: 0 0 0 2px rgba(64, 158, 255, .08); outline: none; }
+.el-dialog input:disabled,
+.el-dialog select:disabled,
+.el-dialog textarea:disabled { color: #c0c4cc; background: #f5f7fa; cursor: not-allowed; }
+.el-dialog input[type="checkbox"] {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: #377dff;
+  cursor: pointer;
+}
+.el-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  color: #606266;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.el-check input:disabled + span { color: #c0c4cc; }
+.el-fields > .el-hint,
+.el-fields > .el-notice,
+.el-fields > .el-validation,
+.el-fields > p,
+.el-fields > .el-actions { grid-column: 1 / -1; }
+.el-fields > p.el-hint { margin: -6px 0 0; }
+.el-fields > div:not(.el-field):not(.el-validation):not([hidden]) {
+  grid-column: 1 / -1;
+}
+.el-fields > div[hidden] { display: none; }
+.el-fields > div:not(.el-field):not(.el-validation) {
+  padding: 13px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.el-fields > div:not(.el-field):not(.el-validation) .el-field { margin-bottom: 12px; }
+.el-fields > div:not(.el-field):not(.el-validation) .el-field:last-of-type { margin-bottom: 0; }
+.el-notice {
+  margin: 14px 0 0;
+  padding: 11px 13px;
+  border: 1px solid #c6e2ff;
+  border-radius: 6px;
+  color: #606266;
+  background: #ecf5ff;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.el-dialog form > .el-notice { margin: 14px 0; }
+.el-dialog form > .el-primary { margin-top: 16px; }
+.el-provider-list,
+.el-cdk-list { display: grid; gap: 12px; }
+.el-provider {
+  position: relative;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, .03);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.el-provider:hover { border-color: #c6e2ff; box-shadow: 0 5px 16px rgba(15, 23, 42, .06); }
+.el-provider h3,
+.el-editor h3,
+.el-cdk-add h3 {
+  margin: 0 0 7px;
+  color: #303133;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.el-provider > p { margin: 4px 0; color: #606266; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.el-provider > p.el-hint { color: #909399; }
+.el-provider > button { margin: 12px 6px 0 0; }
+.el-provider > button:last-child { margin-right: 0; }
+.el-editor {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid #dcdfe6;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.el-editor > h3 { margin-bottom: 14px; }
+.el-editor > form { padding: 0 0 16px; border-bottom: 1px solid #ebeef5; }
+.el-editor > form .el-fields { background: transparent; }
+.el-editor > form + h3 { margin-top: 18px; }
+.el-cdk {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fff;
+}
+.el-cdk form { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.el-cdk form strong {
+  align-self: center;
+  min-width: 92px;
+  color: #303133;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13px;
+  letter-spacing: .04em;
+}
+.el-cdk form .el-field { flex: 1 1 210px; }
+.el-cdk form .el-check { flex: 0 0 auto; }
+.el-cdk form button { flex: 0 0 auto; }
+.el-cdk > button { margin: 12px 6px 0 0; }
+.el-cdk-add {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px dashed #c6e2ff;
+  border-radius: 8px;
+  background: #ecf5ff;
+}
+.el-cdk-add h3 { color: #303133; }
+.el-cdk-add .el-field { margin-top: 12px; }
+.el-cdk-add .el-check { margin-top: 10px; }
+.el-cdk-add button { margin-top: 14px; }
+.el-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #fbc4c4;
+  border-radius: 6px;
+  color: #b42318;
+  background: #fef0f0;
+  font-size: 13px;
+}
+.el-confirm span { flex: 1 1 220px; }
+.el-confirm button { margin: 0; }
+.el-validation,
+.el-task-result {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.el-validation p { margin: 0 0 8px; color: #606266; font-size: 13px; line-height: 1.5; }
+.el-json {
+  max-height: 260px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 6px;
+  color: #dbeafe;
+  background: #0f172a;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.el-error {
+  margin: 14px 22px 0;
+  padding: 10px 12px;
+  border: 1px solid #fbc4c4;
+  border-radius: 6px;
+  color: #b42318;
+  background: #fef0f0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.el-feedback {
+  margin: 14px 22px 0;
+  padding: 10px 12px;
+  border: 1px solid #b9dfc9;
+  border-radius: 6px;
+  color: #166534;
+  background: #f0fbf5;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.el-details {
+  display: grid;
+  grid-template-columns: minmax(90px, 140px) minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.el-details dt { color: #909399; }
+.el-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.el-task-result > a {
+  display: inline-flex;
+  margin-top: 14px;
+  color: #377dff;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.el-task-result .el-field { margin-top: 14px; }
+.el-task-result textarea { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.el-qr {
+  display: block;
+  max-width: min(280px, 100%);
+  max-height: 280px;
+  margin: 16px auto 0;
+  padding: 8px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  background: #fff;
+}
+.el-copy-buffer { position: fixed !important; left: -9999px !important; opacity: 0 !important; }
+.el-activation-count {
+  margin: 0 0 18px;
+  padding: 13px 16px;
+  border: 1px solid #c6e2ff;
+  border-radius: 8px;
+  color: #2563eb;
+  background: #ecf5ff;
+  font-size: 16px;
+  font-weight: 600;
+}
+.el-activation-config { margin: 18px 0; min-width: 0; }
+.el-activation-config > h3 { margin: 0 0 12px; color: #303133; font-size: 15px; font-weight: 600; }
+.el-activation-candidates { display: grid; gap: 14px; }
+.el-activation-candidate { min-width: 0; margin: 0; padding: 12px 14px 14px; border: 1px solid #dcdfe6; border-radius: 8px; }
+.el-activation-candidate > legend { padding: 0 6px; color: #303133; font-size: 14px; font-weight: 600; }
+.el-candidate-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.el-candidate-add { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.el-activation-fallback { margin-top: 0; }
+.el-activation-payment > a { grid-column: 1 / -1; color: #377dff; font-size: 13px; overflow-wrap: anywhere; }
+.el-activation-payment > a[hidden] { display: none; }
+.el-activation-candidate .el-fields > .el-field[hidden] { display: none; }
+.el-activation-dialog form > .el-field,
+.el-activation-dialog form > .el-notice { margin-bottom: 14px; }
+.el-activation-dialog .el-body > .el-feedback { margin: 16px 0; overflow-wrap: anywhere; }
+.el-activation-dialog .el-body > .el-hint { margin: 12px 0; }
+.el-activation-dialog .el-provider-list { max-height: 260px; overflow-y: auto; }
+.el-activation-dialog .el-body > button { margin-top: 14px; }
+.el-activation-cell { margin: 6px 0; }
+.el-activation-cell .el-row-detail { white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .el-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    border-radius: 10px;
+  }
+  .el-header { min-height: 60px; padding: 14px 16px; }
+  .el-body { max-height: calc(100vh - 76px); padding: 16px; }
+  .el-error, .el-feedback { margin-left: 16px; margin-right: 16px; }
+  .el-fields { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .el-fields > .el-hint,
+  .el-fields > .el-notice,
+  .el-fields > .el-validation,
+  .el-fields > p,
+  .el-fields > .el-actions { grid-column: auto; }
+  .el-cdk form { align-items: stretch; flex-direction: column; gap: 8px; }
+  .el-cdk form strong { align-self: flex-start; }
+  .el-cdk form .el-field { flex-basis: auto; }
+  .el-cdk form button { width: 100%; }
+  .el-details { grid-template-columns: 1fr; gap: 2px; }
+  .el-details dd { margin-bottom: 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .el-dialog[open] { animation: none; }
+}

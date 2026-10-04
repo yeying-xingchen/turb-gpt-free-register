@@ -107,7 +107,10 @@ def wait_for_manual_otp(email: str, *, timeout: int = 180, job_id: int | None = 
         timeout,
         job_id or "-",
     )
-    logger.info("[ManualOTP] 请打开邮箱 %s，在 WebUI 任务旁提交 6 位验证码", email)
+    logger.info(
+        "[ManualOTP] 请打开邮箱 %s，在 WebUI「任务中心」该任务旁的验证码输入框提交 6 位验证码",
+        email,
+    )
 
     # CLI 交互兜底：如果有 TTY，也允许终端输入
     try:

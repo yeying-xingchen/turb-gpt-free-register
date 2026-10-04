@@ -2,7 +2,7 @@
 import hashlib
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 from urllib.parse import urlparse
 
 import pyotp
@@ -32,10 +32,12 @@ class HttpFailure(RuntimeError):
 
 
 class Response:
-    def __init__(self, payload=EMPTY, status=200, text=None):
+    def __init__(self, payload=EMPTY, status=200, text=None, *, headers=None, url=""):
         self.payload = payload
         self.status_code = status
         self.text = text if text is not None else ("" if payload is EMPTY else json.dumps(payload))
+        self.headers = headers or {}
+        self.url = url
 
     def json(self):
         if self.payload is EMPTY:
@@ -83,8 +85,6 @@ def offline(monkeypatch, tmp_path):
         "send_email_otp": None,
         "follow_oauth_callback": "https://chatgpt.com/",
         "fetch_session": {"accessToken": "fixture-new-token"},
-        "get_providers": {},
-        "probe_auth_session": {},
         "get_csrf_token": "fixture-csrf",
         "signin_openai": "https://auth.openai.com/authorize?state=fixture",
     }
@@ -116,6 +116,7 @@ def session():
         get_auth_navigate_headers=Mock(return_value={}),
         get_chatgpt_navigate_headers=Mock(return_value={}),
         observe_chatgpt_document=Mock(),
+        prime_identity_cookies=Mock(),
         reset_circuit_breaker=Mock(),
         fingerprint_summary=Mock(return_value={"user_agent": "fixture"}),
         fingerprint_summary_text=Mock(return_value="fixture"),
@@ -341,12 +342,12 @@ def test_explicit_account_deactivation_is_not_retried(code):
     assert not liveness._is_retryable_network_error(error.value)
 
 
-def test_optional_providers_403_does_not_block_csrf_or_replace_session(monkeypatch, offline, session):
+def test_preflight_uses_home_before_identity_and_minimal_login_chain(monkeypatch, offline, session):
     factory = Mock(return_value=session)
     monkeypatch.setattr(liveness, "_new_fingerprint_pinned_session", factory)
-    offline.get_providers.side_effect = HttpFailure(Response(status=403, text="Cloudflare challenge"))
     events = Mock()
-    events.attach_mock(offline.get_providers, "providers")
+    events.attach_mock(session.get, "navigate")
+    events.attach_mock(session.prime_identity_cookies, "prime")
     events.attach_mock(offline.get_csrf_token, "csrf")
     events.attach_mock(offline.signin_openai, "signin")
 
@@ -354,9 +355,12 @@ def test_optional_providers_403_does_not_block_csrf_or_replace_session(monkeypat
 
     assert result_session is session
     assert url == offline.signin_openai.return_value
-    assert events.mock_calls == [call.providers(session), call.csrf(session), call.signin(session, "fixture-csrf", EMAIL)]
-    factory.assert_called_once()
-    assert session.reset_circuit_breaker.called
+    assert [event[0] for event in events.mock_calls] == ["navigate", "prime", "navigate", "csrf", "signin"]
+    assert [entry.args[0] for entry in session.get.call_args_list] == [
+        "https://chatgpt.com/", "https://chatgpt.com/auth/login",
+    ]
+    offline.signin_openai.assert_called_once_with(session, "fixture-csrf", EMAIL, login_only=True)
+    factory.assert_called_once_with(EMAIL, "", {}, defer_identity_cookies=True)
     session.session.close.assert_not_called()
 
 
@@ -427,3 +431,180 @@ def test_missing_password_explicitly_sends_otp_before_waiting(offline, session, 
     assert result["accessToken"] == "fixture-new-token"
     assert post_paths(session) == ["/api/accounts/passwordless/send-otp"]
     assert [event[0] for event in events.mock_calls] == ["send", "wait"]
+
+
+@pytest.mark.parametrize("page_type", [
+    "totp_verification", "mfa_totp", "two_factor", "two_factor_totp", "otp_totp",
+])
+def test_totp_aliases_complete_challenge_before_callback(page_type, offline, session, clock):
+    initial = {"page": {"type": page_type, "payload": MFA["page"]["payload"]}}
+    session.post.side_effect = [Response(status=204), Response(CALLBACK)]
+    result = liveness._complete_login_steps(session, EMAIL, initial, 1.0)
+    assert result["accessToken"] == "fixture-new-token"
+    assert post_paths(session) == ["/api/accounts/mfa/issue_challenge", "/api/accounts/mfa/verify"]
+    offline.follow_oauth_callback.assert_called_once()
+
+
+@pytest.mark.parametrize("relative,expected", [
+    ("/api/auth/callback/openai?code=fixture&state=s", "https://chatgpt.com/api/auth/callback/openai?code=fixture&state=s"),
+    ("api/auth/callback/openai?code=fixture", CALLBACK_URL),
+    ("/auth/callback?code=fixture", "https://chatgpt.com/auth/callback?code=fixture"),
+    ("/mfa-challenge/factor?code=fixture", "https://auth.openai.com/mfa-challenge/factor?code=fixture"),
+    ("/authorize/continue?code=fixture", "https://auth.openai.com/authorize/continue?code=fixture"),
+    (CALLBACK_URL, CALLBACK_URL),
+])
+def test_relative_continue_targets_resolve_to_correct_origin(relative, expected):
+    assert liveness._extract_continue_url({"page": {"external_url": relative}}) == expected
+
+
+def test_password_and_mfa_location_redirects_complete_login(offline, session, clock):
+    session.post.side_effect = [
+        Response(status=302, headers={"location": "/mfa-challenge/totp-fixture"}),
+        Response(status=204),
+        Response(status=303, headers={"location": "/api/auth/callback/openai?code=fixture"}),
+    ]
+    result = liveness._complete_login_steps(session, EMAIL, PASSWORD, 1.0)
+    assert result["accessToken"] == "fixture-new-token"
+    assert post_paths(session) == [
+        "/api/accounts/password/verify", "/api/accounts/mfa/issue_challenge", "/api/accounts/mfa/verify",
+    ]
+    assert offline.follow_oauth_callback.call_args.args == (session, CALLBACK_URL)
+
+
+def test_success_json_keeps_factors_when_location_supplies_next_step():
+    response = Response(MFA, status=302, headers={"location": "/mfa-challenge/totp-fixture"})
+    result = liveness._auth_response_json(response, "fixture")
+    assert result["page"] == MFA["page"]
+    assert result["continue_url"] == "https://auth.openai.com/mfa-challenge/totp-fixture"
+
+
+def test_empty_session_is_polled_without_replaying_callback(monkeypatch, offline, session, clock):
+    from core.account_export import fetch_session
+    monkeypatch.setattr(liveness, "fetch_session", fetch_session)
+    session.get_nextauth_headers = Mock(return_value={})
+    session.get.side_effect = [Response({}), Response({"accessToken": "  "}), Response({"accessToken": "ready"})]
+    result = liveness._follow_continue_and_fetch(session, CALLBACK_URL, referer="https://auth.openai.com/")
+    assert result["accessToken"] == "ready"
+    assert session.get.call_count == 3
+    assert clock.sleeps == [0.35, 0.35]
+    offline.follow_oauth_callback.assert_called_once()
+
+
+def test_empty_session_polling_is_bounded(monkeypatch, offline, session, clock):
+    from core.account_export import fetch_session
+    monkeypatch.setattr(liveness, "fetch_session", fetch_session)
+    session.get_nextauth_headers = Mock(return_value={})
+    session.get.return_value = Response({})
+    with pytest.raises(liveness.SessionNotReadyError):
+        liveness._follow_continue_and_fetch(session, CALLBACK_URL, referer="https://auth.openai.com/")
+    assert session.get.call_count == 8
+    assert clock.sleeps == [0.35] * 7
+    offline.follow_oauth_callback.assert_called_once()
+
+
+@pytest.mark.parametrize("response,expected", [
+    (Response({"error": {"code": "account_deactivated"}}), liveness.AccountUnusableError),
+    (Response({"error": {"code": "invalid_session"}}), RuntimeError),
+    (Response([], status=200), RuntimeError),
+    (Response({"accessToken": 123}), RuntimeError),
+    (Response(status=401), HttpFailure),
+])
+def test_session_business_and_format_errors_are_not_polled(response, expected, monkeypatch, offline, session, clock):
+    from core.account_export import fetch_session
+    monkeypatch.setattr(liveness, "fetch_session", fetch_session)
+    session.get_nextauth_headers = Mock(return_value={})
+    session.get.return_value = response
+    with pytest.raises(expected) as error:
+        liveness._follow_continue_and_fetch(session, CALLBACK_URL, referer="https://auth.openai.com/")
+    assert not isinstance(error.value, liveness.SessionNotReadyError)
+    session.get.assert_called_once()
+    assert not clock.sleeps
+    offline.follow_oauth_callback.assert_called_once()
+
+
+def test_session_network_retry_does_not_repeat_callback(offline, session, clock):
+    offline.fetch_session.side_effect = [HttpFailure(Response(status=503)), {"accessToken": "ready"}]
+    result = liveness._follow_continue_and_fetch(session, CALLBACK_URL, referer="https://auth.openai.com/")
+    assert result["accessToken"] == "ready"
+    assert clock.sleeps == [1.0]
+    session.reset_circuit_breaker.assert_called_once()
+    offline.follow_oauth_callback.assert_called_once()
+
+
+@pytest.mark.parametrize("failure_at", ["before", "after"])
+def test_error_callback_never_fetches_session(failure_at, offline, session, clock):
+    error_url = "https://chatgpt.com/auth/error?error=OAuthCallback"
+    offline.follow_oauth_callback.return_value = error_url
+    with pytest.raises(RuntimeError, match="认证错误"):
+        liveness._follow_continue_and_fetch(
+            session, error_url if failure_at == "before" else CALLBACK_URL, referer="https://auth.openai.com/",
+        )
+    assert offline.follow_oauth_callback.call_count == (0 if failure_at == "before" else 1)
+    offline.fetch_session.assert_not_called()
+    assert not clock.sleeps
+
+
+def test_preflight_retry_does_not_repeat_home_or_seed_identity(monkeypatch, offline, session, clock):
+    monkeypatch.setattr(liveness, "_new_fingerprint_pinned_session", Mock(return_value=session))
+    offline.get_csrf_token.side_effect = [HttpFailure(Response(status=403)), "fixture-csrf"]
+    liveness._network_preflight_with_retry(EMAIL, "", max_attempts=2)
+    assert [entry.args[0] for entry in session.get.call_args_list] == [
+        "https://chatgpt.com/", "https://chatgpt.com/auth/login", "https://chatgpt.com/auth/login",
+    ]
+    session.prime_identity_cookies.assert_called_once()
+    session.reset_circuit_breaker.assert_called_once()
+
+
+def test_failed_home_is_retried_before_setting_identity(monkeypatch, offline, session, clock):
+    monkeypatch.setattr(liveness, "_new_fingerprint_pinned_session", Mock(return_value=session))
+    session.get.side_effect = [Response(status=403), Response({}), Response({})]
+    events = Mock()
+    events.attach_mock(session.get, "navigate")
+    events.attach_mock(session.prime_identity_cookies, "prime")
+    liveness._network_preflight_with_retry(EMAIL, "", max_attempts=2)
+    assert [event[0] for event in events.mock_calls] == ["navigate", "navigate", "prime", "navigate"]
+    assert [entry.args[0] for entry in session.get.call_args_list[:2]] == ["https://chatgpt.com/"] * 2
+
+
+def test_generic_login_page_opens_password_document_before_verification(offline, session, clock):
+    session.get.return_value = Response({}, url="https://auth.openai.com/log-in/password")
+    session.post.side_effect = [Response(CALLBACK)]
+    events = Mock()
+    events.attach_mock(session.get, "navigate")
+    events.attach_mock(session.post, "verify")
+    result = liveness._login_via_password_or_otp(session, EMAIL, 1.0, initial_url="https://auth.openai.com/log-in")
+    assert result["accessToken"] == "fixture-new-token"
+    assert [event[0] for event in events.mock_calls] == ["navigate", "verify"]
+    assert session.get.call_args.args[0] == "https://auth.openai.com/log-in/password"
+    assert post_paths(session) == ["/api/accounts/password/verify"]
+
+
+def test_password_document_redirect_to_email_otp_does_not_submit_password(offline, session, clock):
+    session.get.return_value = Response({}, url="https://auth.openai.com/email-verification")
+    result = liveness._login_via_password_or_otp(session, EMAIL, 1.0, initial_url="https://auth.openai.com/log-in")
+    assert result["accessToken"] == "fixture-new-token"
+    offline.wait_for_otp.assert_called_once()
+    session.post.assert_not_called()
+
+
+def test_generic_login_without_password_sends_otp_first(offline, session, clock):
+    offline.account["registration_password"] = ""
+    session.post.side_effect = [Response(status=204)]
+    result = liveness._login_via_password_or_otp(session, EMAIL, 1.0, initial_url="https://auth.openai.com/log-in")
+    assert result["accessToken"] == "fixture-new-token"
+    assert post_paths(session) == ["/api/accounts/passwordless/send-otp"]
+    offline.wait_for_otp.assert_called_once()
+
+
+@pytest.mark.parametrize("reauth", [False, True])
+def test_authorize_already_completed_callback_reads_session_without_otp(reauth, monkeypatch, offline, session):
+    if reauth:
+        monkeypatch.setattr(liveness, "_trigger_reauth_with_retry", Mock(return_value="fixture-authorize"))
+        monkeypatch.setattr(liveness, "_follow_reauth_with_retry", Mock(return_value="https://chatgpt.com/"))
+        result = liveness._login_via_reauth(session, EMAIL, 1.0)
+    else:
+        result = liveness._login_via_password_or_otp(session, EMAIL, 1.0, initial_url=CALLBACK_URL)
+    assert result["accessToken"] == "fixture-new-token"
+    offline.fetch_session.assert_called_once()
+    offline.follow_oauth_callback.assert_not_called()
+    offline.wait_for_otp.assert_not_called()

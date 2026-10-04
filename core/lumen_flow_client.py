@@ -6,10 +6,13 @@ mean that the upstream accepted the task already.
 from __future__ import annotations
 
 import re
+import time
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import requests
+
+from core import operation_log
 
 PAYMENT_METHODS = ("IDEAL", "UPI", "PIX", "PAYPAL", "KAKAO_PAY", "MOMO", "BLIK", "TWINT", "GCASH", "GOPAY")
 TASK_STATES = {"QUEUED", "RUNNING", "AWAITING_BLIK_CODE", "SUCCEEDED", "FAILED", "CANCELED"}
@@ -67,34 +70,49 @@ class LumenClient:
                     collect(item)
         collect(body)
         collect(params)
+        known = tuple(item for item in secrets if isinstance(item, str) and item)
+        url = self.api_base + path
+        started = time.monotonic()
+        operation_log.request(method=method, url=url, headers={"Accept": "application/json"}, params=params,
+                              body=body, timeout=self.timeout,
+                              note="Lumen Flow 提交提链" if submitting else "Lumen Flow 请求",
+                              secrets=known)
         try:
             with requests.Session() as session:
                 response = session.request(
-                    method, self.api_base + path, json=body, params=params,
+                    method, url, json=body, params=params,
                     timeout=self.timeout, allow_redirects=False,
                     headers={"Accept": "application/json"},
                 )
                 try:
                     payload = response.json()
                 except ValueError:
+                    operation_log.response(status=response.status_code, headers=dict(response.headers),
+                                           elapsed=time.monotonic() - started, body=getattr(response, "text", ""),
+                                           note="Lumen 未返回有效 JSON", secrets=known)
                     raise LumenError(
                         "提供方未返回有效 JSON；请核对任务受理情况" if submitting else "提供方未返回有效 JSON",
                         uncertain=submitting,
                     ) from None
+                operation_log.response(status=response.status_code, headers=dict(response.headers),
+                                       elapsed=time.monotonic() - started, body=payload, secrets=known)
                 if not 200 <= response.status_code < 300:
                     detail = None
                     if isinstance(payload, dict):
                         detail = payload.get("detail") or payload.get("title") or payload.get("error")
                     uncertain = submitting and response.status_code >= 500
-                    raise LumenError(
-                        _safe_message(detail or f"提供方 HTTP {response.status_code}", secrets),
+                    error = LumenError(
+                        _safe_message(detail or f"提供方 HTTP {response.status_code}", known),
                         status=response.status_code,
                         uncertain=uncertain,
                     )
+                    operation_log.failure(error, note="Lumen 拒绝该请求", secrets=known)
+                    raise error
                 return payload
         except LumenError:
             raise
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            operation_log.failure(exc, note="Lumen 网络异常，未取得响应", secrets=known)
             raise LumenError(
                 "网络异常，受理情况未确认，请先核对，勿直接重提" if submitting else "查询提供方失败，请稍后刷新原任务",
                 uncertain=submitting,

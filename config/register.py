@@ -30,6 +30,9 @@ PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL = False
 # 格式：最小秒,最大秒。设为 "0,0" 表示不额外停留。
 POST_REGISTER_DWELL_SECONDS_RANGE = "5,15"
 
+# 注册任务的后台并发线程数（1–16）；可在任务中心运行中调整。
+REGISTRATION_WORKERS = 4
+
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'REGISTER_EMAIL': 'str',
@@ -37,4 +40,5 @@ apply_env_overrides(globals(), {
     'AUTO_PLAN_CHECK_AFTER_REGISTER': 'bool',
     'PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL': 'bool',
     'POST_REGISTER_DWELL_SECONDS_RANGE': 'str',
+    'REGISTRATION_WORKERS': 'int',
 })

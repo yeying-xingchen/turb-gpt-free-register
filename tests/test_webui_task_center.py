@@ -42,5 +42,51 @@ class TaskCenterWebUiTests(unittest.TestCase):
         cancel.assert_called_once_with(41)
 
 
+    @patch("webui.task_routes.registration_service.get_retry_info", return_value={"display_status": "running"})
+    @patch("webui.task_routes.task_center_store.task_status_counts", return_value={"active": 2, "running": 2})
+    @patch("webui.task_routes.task_center_store.list_active_tasks")
+    def test_registration_tasks_expose_manual_otp_flag_only_in_manual_mode(
+        self, list_active_tasks, _counts, _retry_info
+    ):
+        """任务中心必须能给等待验证码的注册任务提供输入入口。"""
+        list_active_tasks.return_value = [
+            {
+                "id": "registration-9", "job_id": 9, "job_type": "registration", "status": "running",
+                "source_status": "running", "email": "demo@example.com",
+                "capabilities": {"pause": True, "resume": False, "cancel": True},
+            },
+            {
+                "id": "account-3", "job_id": None, "job_type": "live_check", "status": "running",
+                "source_status": "running", "email": "demo@example.com",
+                "capabilities": {"pause": False, "resume": False, "cancel": False},
+            },
+        ]
+
+        with patch("config.email.USE_EMAIL_SERVICE", False):
+            items = self.client.get("/api/tasks/active").get_json()["items"]
+            self.assertTrue(items[0]["manual_otp_required"])
+            # 账号类任务没有注册任务，不能出现验证码输入入口。
+            self.assertNotIn("manual_otp_required", items[1])
+            self.assertEqual(items[0]["display_status"], "running")
+
+        with patch("config.email.USE_EMAIL_SERVICE", True):
+            items = self.client.get("/api/tasks/active").get_json()["items"]
+            self.assertNotIn("manual_otp_required", items[0])
+
+    @patch("webui.task_routes.registration_service.get_retry_info", return_value={"display_status": "success"})
+    @patch("webui.task_routes.task_center_store.list_history_tasks_page")
+    def test_history_snapshot_keeps_manual_otp_flag_for_registration(self, list_history, _retry_info):
+        list_history.return_value = {
+            "items": [{
+                "id": "registration-4", "job_id": 4, "job_type": "registration", "status": "failed",
+                "source_status": "failed", "email": "demo@example.com", "capabilities": {},
+            }],
+            "total": 1,
+        }
+        with patch("config.email.USE_EMAIL_SERVICE", False):
+            items = self.client.get("/api/tasks/history").get_json()["items"]
+        self.assertTrue(items[0]["manual_otp_required"])
+
+
 if __name__ == "__main__":
     unittest.main()
