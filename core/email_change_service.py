@@ -568,9 +568,12 @@ def enqueue(account_id: int, source: str, trigger: str = "manual") -> dict:
     _append_log(account_id, f"换绑任务已入队：source={source} trigger={trigger}", clear=True)
     try:
         future = _EXECUTOR.submit(
-            _run, account_id, source,
-            control=task_control.control(KIND, account_id),
-            on_cancel=lambda: _cancel_pending_email_change(account_id),
+            task_control.gated(
+                _run,
+                task_control.control(KIND, account_id),
+                on_cancel=lambda: _cancel_pending_email_change(account_id),
+            ),
+            account_id, source,
         )
         if future is False:
             raise RuntimeError("邮箱换绑队列已关闭")

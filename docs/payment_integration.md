@@ -25,6 +25,41 @@
 | Astra Scan Workbench（默认） | `https://scan-qr.hixinghai.com/api/v1` | 支付 CDK；发送 UPI 链接和邮箱，**不发送账号 AT** |
 | masi | `https://masi.cc.cd` | 支付 CDK；发送链接、邮箱、**所选账号完整 AT**，使用 `capacity_priority` 派单 |
 | UPI OrderHub | `https://upi.xxsyun.xyz/api/v1` | Bearer API Key 或数字雇主账号登录；发送链接和**所选账号完整 AT**，使用 `auto` 派单 |
+| seashore 发布者 API | `https://seashore.lol/api/publisher` | 支付 CDK 作为 `Authorization: Bearer`；发送邮箱、**所选账号完整 AT** 和 Stripe 支付链 |
+
+## seashore 发布者 API
+
+发布者平台的 CDK（`PBK-` 开头）本身就是账号：程序化调用与网页登录共用同一个码，因此**CDK 只放在请求头**，绝不拼进 URL（服务端与 CDN 会原样记录访问日志）。
+
+| 用途 | 请求 | 说明 |
+| --- | --- | --- |
+| 提交任务 | `POST /tasks` | 请求体 `{email, access_token, pay_link}`；邮箱必须与 AT 所属账号一致 |
+| 查询单个任务 | `GET /tasks/{public_id}` | 只轮询刚提交的那一条，不必拉取整个列表 |
+| 查询额度与容量 | `GET /me` | `remaining_uses`、`uses_held/consumed`、`pending_orders`、`capacity.recommended` |
+
+平台差异（与其它三个平台不同，代码里必须保留这些语义）：
+
+- **没有幂等键**。重复 POST 会重复建单并重复暂扣次数，因此本地提交前快照是唯一的防重放手段；结果待核实（网络异常、5xx、无任务 ID）时只查询、不重提，也不提供「使用原请求安全重试」。
+- **状态归一**。上游 `pending/processing/submitted/completed/timeout/failed/not_activated/cancelled` 分别归一为本站的 `queued/processing/verifying/completed/expired/failed/not_activated/cancelled`；`task.providerStatus` 保留上游原文，`task.statusText` 保留平台中文文案。`not_activated` 计入终态但不允许自动回退候选（扫码后没激活，换支付平台没有意义）。
+- **两种拒绝会扣次**。`paylink_ttl_untrusted`（链接声明有效期异常）与 `paylink_amount_rejected`（金额达到上限）会扣除 1 次且**不创建任务**，客户端把它们标记为 `charged=true, created=false`：既不当作「结果未知」反复重提，也不允许自动回退到下一个支付候选；同一条链接再次提交会被本地直接拒绝（`该支付链已被发布者平台拒绝并扣次，请重新提链后再提交`）。
+- **邮箱与 CDK 风控**。`email_blocked`（黑名单邮箱）与 `paylink_email_mismatch`（仅 iCloud 邮箱核对支付链绑定邮箱）会**自动停用该 CDK**，错误文案会明确提示；`insufficient_uses`（402）只影响提交，读取接口照常可用，判断额度请改看 `remaining_uses`。
+- **限速只统计失败**：每 IP 每分钟 30 次认证失败返回 `429 rate_limited`；正常轮询（每 5 秒一次）不会触发。
+- **本站不放行跨域**：只在服务端之间调用，浏览器直接 fetch 会被 CORS 拒绝。
+
+一条龙 CDK（`/onestop/*`）与普通 CDK 是两种产品，调用对方接口会返回 `403 cdk_kind_mismatch`；本站目前只接入普通 CDK 的 `/tasks` 流程。
+
+## 已保存的支付 CDK
+
+支付 CDK 现在可以像提链 CDK 一样保存后复用，四个平台共用一套管理界面（「服务与凭据 · 支付平台」，旧版界面在「管理提链服务商 / CDK」里点「管理支付平台 / CDK」）：
+
+- 新增 / 编辑 / 停用 / 删除平台与 CDK，附带备注；列表**只显示掩码**（如 `PBK-…9C31`），明文仅服务端在提交、查询、验证额度时读取。
+- 「查询额度 / 统计」用已保存的凭据调用平台额度接口：Astra、Masi、OrderHub 返回原有字段，seashore 返回剩余次数、暂扣、全站待接单与建议发布量。
+- 提交支付、开通 Plus 时按平台选择「使用已保存的 CDK」或「输入临时凭据」；选择已保存的走 `cdk_id`，服务端解析成明文，浏览器与日志都不出现明文。
+- 保存是**显式选择**：服务端不会在未指定 `cdk_id` 时自动挑一条已保存的 CDK，避免静默用错凭据。
+- 停用或删除的 CDK 不能再提交；已提交但未结算的任务需要用原凭据查询，删除后请重新输入原 CDK 或先在平台核对。
+
+**安全提示**：保存的 CDK 与提链 CDK 一样明文存放在本地 SQLite（`payment_cdks` 表），因此数据库文件等同于凭据。请限制数据目录权限，不要把 `turb.sqlite3` 随工单或仓库外发。
+
 
 ## OrderHub 连接与登录
 
@@ -39,9 +74,11 @@
 
 ## 凭据和恢复
 
-支付 CDK、OrderHub API Key、提链 CDK 和本站账号兑换 CDK 相互独立。支付凭据不写入配置、账号记录或浏览器持久存储；仅在当前支付窗口内存保留，关闭后清除；查询需重新输入原凭据。登录模式使用原雇主账号会话。
+支付 CDK、OrderHub API Key、提链 CDK 和本站账号兑换 CDK 相互独立。临时支付凭据不写入配置、账号记录或浏览器持久存储；仅在当前支付窗口内存保留，关闭后清除；查询需重新输入原凭据。登录模式使用原雇主账号会话。
 
-**例外：本地完整操作日志。** 每次提交/查询都会在 `注册日志/scan-payment-<账号ID>.log` 追加一段完整过程日志，默认**明文**记录支付 CDK、OrderHub API Key 和账号 AT（见下节「完整日志」）。日志是本地调试产物，按需清理；不写入账号记录和浏览器存储。
+**例外一：已保存的支付 CDK。** 在「服务与凭据 · 支付平台」显式保存的 CDK 会写入本地 `payment_cdks` 表（明文，仅服务端可读，界面只显示掩码），提交时用 `cdk_id` 引用。不保存的临时凭据仍只留在当前窗口内存。
+
+**例外二：本地完整操作日志。** 每次提交/查询都会在 `注册日志/scan-payment-<账号ID>.log` 追加一段完整过程日志，默认**明文**记录支付 CDK、OrderHub API Key 和账号 AT（见下节「完整日志」）。日志是本地调试产物，按需清理；不写入账号记录和浏览器存储。
 
 提交或查询后，窗口每 **5 秒**串行查询处理中任务；到达终态、查询失败或本地跟踪超过 10 分钟时停止。可随时重新打开「查询支付」。查询沿用原提交平台和地址，不随当前平台选择或配置改动改变。
 
@@ -49,6 +86,7 @@
 - Astra 超时且没有任务 ID 时，可以显式使用原请求重试。请求发出前已保存原链接、邮箱和幂等键；重开窗口仍复用原请求。
 - OrderHub 同样保留原幂等键；日志只保存 AT 的哈希，重试前检查账号 AT 是否仍相同。AT 已刷新时禁止改变原请求重试，请到原平台核对订单。
 - masi 没有文档承诺的幂等键机制。超时、5xx 或结果未知时不会重提；请先在原平台核对订单与额度。
+- seashore 发布者 API 同样没有幂等键，规则与 masi 一致；此外，被平台拒绝并扣次（`paylink_ttl_untrusted` / `paylink_amount_rejected`）的链接不会再次提交，需重新提链。
 - 已保存任务 ID 的请求不会因再次点击提交而创建新单；活动订单和未知结果不能切换平台、凭据或链接再付。
 - 曾经结果未知的提交，即使后续原请求重试返回认证错误，也保留未知状态，避免误把认证拒绝当作首次未建单的证据。
 - 首次确定拒收、没有任务 ID 的请求可以在解决原因后再次提交；原订单终结后可以提交新提炼链接。
@@ -59,9 +97,9 @@
 
 ## 配置与存储
 
-配置页「支付提交」提供 `SCAN_API_BASE`（Astra）、`MASI_API_BASE`、`ORDERHUB_API_BASE` 和 `SCAN_API_TIMEOUT`。默认地址已设置；连接配置见 [scan_api.py](../config/scan_api.py)，支持现有环境变量加载机制。仅接受 HTTPS API 地址；无支付凭据的全局配置项。
+配置页「支付提交」提供 `SCAN_API_BASE`（Astra）、`MASI_API_BASE`、`ORDERHUB_API_BASE`、`SEASHORE_API_BASE` 和 `SCAN_API_TIMEOUT`。默认地址已设置；连接配置见 [scan_api.py](../config/scan_api.py)，支持现有环境变量加载机制。仅接受 HTTPS API 地址；无支付凭据的全局配置项。
 
-现有 SQLite 数据库增加 `scan_submissions` 表，保存原平台、请求快照、幂等键、任务 ID 与状态，并同步账号列表摘要。数据库记录仍不保存原始 CDK、API Key、AT、密码、上游 Cookie 或订单密钥，只保存匹配原凭据/AT 所需的摘要；完整请求与响应只写在本地日志文件里。保留数据库以便进程重启后恢复原任务。
+现有 SQLite 数据库增加 `scan_submissions` 表，保存原平台、请求快照、幂等键、任务 ID 与状态，并同步账号列表摘要；另增加 `payment_providers` / `payment_cdks` 两张表保存支付平台与已保存的支付 CDK。`scan_submissions` 记录仍不保存原始 CDK、API Key、AT、密码、上游 Cookie 或订单密钥，只保存匹配原凭据/AT 所需的摘要；完整请求与响应只写在本地日志文件里。保留数据库以便进程重启后恢复原任务。
 
 ## 完整日志
 
@@ -89,14 +127,24 @@
 
 接口复用 WebUI 登录鉴权，返回 `Cache-Control: no-store`。以下凭据均放在 JSON 请求体，不能放 URL：
 
-- `POST /api/accounts/activate-plus`：`{account_ids:[7], extraction:{provider_id:1, cdk_id:2}, payment:{provider:"v1", cdk:"完整支付凭据", auth_mode:"key"}, success_group:"Plus 成品"}`。可选 `success_group` 为已有分组名（含默认分组），核验真实 Plus 后自动转入；空字符串明确关闭自动转组，省略或传 `null` 时继续使用该账号上次任务保存的选择（首次默认为不转移）。无效分组返回 HTTP 400，不提交开通任务。提链可用临时 `cdk` 替代 `cdk_id`，Legacy 环境 CDK 使用 `provider_id:0`；Lumen 可传 `proxy_url`，UPI-GIT5 必须传 `entry_proxies:["http://proxy.example:8080"]`。OrderHub 会话在 `payment` 中传 `provider:"orderhub", auth_mode:"session"`。返回 HTTP 202 与 `started/busy/skipped/failed` 数组及对应数量，仅表示排队受理。最终状态通过原账号列表和 `/api/accounts/plan-check-status` 的 `plus_activation_status/message/updated_at` 字段读取。
-- `POST /api/accounts/scan-requests`：`{account_ids:[7], provider:"v1"|"masi"|"orderhub", cdk:"完整凭据", idempotency_key:"本次操作的稳定键"}`。默认 provider 为 v1。结果分别位于 `created`、`duplicated`、`pending`、`failed`、`unknown` 数组；`ok:true` 仅表示本批条目已处理。
-- `POST /api/accounts/scan-requests/query`：`{account_ids:[7], cdk:"原凭据"}`；读取原平台任务，返回 `items`、`failed`、`unknown`。
+- `POST /api/accounts/activate-plus`：`{account_ids:[7], extraction:{provider_id:1, cdk_id:2}, payment:{provider:"v1", cdk:"完整支付凭据", auth_mode:"key"}, success_group:"Plus 成品"}`。可选 `success_group` 为已有分组名（含默认分组），核验真实 Plus 后自动转入；空字符串明确关闭自动转组，省略或传 `null` 时继续使用该账号上次任务保存的选择（首次默认为不转移）。无效分组返回 HTTP 400，不提交开通任务。提链可用临时 `cdk` 替代 `cdk_id`，Legacy 环境 CDK 使用 `provider_id:0`；Lumen 可传 `proxy_url`，UPI-GIT5 必须传 `entry_proxies:["http://proxy.example:8080"]`。支付候选同样可用已保存的 `cdk_id` 替代 `cdk`；OrderHub 会话在 `payment` 中传 `provider:"orderhub", auth_mode:"session"`。返回 HTTP 202 与 `started/busy/skipped/failed` 数组及对应数量，仅表示排队受理。最终状态通过原账号列表和 `/api/accounts/plan-check-status` 的 `plus_activation_status/message/updated_at` 字段读取。
+- `POST /api/accounts/scan-requests`：`{account_ids:[7], provider:"v1"|"masi"|"orderhub"|"seashore", cdk:"完整凭据", idempotency_key:"本次操作的稳定键"}`；已保存的凭据改用 `cdk_id`（与 `cdk` 二选一）。默认 provider 为 v1。结果分别位于 `created`、`duplicated`、`pending`、`failed`、`unknown` 数组；`ok:true` 仅表示本批条目已处理。
+- `POST /api/accounts/scan-requests/query`：`{account_ids:[7], cdk:"原凭据"}` 或 `{account_ids:[7], cdk_id:9}`；读取原平台任务，返回 `items`、`failed`、`unknown`。
 - `GET /api/accounts/7/scan-request`：读取本地非敏感状态，不发送远端查询。
-- `POST /api/payments/verify`：`{provider:"v1"|"masi"|"orderhub", cdk:"完整凭据"}`；验证额度，不创建任务。
+- `POST /api/payments/verify`：`{provider:"v1"|"masi"|"orderhub"|"seashore", cdk:"完整凭据"}` 或 `{provider:"seashore", cdk_id:9}`；验证额度，不创建任务。
 - `POST /api/payments/orderhub/login`：`{username:"00123456", password:"ExamplePass1!"}`；返回安全用户字段并设置本地 HttpOnly 会话。
 - `GET /api/payments/orderhub/session`：读取本地登录状态。
 - `POST /api/payments/orderhub/logout`：`{}`；退出本地与远端会话。
+
+支付平台与已保存 CDK 的管理接口（响应永不含明文凭据）：
+
+- `GET /api/payment-providers`：平台列表 + 掩码 CDK（`masked`、`display_suffix`）。
+- `GET /api/payment-providers/seashore/credentials`：单个平台的凭据概览，供提交窗口选择。
+- `POST /api/payment-providers`、`PUT /api/payment-providers/<id>`、`DELETE /api/payment-providers/<id>`：新增、修改、删除平台（删除会连带删除其 CDK）。
+- `POST /api/payment-providers/<id>/cdks`、`PUT /api/payment-cdks/<id>`、`DELETE /api/payment-cdks/<id>`：新增、修改备注/状态、删除 CDK。
+- `POST /api/payment-cdks/<id>/validate`：用已保存的凭据查询额度（seashore 额外返回 `pending_orders` 与 `capacity.recommended`）。
+
+上游返回 401（CDK 失效）时本地接口返回 HTTP 400 并保留 `code`，避免前端把上游认证失败误判成本站会话失效而退出登录。
 
 `activate-plus` 的 `extraction`、`payment` 兼容原单对象，也可分别传按优先级排列的非空数组（各 1–20 项）；两类配置独立回退。例如：
 
@@ -125,7 +173,9 @@ OrderHub 会话模式在提交、查询或额度接口传 `auth_mode:"session"`�
 ## 本地验证
 
 ```bash
-.venv/bin/python -m pytest -q tests/test_plus_activation.py tests/test_scan_api.py tests/test_scan_api_clients.py tests/test_scan_payment_log.py tests/test_operation_log.py
+.venv/bin/python -m pytest -q tests/test_plus_activation.py tests/test_scan_api.py tests/test_scan_api_clients.py \
+  tests/test_scan_payment_log.py tests/test_operation_log.py \
+  tests/test_seashore_client.py tests/test_seashore_service.py tests/test_payment_provider_store.py
 node --test tests/test_plus_activation_ui.js tests/test_scan_payment_ui.js
 node --check webui/static/extract-links.js
 node --check webui/static/console.js

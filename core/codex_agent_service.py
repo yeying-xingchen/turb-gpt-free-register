@@ -369,14 +369,16 @@ def enqueue_account_codex_agent(*, account_id: int, email: str, access_token: st
             _QUEUE_SLOTS.release()
             return {"accepted": False, "busy": True, "error": "该账号正在生成 Codex Agent Token"}
         fut = _EXECUTOR.submit(
-            _run_generate,
+            task_control.gated(
+                _run_generate,
+                task_control.control(KIND, account_id),
+                on_cancel=lambda: _cancel_pending_agent(account_id),
+            ),
             account_id=account_id,
             email=email,
             access_token=access_token,
             trigger=trigger,
             verify_task=verify_task,
-            control=task_control.control(KIND, account_id),
-            on_cancel=lambda: _cancel_pending_agent(account_id),
         )
         if fut is False:
             raise RuntimeError("Codex Agent 队列已关闭")

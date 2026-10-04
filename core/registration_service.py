@@ -11,23 +11,36 @@
 """
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core import codex_retry_service, db
+from core import codex_retry_service, db, task_control
 
 logger = logging.getLogger(__name__)
 
-# 全局线程池，最大并发数（WebUI 每次提交时可按最新 workers 重建）
-_DEFAULT_MAX_WORKERS = 4
+KIND = "registration"
+# 全局任务池，并发数可在运行中调整（WebUI 每次提交或任务中心修改都立即生效）
 _MIN_MAX_WORKERS = 1
-_MAX_MAX_WORKERS = 16
-_executor: ThreadPoolExecutor | None = None
+_MAX_MAX_WORKERS = task_control.MAX_WORKERS
+
+
+def _configured_workers() -> int:
+    try:
+        from config import register as register_cfg
+        value = int(getattr(register_cfg, "REGISTRATION_WORKERS", 4) or 4)
+    except (TypeError, ValueError, OverflowError, ImportError):
+        value = 4
+    return max(_MIN_MAX_WORKERS, min(_MAX_MAX_WORKERS, value))
+
+
+_DEFAULT_MAX_WORKERS = _configured_workers()
+# 启动即声明任务类型，任务中心可以在任何任务提交前就显示/调整注册并发；
+# 线程池按需拉起，不提交任务就不会创建线程。
+_executor: task_control.DynamicPool | None = task_control.register_pool(
+    KIND, _DEFAULT_MAX_WORKERS, max_workers=_MAX_MAX_WORKERS,
+)
 _executor_workers = _DEFAULT_MAX_WORKERS
-_executor_generation = 0
-_retired_executors: list[ThreadPoolExecutor] = []
 _executor_lock = threading.RLock()
 
 _STOP_EVENTS: dict[int, threading.Event] = {}
@@ -222,53 +235,61 @@ def _normalize_workers(max_workers: int | None) -> int:
     return max(_MIN_MAX_WORKERS, min(_MAX_MAX_WORKERS, value))
 
 
-def get_executor(max_workers: int | None = None) -> ThreadPoolExecutor:
-    """返回注册线程池。
+def get_executor(max_workers: int | None = None) -> task_control.DynamicPool:
+    """返回注册任务池。
 
-    旧逻辑只在首次创建线程池时使用 max_workers，后续 WebUI 改线程数再提交仍会复用
-    上一次的池。这里改成：每次传入的 max_workers 和当前池不一致时，立即创建新池供
-    新提交任务使用；旧池不接收新任务，但会继续把已经排队/运行的任务跑完。
+    并发数在运行中直接调整：调大立刻为新排队任务加线程，调小让多余线程在完成
+    当前任务后退出。已经排队但尚未开始的任务会立即跟随新的并发数，不需要等旧
+    批次跑完，也不会丢弃任何已提交任务。
     """
-    global _executor, _executor_workers, _executor_generation
+    global _executor, _executor_workers
     requested_workers = _normalize_workers(max_workers) if max_workers is not None else _executor_workers
     with _executor_lock:
-        if _executor is None or requested_workers != _executor_workers:
-            old_executor = _executor
-            if old_executor is not None:
-                # 不取消旧池里已提交的任务，只是不再往旧池追加新任务。
-                old_executor.shutdown(wait=False, cancel_futures=False)
-                _retired_executors.append(old_executor)
-                logger.info(
-                    "[Service] 注册线程池 workers 从 %s 切换为 %s；旧池继续处理已排队任务",
-                    _executor_workers,
-                    requested_workers,
-                )
-            _executor_workers = requested_workers
-            _executor_generation += 1
-            _executor = ThreadPoolExecutor(
-                max_workers=requested_workers,
-                thread_name_prefix=f"reg-worker-{_executor_generation}",
+        if _executor is None or _executor.closed:
+            _executor = task_control.register_pool(KIND, requested_workers, max_workers=_MAX_MAX_WORKERS)
+        elif requested_workers != _executor_workers:
+            _executor.set_workers(requested_workers)
+            logger.info(
+                "[Service] 注册任务池 workers 从 %s 调整为 %s（排队任务立即生效）",
+                _executor_workers,
+                requested_workers,
             )
-    return _executor
+        _executor_workers = requested_workers
+        return _executor
 
 
 def get_executor_workers() -> int:
-    """当前新提交注册任务会使用的线程数。"""
+    """当前注册任务使用的并发数。"""
     with _executor_lock:
         return _executor_workers
+
+
+def set_executor_workers(workers: int) -> int:
+    """任务中心调整注册并发；运行中和排队中的任务立即生效。"""
+    global _executor_workers
+    with _executor_lock:
+        _executor_workers = _normalize_workers(workers)
+        pool = get_executor()
+        pool.set_workers(_executor_workers)
+        return _executor_workers
+
+
+def apply_settings() -> dict:
+    """配置页保存后热加载注册并发数。"""
+    return {"workers": set_executor_workers(_configured_workers())}
+
+
+def queue_settings() -> dict:
+    return {"workers": get_executor_workers()}
 
 
 def shutdown_executor(wait: bool = True) -> None:
     global _executor
     with _executor_lock:
-        executors = []
-        if _executor is not None:
-            executors.append(_executor)
-            _executor = None
-        executors.extend(_retired_executors)
-        _retired_executors.clear()
-    for ex in executors:
-        ex.shutdown(wait=wait, cancel_futures=False)
+        pool = _executor
+        _executor = None
+    if pool is not None:
+        pool.shutdown(wait=wait)
 
 
 # ============================================================

@@ -8,6 +8,14 @@ import type {
   ActionPrompt,
   OperationRow,
 } from "~/components/operations/helpers";
+import {
+  taskPoolByName,
+  taskPoolDirty,
+  taskPoolHint,
+  taskPoolMax,
+  taskPoolWorkers,
+  taskPoolWorkersValid,
+} from "~/utils/tasks";
 useHead({ title: "任务中心" });
 const { request } = useApi();
 const toast = useToast();
@@ -30,6 +38,32 @@ const updated = ref("");
 const confirmation = shallowRef<ActionPrompt | null>(null);
 const logOpen = ref(false);
 const logTask = ref<OperationRow | null>(null);
+// 后台并发：每类任务一个线程池，运行中即可调整。
+const pools = ref<OperationRow[]>([]);
+const poolName = ref("");
+const poolWorkers = ref(1);
+const concurrencySaving = ref(false);
+const currentPool = computed(() => taskPoolByName(pools.value, poolName.value));
+const currentPoolMax = computed(() => taskPoolMax(currentPool.value));
+function syncPoolWorkers() {
+  if (!pools.value.length) return;
+  if (!pools.value.some((pool) => pool.name === poolName.value))
+    poolName.value = pools.value[0].name;
+  // 轮询刷新时不要覆盖用户正在输入但尚未应用的并发数。
+  if (!concurrencyDirty.value)
+    poolWorkers.value = taskPoolWorkers(currentPool.value);
+}
+watch(pools, syncPoolWorkers, { deep: true });
+watch(poolName, () => {
+  poolWorkers.value = taskPoolWorkers(currentPool.value);
+});
+const concurrencyDirty = computed(() =>
+  taskPoolDirty(poolWorkers.value, currentPool.value),
+);
+const concurrencyValid = computed(() =>
+  taskPoolWorkersValid(poolWorkers.value, currentPool.value),
+);
+const concurrencyHint = computed(() => taskPoolHint(currentPool.value));
 const page = computed({
   get: () => (view.value === "active" ? activePage.value : historyPage.value),
   set: (value) => {
@@ -112,6 +146,7 @@ async function refresh() {
       const result = checkResult(live.value);
       active.value = result.items || [];
       counts.value = result.status_counts || {};
+      if (Array.isArray(result.pools)) pools.value = result.pools;
       activeTotal.value = Number(result.total || 0);
       activeLoaded.value = true;
       activePage.value = Math.min(
@@ -217,12 +252,38 @@ function taskAction(task: OperationRow, action: string) {
   if (action === "cancel")
     confirmation.value = {
       title: `取消任务 ${task.id}`,
-      description: "排队任务会直接取消，运行中的任务会在当前检查点停止。",
+      description:
+        task.job_id == null
+          ? "排队任务会直接取消；运行中的任务会在当前检查点停止，已提交的远端操作不会回滚。"
+          : "排队任务会直接取消，运行中的任务会在当前检查点停止。",
       label: "取消任务",
       run: () => act(task, action),
     };
   else
     void act(task, action).catch((cause) => toast.error(errorMessage(cause)));
+}
+async function applyConcurrency() {
+  if (concurrencySaving.value || !currentPool.value || !concurrencyValid.value)
+    return;
+  const workers = Number(poolWorkers.value);
+  if (workers === Number(currentPool.value.workers)) return;
+  concurrencySaving.value = true;
+  try {
+    const result = checkResult(
+      await request("/api/tasks/concurrency", {
+        method: "POST",
+        body: { job_type: poolName.value, workers },
+      }),
+    );
+    toast.success(result.message || `并发已调整为 ${workers}`);
+    if (result.warning) toast.info(result.warning);
+    if (Array.isArray(result.pools)) pools.value = result.pools;
+    await refresh();
+  } catch (cause) {
+    toast.error(errorMessage(cause));
+  } finally {
+    concurrencySaving.value = false;
+  }
 }
 function cancelPending() {
   confirmation.value = {
@@ -320,7 +381,69 @@ function cancelPending() {
           @click="cancelPending"
         >
           取消排队注册任务（{{ pendingRegistration }}）</button
-        ><label class="inline page-size"
+        ><span
+          v-if="view === 'active' && pools.length"
+          class="inline concurrency-group"
+        >
+          <label class="inline"
+            >后台并发<select
+              v-model="poolName"
+              class="select pool-select"
+              aria-label="选择任务类型"
+            >
+              <option v-for="pool in pools" :key="pool.name" :value="pool.name">
+                {{ pool.label }}（{{ pool.workers }}）
+              </option></select
+            ></label
+          ><button
+            class="btn btn-sm btn-icon"
+            type="button"
+            aria-label="并发减一"
+            :disabled="concurrencySaving || Number(poolWorkers) <= 1"
+            @click="poolWorkers = Math.max(1, Number(poolWorkers) - 1)"
+          >
+            −</button
+          ><input
+            v-model.number="poolWorkers"
+            class="input workers-input"
+            type="number"
+            min="1"
+            :max="currentPoolMax"
+            step="1"
+            aria-label="并发线程数"
+            :disabled="concurrencySaving"
+          /><button
+            class="btn btn-sm btn-icon"
+            type="button"
+            aria-label="并发加一"
+            :disabled="
+              concurrencySaving || Number(poolWorkers) >= currentPoolMax
+            "
+            @click="
+              poolWorkers = Math.min(currentPoolMax, Number(poolWorkers) + 1)
+            "
+          >
+            ＋</button
+          ><button
+            class="btn btn-sm"
+            type="button"
+            :disabled="
+              concurrencySaving || !concurrencyDirty || !concurrencyValid
+            "
+            @click="applyConcurrency"
+          >
+            {{
+              concurrencySaving
+                ? "应用中…"
+                : concurrencyDirty
+                  ? "应用并发"
+                  : "并发已生效"
+            }}</button
+          ><span v-if="currentPool" class="muted concurrency-hint">{{
+            concurrencyHint
+          }}</span>
+        </span>
+        <label class="inline page-size"
           >每页<select
             v-model.number="pageSize"
             class="select"
@@ -526,6 +649,31 @@ function cancelPending() {
 }
 .page-size select {
   width: 70px;
+}
+.concurrency-group {
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+}
+.pool-select {
+  width: 150px;
+  margin-left: 6px;
+}
+.workers-input {
+  width: 64px;
+  min-height: 28px;
+  padding: 2px 6px;
+  text-align: center;
+}
+.btn-icon {
+  min-width: 28px;
+  padding: 2px 6px;
+  line-height: 1.2;
+}
+.concurrency-hint {
+  white-space: nowrap;
 }
 .refresh-label {
   font-size: 12px;

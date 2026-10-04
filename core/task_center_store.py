@@ -12,7 +12,7 @@ import time
 from contextlib import closing
 from datetime import datetime
 
-from core import db
+from core import db, task_control
 
 LABELS = {
     "registration": "账号注册", "codex_retry": "Codex补跑",
@@ -28,7 +28,7 @@ _STATUS_GROUPS = {
     "running": {"running", "checking", "extracting", "paying", "verifying", "submitting",
                 "submitted", "accepted", "processing", "claimed", "retrying", "in_progress"},
     "success": {"success", "succeeded", "completed", "complete", "done", "live", "paid"},
-    "failed": {"failed", "error", "rejected", "expired", "deactivated", "refunded"},
+    "failed": {"failed", "error", "rejected", "expired", "deactivated", "refunded", "not_activated"},
     "cancelled": {"cancelled", "canceled", "released", "account_deleted", "reset"},
     "stopped": {"stopped"},
     "needs_attention": {"unknown", "interrupted", "needs_attention", "awaiting_blik"},
@@ -398,6 +398,42 @@ _ACCOUNT_SELECT = """SELECT 'account' AS kind,id AS sequence,'account-' || id AS
     job_type,status,source_status,email,account_id,progress,stage,progress_message,error_message,created_at,started_at,completed_at,
     COALESCE(julianday(created_at),0) AS sort_at FROM account_tasks"""
 _ACTIVE_SQL = "('pending','running','paused','stopping')"
+# 任务中心里可调整并发的任务类型 = 已注册后台任务池的类型。
+_CONTROL_ROW_STATES = {
+    "paused": ("paused", "已暂停", "任务已暂停，等待恢复"),
+    "running": ("running", "继续执行", "任务已恢复，继续执行"),
+    "stopping": ("stopping", "取消中", "已发送取消信号，等待任务退出"),
+    "cancelled": ("cancelled", "已取消", "用户取消任务"),
+}
+
+
+def set_task_control_state(kind: str, account_id, state: str) -> bool:
+    """任务中心按钮的即时反馈：把最新活跃行标记为暂停/恢复/取消。
+
+    账号字段仍由各服务在检查点写回；这里只更新任务投影，让界面立刻看到状态。
+    """
+    spec = _CONTROL_ROW_STATES.get(str(state))
+    if spec is None:
+        return False
+    status, stage, message = spec
+    parsed_id = int(account_id)
+    now = db._now()
+    with db._row_write_transaction() as conn:
+        task = _latest(conn, parsed_id, str(kind))
+        if task is None or task["status"] not in ACTIVE:
+            return False
+        conn.execute(
+            """UPDATE account_tasks SET status=?,source_status=?,stage=?,progress_message=?,
+               error_message=?,completed_at=?,updated_at=? WHERE id=?""",
+            (
+                status, status, stage, message,
+                message if status == "cancelled" else "",
+                now if status == "cancelled" else None,
+                now, task["id"],
+            ),
+        )
+        _event(conn, task["id"], kind, status, now, message)
+    return True
 
 
 def _registration_secrets(conn, row):
@@ -454,13 +490,34 @@ def _public(row, conn):
             "pause": status in {"pending", "running"}, "resume": status == "paused",
             "cancel": status in {"pending", "running", "paused"},
         }
+        result["control_state"] = status if status in {"paused", "running"} else None
         value = result.get("account_id")
         result["account_id"] = int(value) if isinstance(value, int) and not isinstance(value, bool) else None
     else:
         result.pop("job_id")
         result.update(stage=row["stage"], progress_message=row["progress_message"], error_message=row["error_message"])
-        result["capabilities"] = {"pause": False, "resume": False, "cancel": False}
+        account_id = result.get("account_id")
+        account_id = int(account_id) if isinstance(account_id, int) and not isinstance(account_id, bool) else None
+        result["account_id"] = account_id
+        capabilities, control_state = _account_capabilities(job_type, account_id, status)
+        result["capabilities"] = capabilities
+        result["control_state"] = control_state
     return result
+
+
+def _account_capabilities(job_type: str, account_id, status: str) -> tuple[dict, str | None]:
+    """账号任务的可控能力来自任务控制层的实时状态，而不是数据库字段。"""
+    idle = {"pause": False, "resume": False, "cancel": False}
+    if not account_id or status not in ACTIVE or task_control.get_pool(job_type) is None:
+        return idle, None
+    state = task_control.control_state(job_type, account_id)
+    if state is None:
+        return idle, None
+    return {
+        "pause": state == "running",
+        "resume": state == "paused",
+        "cancel": state in {"running", "paused"},
+    }, state
 
 
 def _union(where):
@@ -493,6 +550,15 @@ def list_history_tasks_page(limit=20, offset=0) -> dict:
             (limit, offset),
         )
         return {"items": [_public(row, conn) for row in rows], "total": total}
+
+
+def concurrency_overview() -> list[dict]:
+    """任务中心可调整并发的任务类型：当前并发数、运行中与排队数量。"""
+    items = []
+    for status in task_control.pools_status():
+        name = status["name"]
+        items.append({**status, "label": LABELS.get(name, name)})
+    return sorted(items, key=lambda item: item["name"])
 
 
 def task_status_counts() -> dict:

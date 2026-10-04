@@ -198,15 +198,17 @@ def enqueue_account_plan_check(
 
     try:
         accepted = _EXECUTOR.submit(
-            _run_plan_check,
+            task_control.gated(
+                _run_plan_check,
+                task_control.control(KIND, account_id),
+                on_cancel=lambda: _cancel_pending_plan_check(account_id),
+            ),
             account_id=account_id,
             email=email,
             access_token=access_token,
             trigger=str(trigger or "manual"),
             proxy=proxy,
             timezone_offset_min=str(timezone_offset_min or "-"),
-            control=task_control.control(KIND, account_id),
-            on_cancel=lambda: _cancel_pending_plan_check(account_id),
         )
         if accepted is False:
             raise RuntimeError("套餐查询队列已关闭")

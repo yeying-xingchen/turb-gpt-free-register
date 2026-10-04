@@ -299,13 +299,13 @@
     const value = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return `scan-bulk-${value}`.slice(0, 128);
   }
-  const PAYMENT_STATUS = {submitting: '提交处理中', submission_pending: '提交结果待确认', awaiting_worker: '等待处理人员', pending: '提交处理中', created: '已创建', queued: '排队中', claimed: '已领取', assigned: '已分配', running: '处理中', processing: '处理中', verifying: '核验中', in_progress: '处理中', succeeded: '服务商结算成功', success: '服务商结算成功', paid: '服务商报告已支付', completed: '服务商结算完成', failed: '失败', rejected: '已拒绝', canceled: '已取消', cancelled: '已取消', expired: '已过期', timeout: '已超时', unknown: '结果待核实', interrupted: '结果待核实', not_submitted: '没有提交记录', no_task: '没有任务 ID'};
+  const PAYMENT_STATUS = {submitting: '提交处理中', submission_pending: '提交结果待确认', awaiting_worker: '等待处理人员', pending: '提交处理中', created: '已创建', queued: '排队中', claimed: '已领取', assigned: '已分配', running: '处理中', processing: '处理中', verifying: '核验中', in_progress: '处理中', succeeded: '服务商结算成功', success: '服务商结算成功', paid: '服务商报告已支付', completed: '服务商结算完成', failed: '失败', rejected: '已拒绝', canceled: '已取消', cancelled: '已取消', expired: '已过期', timeout: '已超时', not_activated: '未成功激活（已退次）', unknown: '结果待核实', interrupted: '结果待核实', not_submitted: '没有提交记录', no_task: '没有任务 ID'};
   const PAYMENT_ACTIVE = new Set(['submitting', 'submission_pending', 'awaiting_worker', 'pending', 'created', 'queued', 'claimed', 'assigned', 'running', 'processing', 'verifying', 'in_progress']);
-  const PAYMENT_FAILED = new Set(['failed', 'rejected', 'canceled', 'cancelled', 'expired', 'timeout']);
+  const PAYMENT_FAILED = new Set(['failed', 'rejected', 'canceled', 'cancelled', 'expired', 'timeout', 'not_activated']);
   const PAYMENT_SUCCESS = new Set(['succeeded', 'success', 'paid', 'completed']);
   const PAYMENT_RETRY = new Set(['v1', 'orderhub']);
   const PAYMENT_GROUP = {created: '新建任务', duplicated: '复用已有任务', pending: '提交处理中，尚未确认创建', items: '查询结果', failed: '处理失败', unknown: '结果待核实'};
-  function paymentProvider(provider) { return provider === 'masi' ? 'Masi · masi.cc.cd' : provider === 'orderhub' ? 'UPI OrderHub · upi.xxsyun.xyz' : provider === 'v1' ? 'Astra Scan Workbench · scan-qr.hixinghai.com' : '原提交服务商'; }
+  function paymentProvider(provider) { return provider === 'masi' ? 'Masi · masi.cc.cd' : provider === 'orderhub' ? 'UPI OrderHub · upi.xxsyun.xyz' : provider === 'seashore' ? 'seashore 发布者 API · seashore.lol' : provider === 'v1' ? 'Astra Scan Workbench · scan-qr.hixinghai.com' : '原提交服务商'; }
   function paymentCell(row) {
     const status = text(row.scan_request_status).toLowerCase();
     if (!status && !row.scan_request_task_id) return '';
@@ -483,6 +483,84 @@
     }
     return {...candidates, load, sync: disabled => { locked = disabled; candidates.sync(disabled); retry.disabled = disabled || loading; }, get ready() { return ready; }};
   }
+  // 已保存的支付 CDK：只在用户明确选择「使用已保存」时才读取，避免打开窗口就发请求。
+  let paymentCatalogCache = null;
+  async function loadPaymentCatalog(force = false) {
+    if (paymentCatalogCache && !force) return paymentCatalogCache;
+    const data = await request('/api/payment-providers');
+    paymentCatalogCache = Array.isArray(data.items) ? data.items : [];
+    return paymentCatalogCache;
+  }
+  function paymentCredentialPicker(providerValue, usesSession, onChange) {
+    const source = element('select', {'aria-label': '支付凭据来源'});
+    option(source, 'raw', '输入本次临时凭据'); option(source, 'saved', '使用已保存的支付 CDK');
+    const savedSelect = element('select', {'aria-label': '已保存的支付 CDK'});
+    const rawInput = element('input', {type: 'password', autocomplete: 'new-password', spellcheck: 'false'});
+    const hint = element('p', {class: 'el-hint', role: 'status'});
+    const sourceField = field('支付凭据来源', source);
+    const savedField = field('已保存的支付 CDK', savedSelect, '在「服务与凭据 · 支付平台」保存后即可在此直接选用。');
+    const rawField = field('本次支付 CDK', rawInput, '仅在此窗口内存中保留；关闭后清除。');
+    const node = element('div', {class: 'el-payment-credential'}, [sourceField, savedField, rawField, hint]);
+    let catalog = null, loading = false, locked = false;
+    const savedItems = () => {
+      const entry = (catalog || []).find(item => item.provider_type === providerValue());
+      return ((entry && entry.cdks) || []).filter(item => enabled(item.enabled));
+    };
+    function fill() {
+      savedSelect.replaceChildren();
+      const items = savedItems();
+      if (!items.length) option(savedSelect, '', loading ? '正在读取已保存的 CDK…' : '该平台还没有已保存的 CDK', true);
+      for (const item of items) option(savedSelect, item.id, `${text(item.masked || item.display_suffix)}${item.memo ? ' · ' + text(item.memo) : ''}`);
+      if (items.length) savedSelect.value = text(items[0].id);
+    }
+    async function ensureCatalog(force = false) {
+      if (catalog && !force) return;
+      loading = true; fill(); sync(locked);
+      try { catalog = await loadPaymentCatalog(force); }
+      catch (error) { catalog = null; hint.textContent = text(error?.message || error); }
+      finally { loading = false; fill(); sync(locked); }
+    }
+    function sync(disabled) {
+      locked = disabled === undefined ? locked : disabled;
+      const session = usesSession();
+      sourceField.hidden = session;
+      savedField.hidden = session || source.value !== 'saved';
+      rawField.hidden = session || source.value !== 'raw';
+      source.disabled = rawInput.disabled = savedSelect.disabled = locked;
+      // 必填只跟随当前可见的输入，避免隐藏的 required 让浏览器拒绝提交。
+      rawInput.required = !session && source.value === 'raw';
+      savedSelect.required = !session && source.value === 'saved';
+      if (session) { hint.textContent = ''; return; }
+      if (source.value !== 'saved') { hint.textContent = ''; return; }
+      hint.textContent = loading ? '正在读取已保存的 CDK…'
+        : savedItems().length ? '' : '该平台还没有已保存的 CDK，请先在「服务与凭据 · 支付平台」保存，或改回输入临时凭据。';
+    }
+    function reset() {
+      source.value = 'raw'; rawInput.value = ''; savedSelect.replaceChildren();
+      catalog = null; loading = false; hint.textContent = ''; fill(); sync(locked);
+    }
+    function body() {
+      if (usesSession()) return {};
+      if (source.value === 'saved') {
+        const value = Number(savedSelect.value);
+        if (!value) throw new Error('请选择已保存的支付 CDK，或改回输入本次临时凭据。');
+        return {cdk_id: value};
+      }
+      if (!rawInput.value.trim()) throw new Error('请输入本次使用的支付 CDK / API Key。');
+      return {cdk: rawInput.value.trim()};
+    }
+    function summary() {
+      if (usesSession()) return 'OrderHub 已登录';
+      if (source.value !== 'saved') return '支付 CDK / API Key：' + (rawInput.value.trim() ? '已输入（隐藏）' : '待输入');
+      const item = savedItems().find(entry => Number(entry.id) === Number(savedSelect.value));
+      return item ? `已保存 CDK ${text(item.masked || item.display_suffix)}` : '待选择已保存的 CDK';
+    }
+    source.addEventListener('change', () => { if (source.value === 'saved') ensureCatalog(); sync(locked); onChange(); });
+    rawInput.addEventListener('input', onChange);
+    savedSelect.addEventListener('change', onChange);
+    fill();
+    return {node, sync, reset, body, summary, focus: () => (source.value === 'saved' ? savedSelect : rawInput).focus(), get raw() { return rawInput; }, get source() { return source; }};
+  }
   function activationPayment(state, form, onChange, sessionRequest) {
     // The API exposes one server-side OrderHub session, shared by session candidates.
     let sessionReady = false;
@@ -494,33 +572,31 @@
       option(provider, 'v1', 'Astra Scan Workbench · scan-qr.hixinghai.com');
       option(provider, 'masi', 'Masi · masi.cc.cd');
       option(provider, 'orderhub', 'UPI OrderHub · upi.xxsyun.xyz');
+      option(provider, 'seashore', 'seashore 发布者 API · seashore.lol');
       provider.value = 'v1';
       const authentication = element('select', {'aria-label': '支付验证方式'});
       option(authentication, 'key', '支付 CDK / OrderHub API Key'); option(authentication, 'session', 'OrderHub 账号登录'); authentication.value = 'key';
       const authField = field('验证方式', authentication);
-      const cdk = element('input', {type: 'password', autocomplete: 'new-password', spellcheck: 'false', required: ''});
-      const cdkField = field('本次支付 CDK', cdk, '每个候选独立填写，可使用同平台不同 CDK；提交、删除或关闭后清空。');
+      const usesSession = () => provider.value === 'orderhub' && authentication.value === 'session';
+      const picker = paymentCredentialPicker(() => provider.value, usesSession, onChange);
       const info = element('p', {class: 'el-hint'});
       const username = element('input', {type: 'text', inputmode: 'numeric', autocomplete: 'off', 'aria-label': 'OrderHub 数字账号'});
       const password = element('input', {type: 'password', autocomplete: 'new-password', 'aria-label': 'OrderHub 登录密码'});
       const sessionInfo = element('p', {class: 'el-hint', role: 'status'});
       const sessionFields = element('div', {hidden: true}, [field('OrderHub 数字账号', username), field('登录密码', password, '密码仅用于登录，响应后清空。所有 session 候选共用服务器当前 OrderHub 登录会话。'), element('div', {class: 'el-actions'}, [button('登录 OrderHub', () => sessionAction('login')), button('检查登录状态', () => sessionAction('session')), button('退出 OrderHub', () => sessionAction('logout'))]), sessionInfo]);
       const accountCenter = element('a', {href: 'https://upi.xxsyun.xyz', target: '_blank', rel: 'noopener noreferrer', text: '打开平台账号中心：注册、兑换 CDK、生成 API Key'});
-      fields.append(field('支付平台', provider), authField, info, accountCenter, sessionFields, cdkField);
-      const usesSession = () => provider.value === 'orderhub' && authentication.value === 'session';
-      function clear() { cdk.value = ''; username.value = ''; password.value = ''; }
+      fields.append(field('支付平台', provider), authField, info, accountCenter, sessionFields, picker.node);
+      function clear() { picker.reset(); username.value = ''; password.value = ''; }
       function sync(disabled) {
         fields.disabled = disabled;
         authField.hidden = accountCenter.hidden = provider.value !== 'orderhub';
         sessionFields.hidden = !usesSession();
-        cdkField.hidden = usesSession(); cdk.required = !usesSession();
+        picker.sync(disabled);
         sessionInfo.textContent = sessionMessage;
-        cdkField.querySelector('label').textContent = provider.value === 'orderhub' ? 'OrderHub API Key（ohk_…）' : '本次支付 CDK';
-        info.textContent = provider.value === 'orderhub' ? 'OrderHub：API Key 或数字账号登录；后台读取所选账号 AT。' : provider.value === 'masi' ? 'Masi：支付 CDK；后台读取所选账号 AT。' : 'Astra Scan Workbench：支付 CDK；后台提交 UPI 链接和邮箱。';
+        info.textContent = provider.value === 'orderhub' ? 'OrderHub：API Key 或数字账号登录；后台读取所选账号 AT。' : provider.value === 'masi' ? 'Masi：支付 CDK；后台读取所选账号 AT。' : provider.value === 'seashore' ? 'seashore 发布者 API：CDK 直接作为 Bearer 凭据；后台提交所选账号邮箱、完整 AT 与零元 UPI 链接。' : 'Astra Scan Workbench：支付 CDK；后台提交 UPI 链接和邮箱。';
       }
       provider.addEventListener('change', () => { clear(); authentication.value = 'key'; onChange(); });
       authentication.addEventListener('change', () => { clear(); onChange(); if (usesSession()) sessionAction('session'); });
-      cdk.addEventListener('input', onChange);
       async function sessionAction(action) {
         if (state.busy || !state.live() || fields.disabled || !usesSession()) return;
         if (action === 'login' && (!/^[0-9]+$/.test(username.value.trim()) || !password.value)) { state.fail('请输入 OrderHub 数字账号和登录密码。'); return; }
@@ -541,12 +617,11 @@
         onChange();
       }
       return {node: fields, clear, sync, body: () => {
-        if (!['v1', 'masi', 'orderhub'].includes(provider.value)) throw new Error('请选择支持的支付平台。');
+        if (!['v1', 'masi', 'orderhub', 'seashore'].includes(provider.value)) throw new Error('请选择支持的支付平台。');
         if (!['key', 'session'].includes(authentication.value) || (authentication.value === 'session' && provider.value !== 'orderhub')) throw new Error('仅 OrderHub 支持 session 登录验证。');
         if (usesSession() && !sessionReady) throw new Error('请先登录 OrderHub 或检查登录状态。');
-        if (!usesSession() && !cdk.value.trim()) throw new Error('请输入本次使用的支付 CDK / API Key。');
-        return {provider: provider.value, auth_mode: authentication.value, ...(!usesSession() ? {cdk: cdk.value.trim()} : {})};
-      }, summary: () => `${paymentProvider(provider.value)} · ${usesSession() ? (sessionReady ? 'OrderHub 已登录' : 'OrderHub 待登录') : '支付 CDK / API Key：' + (cdk.value.trim() ? '已输入（隐藏）' : '待输入')}`};
+        return {provider: provider.value, auth_mode: authentication.value, ...picker.body()};
+      }, summary: () => `${paymentProvider(provider.value)} · ${usesSession() ? (sessionReady ? 'OrderHub 已登录' : 'OrderHub 待登录') : picker.summary()}`};
     }
     return {...candidates, clear: () => { candidates.clear(); sessionReady = false; }};
   }
@@ -602,7 +677,8 @@
     const batchKey = queryOnly || activation ? '' : newScanIdempotencyKey();
     const attempted = new Set();
     const results = new Map();
-    let credential = '';
+    let credential = null;
+    let credentialSecret = '';
     let activationSecrets = [];
     let extraction = null;
     let activationPayments = null;
@@ -619,17 +695,19 @@
     option(provider, 'v1', 'Astra Scan Workbench（默认）· scan-qr.hixinghai.com/api/v1');
     option(provider, 'masi', 'Masi · https://masi.cc.cd');
     option(provider, 'orderhub', 'UPI OrderHub · https://upi.xxsyun.xyz/api/v1');
+    option(provider, 'seashore', 'seashore 发布者 API · https://seashore.lol/api/publisher');
     provider.value = 'v1';
     const providerInfo = element('p', {class: 'el-notice'});
     const accountCenter = element('a', {href: 'https://upi.xxsyun.xyz', target: '_blank', rel: 'noopener noreferrer', hidden: true, text: '打开平台账号中心：注册、兑换 CDK、生成 API Key'});
-    const cdk = element('input', {type: 'password', autocomplete: 'new-password', spellcheck: 'false', required: ''});
-    const cdkField = field('本次支付 CDK', cdk, '仅在此窗口内存中保留；关闭后清除。再次查询需要重新输入，不会自动重新提交支付。');
-    const credentialInfo = element('p', {class: 'el-hint', hidden: true, text: '凭据已输入，仅在当前窗口内存中用于提交和查询。关闭后清除。'});
     const authentication = element('select', {'aria-label': '支付验证方式'});
     option(authentication, 'key', '支付 CDK / OrderHub API Key');
     option(authentication, 'session', 'OrderHub 账号登录');
     authentication.value = 'key';
     const authField = field('验证方式', authentication);
+    const usesSession = () => (queryOnly || provider.value === 'orderhub') && authentication.value === 'session';
+    const picker = paymentCredentialPicker(() => provider.value, usesSession, () => summarize());
+    const cdkField = picker.node;
+    const credentialInfo = element('p', {class: 'el-hint', hidden: true, text: '凭据已输入，仅在当前窗口内存中用于提交和查询。关闭后清除。'});
     const sessionUsername = element('input', {type: 'text', inputmode: 'numeric', autocomplete: 'off', 'aria-label': 'OrderHub 数字账号'});
     const sessionPassword = element('input', {type: 'password', autocomplete: 'new-password', 'aria-label': 'OrderHub 登录密码'});
     const sessionInfo = element('p', {class: 'el-hint', role: 'status', text: '请登录，或检查服务器保存的登录状态。'});
@@ -637,7 +715,6 @@
     const sessionCheck = button('检查登录状态', () => sessionAction('session'));
     const logout = button('退出 OrderHub', () => sessionAction('logout'));
     const sessionFields = element('div', {hidden: true}, [field('OrderHub 数字账号', sessionUsername), field('登录密码', sessionPassword, '密码仅用于本次登录，响应后清空；登录会话由服务器保存。'), element('div', {class: 'el-actions'}, [login, sessionCheck, logout]), sessionInfo]);
-    const usesSession = () => (queryOnly || provider.value === 'orderhub') && authentication.value === 'session';
     const submit = element('button', {type: 'submit', class: 'el-primary', text: activation ? '开始开通 Plus' : queryOnly ? '查询所选账号' : '确认逐个提交支付'});
     const query = button('查询所选账号', () => execute('query', ids));
     query.hidden = queryOnly || activation;
@@ -666,30 +743,28 @@
     if (activation) state.body.append(refresh);
     const clean = value => {
       let valueText = text(value);
-      for (const secret of [credential, sessionPassword.value, ...activationSecrets]) if (secret) valueText = valueText.split(secret).join('[已隐藏]');
+      for (const secret of [credentialSecret, sessionPassword.value, ...activationSecrets]) if (secret) valueText = valueText.split(secret).join('[已隐藏]');
       return valueText;
     };
     function providerDescription() {
-      providerInfo.textContent = queryOnly ? '查询使用服务器保存的原提交服务商，无需填写任务 ID。可输入 CDK / API Key，或使用 OrderHub 登录会话。' : provider.value === 'orderhub' ? 'UPI OrderHub 由后端自动读取所选账号的完整 AT，无需粘贴。可使用 ohk_ 开头的 API Key 或数字账号登录。结果不确定时先查询；允许重试时沿用原请求。' : provider.value === 'masi' ? 'Masi 会由后端自动读取所选账号的完整 AT 并发送给 masi.cc.cd，无需粘贴 AT。结果不确定时仅查询，不重试创建。' : 'Astra Scan Workbench 使用 UPI 链接和邮箱，不发送账号 AT。结果不确定时，只能使用原请求安全重试。';
+      providerInfo.textContent = queryOnly ? '查询使用服务器保存的原提交服务商，无需填写任务 ID。可选择已保存的 CDK / API Key，或使用 OrderHub 登录会话。' : provider.value === 'orderhub' ? 'UPI OrderHub 由后端自动读取所选账号的完整 AT，无需粘贴。可使用 ohk_ 开头的 API Key 或数字账号登录。结果不确定时先查询；允许重试时沿用原请求。' : provider.value === 'masi' ? 'Masi 会由后端自动读取所选账号的完整 AT 并发送给 masi.cc.cd，无需粘贴 AT。结果不确定时仅查询，不重试创建。' : provider.value === 'seashore' ? 'seashore 发布者 API 由后端读取所选账号的邮箱与完整 AT，提交零元 UPI 链接。该平台没有幂等键，结果不确定时只查询、不重提，避免重复扣次。' : 'Astra Scan Workbench 使用 UPI 链接和邮箱，不发送账号 AT。结果不确定时，只能使用原请求安全重试。';
       authField.hidden = !queryOnly && provider.value !== 'orderhub';
       accountCenter.hidden = !queryOnly && provider.value !== 'orderhub';
       sessionFields.hidden = !usesSession();
-      cdkField.querySelector('label').textContent = !queryOnly && provider.value === 'orderhub' ? 'OrderHub API Key（ohk_…）' : queryOnly ? '本次支付 CDK / API Key' : '本次支付 CDK';
+      picker.sync(state.busy);
       if (activation) {
-        providerInfo.textContent = provider.value === 'orderhub' ? 'UPI OrderHub：使用 API Key 或数字账号登录；由后台读取所选账号 AT 并完成开通任务。' : provider.value === 'masi' ? 'Masi：使用支付 CDK；由后台读取所选账号 AT 并完成开通任务。' : 'Astra Scan Workbench：使用支付 CDK；由后台提交 UPI 链接和邮箱。';
-        cdkField.querySelector('.el-hint').textContent = '支付平台凭据与提链 CDK 分开使用；提交后清空，后台继续处理。';
+        providerInfo.textContent = provider.value === 'orderhub' ? 'UPI OrderHub：使用 API Key 或数字账号登录；由后台读取所选账号 AT 并完成开通任务。' : provider.value === 'masi' ? 'Masi：使用支付 CDK；由后台读取所选账号 AT 并完成开通任务。' : provider.value === 'seashore' ? 'seashore 发布者 API：使用支付 CDK；由后台读取所选账号邮箱与完整 AT 并完成开通任务。' : 'Astra Scan Workbench：使用支付 CDK；由后台提交 UPI 链接和邮箱。';
       }
       syncControls();
       if (activation) summarize();
     }
     provider.addEventListener('change', () => {
-      if (activation) { cdk.value = ''; credential = ''; sessionPassword.value = ''; authentication.value = 'key'; }
+      if (activation) { picker.reset(); credential = null; credentialSecret = ''; sessionPassword.value = ''; authentication.value = 'key'; }
       providerDescription();
     });
-    if (activation) cdk.addEventListener('input', summarize);
     authentication.addEventListener('change', () => {
       stopPolling();
-      if (activation) { cdk.value = ''; credential = ''; sessionPassword.value = ''; }
+      if (activation) { picker.reset(); credential = null; credentialSecret = ''; sessionPassword.value = ''; }
       providerDescription();
       if (usesSession()) sessionAction('session');
     });
@@ -748,7 +823,7 @@
       retry.hidden = !retryIds().length;
       retry.disabled = state.busy;
       refresh.disabled = state.busy;
-      cdk.required = !credential && !usesSession();
+      picker.sync(state.busy);
       cdkField.hidden = !!credential || usesSession();
       credentialInfo.hidden = !credential || usesSession();
     }
@@ -928,10 +1003,10 @@
       pollTimer = null;
       if (kind !== 'refresh' && usesSession() && !sessionReady) { state.fail('请先登录 OrderHub 或检查登录状态。'); return; }
       if (kind !== 'refresh' && !usesSession() && !credential) {
-        if (!form.reportValidity() || !cdk.value.trim()) { state.fail('请输入本次使用的支付 CDK / API Key。'); cdk.focus(); return; }
-        credential = cdk.value.trim();
-        cdk.value = '';
-        cdk.required = false;
+        if (!form.reportValidity()) { state.fail('请选择已保存的支付 CDK，或输入本次临时凭据。'); picker.focus(); return; }
+        try { credential = picker.body(); } catch (error) { state.fail(text(error?.message || error)); picker.focus(); return; }
+        credentialSecret = text(credential.cdk || '');
+        picker.reset();
       }
       if (!automatic && kind !== 'refresh') pollStartedAt = Date.now();
       if (kind === 'submit' && !attempted.size) selectedProvider = provider.value;
@@ -951,7 +1026,7 @@
           row.detail.textContent = kind === 'submit' ? '正在提交此账号，请等待服务器响应…' : '正在查询原提交记录…';
           summarize();
           try {
-            const body = {account_ids: [id], ...(usesSession() ? {auth_mode: 'session'} : {cdk: credential})};
+            const body = {account_ids: [id], ...(usesSession() ? {auth_mode: 'session'} : credential)};
             if (kind === 'submit' && selectedProvider === 'orderhub' && !usesSession()) body.auth_mode = 'key';
             if (kind === 'submit') Object.assign(body, {provider: selectedProvider, idempotency_key: batchKey});
             const {data, httpStatus} = await paymentRequest(kind === 'submit' ? '/api/accounts/scan-requests' : '/api/accounts/scan-requests/query', body);
@@ -984,12 +1059,13 @@
     });
     state.dialog.addEventListener('close', () => {
       stopPolling();
-      credential = '';
+      credential = null;
+      credentialSecret = '';
       activationSecrets = [];
       extraction?.clear();
       activationPayments?.clear();
       sessionUsername.value = '';
-      cdk.value = '';
+      picker.reset();
       sessionPassword.value = '';
       sessionReady = false;
       controller?.abort();
@@ -997,7 +1073,7 @@
     summarize();
     syncControls();
     if (activation) return Promise.all([extraction.load(), successGroup.load()]);
-    cdk.focus();
+    picker.focus();
   }
   async function activatePlus(ids) { return paymentDialog(ids, false, true); }
   async function submitPayment(ids) { paymentDialog(ids, false); }
@@ -1007,14 +1083,72 @@
     const row = element('div', {class: 'el-confirm'}, [element('span', {text: label})]);
     row.append(button('确认删除', action, 'el-danger'), button('取消', () => row.remove())); container.append(row); row.querySelector('button').focus();
   }
+  const PAYMENT_LABELS = Object.freeze({v1: 'Astra Scan Workbench', masi: 'Masi', orderhub: 'UPI OrderHub', seashore: 'seashore 发布者 API'});
+  function paymentManager(state, container) {
+    // 支付平台与 CDK 的独立管理：列表只显示掩码，明文永不回到浏览器。
+    let providers = [];
+    const list = element('div', {class: 'el-provider-list'});
+    const editor = element('section', {class: 'el-editor', hidden: true});
+    container.append(element('p', {class: 'el-hint', text: '支付平台与 CDK 独立管理：保存后可在提交支付、开通 Plus 时直接选用；明文只留在服务端，列表仅显示脱敏后缀。'}), list, editor);
+    async function load() {
+      const result = await request('/api/payment-providers'); if (!state.live()) return;
+      providers = result.items || []; list.replaceChildren();
+      if (!providers.length) list.append(element('p', {text: '尚无支付平台。'}));
+      for (const provider of providers) {
+        const label = PAYMENT_LABELS[provider.provider_type] || provider.provider_type;
+        const card = element('article', {class: 'el-provider'});
+        card.append(element('h3', {text: provider.name || label}), element('p', {class: 'el-hint', text: `${label} · ${provider.effective_api_base || ''} · ${enabled(provider.enabled) ? '已启用' : '已停用'}${provider.is_default ? ' · 默认' : ''} · ${(provider.cdks || []).length} 条 CDK`}), element('p', {text: provider.note || ''}));
+        card.append(button('编辑 / 管理 CDK', () => editProvider(provider)));
+        card.append(button(enabled(provider.enabled) ? '停用平台' : '启用平台', () => state.run(async () => { await request(`/api/payment-providers/${provider.id}`, 'PUT', {enabled: !enabled(provider.enabled)}); editor.hidden = true; await load(); state.message('支付平台状态已更新。'); })));
+        card.append(button('删除平台', () => confirmDelete(card, '确认删除此支付平台及其保存的 CDK？', () => state.run(async () => { await request(`/api/payment-providers/${provider.id}`, 'DELETE'); editor.hidden = true; await load(); state.message('支付平台已删除。'); })), 'el-danger'));
+        list.append(card);
+      }
+    }
+    function editProvider(provider) {
+      editor.replaceChildren(); editor.hidden = false; const form = element('form');
+      const name = element('input', {type: 'text', required: '', value: provider?.name || '', maxlength: '120'});
+      const type = element('select'); for (const [value, label] of Object.entries(PAYMENT_LABELS)) option(type, value, label); type.value = provider?.provider_type || 'seashore';
+      const base = element('input', {type: 'url', value: provider?.api_base || '', placeholder: provider?.effective_api_base || 'https://provider.example'});
+      const note = element('textarea', {rows: '2', maxlength: '2000', value: provider?.note || ''});
+      const isEnabled = check('启用平台', provider ? enabled(provider.enabled) : true); const isDefault = check('设为默认（提交时仍须手动选择）', !!provider?.is_default);
+      form.append(element('fieldset', {class: 'el-fields'}, [field('名称', name), field('平台', type), field('API 地址（留空使用默认）', base), field('备注', note), isEnabled.wrap, isDefault.wrap]));
+      form.append(element('button', {type: 'submit', class: 'el-primary', text: '保存平台'}));
+      editor.append(element('h3', {text: provider ? `编辑 ${provider.name}` : '新增支付平台'}), form);
+      form.addEventListener('submit', event => { event.preventDefault(); if (state.busy || !form.reportValidity()) return; state.run(async () => {
+        const value = base.value.trim(); if (value && !safeUrl(value)) throw new Error('API 地址必须是有效的 HTTP 或 HTTPS 地址，且不包含用户名密码。');
+        const result = await request(provider ? `/api/payment-providers/${provider.id}` : '/api/payment-providers', provider ? 'PUT' : 'POST', {name: name.value.trim(), provider_type: type.value, api_base: value, enabled: isEnabled.input.checked, is_default: isDefault.input.checked, note: note.value.trim()});
+        await load(); const saved = result.item || result; const updated = providers.find(item => Number(item.id) === Number(provider?.id ?? saved.id)); if (updated) editProvider(updated); else editor.hidden = true; state.message('支付平台已保存。');
+      }); });
+      if (provider) renderCdks(provider);
+      editor.scrollIntoView({block: 'nearest'});
+    }
+    function renderCdks(provider) {
+      editor.append(element('h3', {text: '已保存的支付 CDK'})); const cdks = element('div', {class: 'el-cdk-list'});
+      if (!(provider.cdks || []).length) cdks.append(element('p', {class: 'el-hint', text: '暂无已保存的 CDK。'}));
+      const refreshEditor = async () => { await load(); const updated = providers.find(item => Number(item.id) === Number(provider.id)); if (updated) editProvider(updated); };
+      for (const cdk of provider.cdks || []) {
+        const card = element('article', {class: 'el-cdk'}); const form = element('form'); const memo = element('input', {type: 'text', value: cdk.memo || '', maxlength: '200'}); const isEnabled = check('启用此 CDK', enabled(cdk.enabled)); const output = element('div', {class: 'el-validation', hidden: true, 'aria-live': 'polite'});
+        form.append(element('strong', {text: cdk.masked || masked(cdk)}), field('CDK 备注', memo), isEnabled.wrap, element('button', {type: 'submit', text: '保存备注 / 状态'}));
+        form.addEventListener('submit', event => { event.preventDefault(); state.run(async () => { await request(`/api/payment-cdks/${cdk.id}`, 'PUT', {memo: memo.value.trim(), enabled: isEnabled.input.checked}); await refreshEditor(); state.message('支付 CDK 已更新。'); }); });
+        card.append(form, button('查询额度 / 统计', () => state.run(async () => balance(output, await request(`/api/payment-cdks/${cdk.id}/validate`, 'POST', {})))), button('删除 CDK', () => confirmDelete(card, `确认删除 ${cdk.masked || masked(cdk)}？`, () => state.run(async () => { await request(`/api/payment-cdks/${cdk.id}`, 'DELETE'); await refreshEditor(); state.message('支付 CDK 已删除。'); })), 'el-danger'), output); cdks.append(card);
+      }
+      const add = element('form', {class: 'el-cdk-add'}); const raw = element('input', {type: 'password', required: '', autocomplete: 'new-password', spellcheck: 'false'}); const memo = element('input', {type: 'text', maxlength: '200'}); const isEnabled = check('启用新 CDK', true);
+      add.append(element('h3', {text: '添加支付 CDK'}), field('新 CDK', raw), field('备注（可选）', memo), isEnabled.wrap, element('button', {type: 'submit', class: 'el-primary', text: '保存新 CDK'}));
+      add.addEventListener('submit', event => { event.preventDefault(); if (state.busy || !add.reportValidity()) return; state.run(async () => { if (!raw.value.trim()) throw new Error('请输入支付 CDK。'); await request(`/api/payment-providers/${provider.id}/cdks`, 'POST', {cdk: raw.value.trim(), memo: memo.value.trim(), enabled: isEnabled.input.checked}); raw.value = ''; await refreshEditor(); state.message('新支付 CDK 已保存。'); }); });
+      editor.append(cdks, add);
+    }
+    return {load};
+  }
   async function manage() {
-    const state = modal('管理提链服务商 / CDK');
+    const state = modal('管理提链服务商 / 支付平台与 CDK');
     if (!state) return;
     const toolbar = element('div', {class: 'el-actions'});
     const list = element('div', {class: 'el-provider-list'});
     const editor = element('section', {class: 'el-editor', hidden: true});
-    state.body.append(element('p', {class: 'el-hint', text: '服务商和 CDK 独立管理，无需选中账号。保存的 CDK 仅显示脱敏后缀；环境服务商为只读。'}), toolbar, list, editor);
-    toolbar.append(button('新增服务商', () => editProvider(null)), button('刷新列表', () => state.run(load)));
+    const payments = element('section', {class: 'el-payments', hidden: true});
+    const paymentPanel = paymentManager(state, payments);
+    state.body.append(element('p', {class: 'el-hint', text: '服务商和 CDK 独立管理，无需选中账号。保存的 CDK 仅显示脱敏后缀；环境服务商为只读。'}), toolbar, list, editor, payments);
+    toolbar.append(button('新增服务商', () => editProvider(null)), button('刷新列表', () => state.run(load)), button('管理支付平台 / CDK', () => state.run(async () => { payments.hidden = !payments.hidden; if (!payments.hidden) await paymentPanel.load(); })));
     let providers = [];
     async function load() {
       const result = await request('/api/extract-link/providers'); if (!state.live()) return; providers = result.items || []; list.replaceChildren();

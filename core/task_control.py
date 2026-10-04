@@ -137,8 +137,44 @@ class _WorkItem:
         self.on_cancel = on_cancel
 
 
+class GatedCall:
+    """把任务函数和它的暂停/取消信号绑在一起提交。
+
+    ``ThreadPoolExecutor.submit`` 只接受 ``(fn, *args, **kwargs)``，而测试和业务
+    代码经常把 ``submit`` 换成自己的假执行器。把控制对象放在可调用包装里，提交
+    参数就保持原样，假执行器直接调用也能正常工作。
+    """
+
+    __slots__ = ("fn", "control", "on_cancel", "__name__", "__qualname__")
+
+    def __init__(self, fn, control: Control | None = None, on_cancel=None):
+        self.fn = fn
+        self.control = control
+        self.on_cancel = on_cancel
+        self.__name__ = getattr(fn, "__name__", "gated_task")
+        self.__qualname__ = getattr(fn, "__qualname__", self.__name__)
+
+    def __call__(self, *args, **kwargs):
+        return self.fn(*args, **kwargs)
+
+
+def gated(fn, control: Control | None = None, on_cancel=None) -> GatedCall:
+    """包装任务函数：线程池据此在开始前判断暂停/取消。"""
+    if isinstance(fn, GatedCall):
+        if control is None:
+            control = fn.control
+        if on_cancel is None:
+            on_cancel = fn.on_cancel
+        fn = fn.fn
+    return GatedCall(fn, control, on_cancel)
+
+
 class DynamicPool:
-    """线程数可在运行中调整的任务池，兼容 ``ThreadPoolExecutor.submit`` 调用形式。"""
+    """线程数可在运行中调整的任务池，兼容 ``ThreadPoolExecutor.submit`` 调用形式。
+
+    线程按需启动：注册池本身不创建线程，第一次提交任务或显式调整并发时才拉起，
+    因此“声明一个任务类型”不会在启动阶段占用系统资源。
+    """
 
     def __init__(self, name: str, workers: int = MIN_WORKERS, *, max_workers: int = MAX_WORKERS):
         self.name = str(name)
@@ -153,8 +189,6 @@ class DynamicPool:
         self._cancelled = 0
         self._rejected = 0
         self._generation = 0
-        with self._condition:
-            self._spawn_locked()
 
     # ---- 观测 --------------------------------------------------------
     @property
@@ -201,7 +235,13 @@ class DynamicPool:
 
         ``on_cancel`` 只在任务尚未开始就被取消时调用（服务用它释放占用并写回终态）；
         已经在运行的取消由工作线程在检查点抛出的 :class:`TaskCancelled` 处理。
+
+        ``fn`` 也可以是 :func:`gated` 包装过的可调用对象，此时控制信号从包装里取。
         """
+        if isinstance(fn, GatedCall):
+            control = fn.control if control is None else control
+            on_cancel = fn.on_cancel if on_cancel is None else on_cancel
+            fn = fn.fn
         item = _WorkItem(fn, args, kwargs, control, on_cancel)
         with self._condition:
             if self._closed:
@@ -213,12 +253,17 @@ class DynamicPool:
             return True
 
     def set_workers(self, workers: int) -> int:
-        """调整目标并发数并立即生效（调小只回收空闲线程）。"""
+        """调整目标并发数并立即生效（调大马上加线程，调小只回收空闲线程）。"""
         with self._condition:
-            if self._closed:
-                return self._target
-            self._target = min(clamp_workers(workers, self._target), self._max_workers)
+            self.configure_workers(workers)
             self._spawn_locked()
+            self._condition.notify_all()
+            return self._target
+
+    def configure_workers(self, workers: int) -> int:
+        """只记录目标并发数，不提前创建线程（注册任务类型时使用）。"""
+        with self._condition:
+            self._target = min(clamp_workers(workers, self._target), self._max_workers)
             self._condition.notify_all()
             return self._target
 
@@ -335,7 +380,7 @@ def register_pool(name: str, workers: int = MIN_WORKERS, *, max_workers: int = M
             pool = DynamicPool(str(name), workers, max_workers=max_workers)
             _POOLS[str(name)] = pool
         else:
-            pool.set_workers(workers)
+            pool.configure_workers(workers)
         return pool
 
 

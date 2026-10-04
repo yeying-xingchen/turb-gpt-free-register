@@ -3438,8 +3438,9 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         try:
             import config as _config_pkg
             _config_pkg.reload_all()
-            from core import twofa_service
-            twofa_service.apply_settings()
+            # 并发数改动要立刻作用到正在排队/运行的批次，而不是等下次提交。
+            from webui.task_routes import _apply_runtime_settings
+            _apply_runtime_settings()
         except Exception as exc:
             reload_ok = False
             reload_err = f"{type(exc).__name__}: {exc}"

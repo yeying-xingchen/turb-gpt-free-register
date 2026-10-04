@@ -49,7 +49,7 @@ NUXT_API_PROXY=http://127.0.0.1:8000 npm --prefix frontend run dev
 | `/mailboxes` | Outlook、API、IMAP、域名邮箱池及批量操作 |
 | `/codex` | 账号授权状态、重试/停止、凭证文件归档与下载 |
 | `/redemptions` | 兑换码、分组公开库存、交付记录 |
-| `/providers` | 提链供应商、CDK 管理及额度查询 |
+| `/providers` | 「提链供应商」与「支付平台」两个标签页：供应商/CDK 管理，以及四个支付平台的已保存 CDK 与额度查询 |
 | `/settings` | 根据后端字段元数据生成的完整配置表单，分组、搜索、保存与辅助操作 |
 | `/login` | 授权码登录与持久会话 |
 | `/redeem` | 无需管理员登录的公开兑换、结果恢复及凭据下载 |

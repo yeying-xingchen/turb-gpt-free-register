@@ -590,9 +590,9 @@ def enqueue_account_extract(*, account_id: int, email: str, access_token: str, t
         handle = task_control.control(KIND, account_id)
         on_cancel = lambda: _cancel_pending_extract(account_id)  # noqa: E731
         if provider["provider_type"] == "lumen":
-            future = _EXECUTOR.submit(_run_lumen_extract, account_id=account_id, email=email, access_token=access_token, link_type=lt, cdk=code, trigger=trigger, provider=provider, cdk_id=resolved_cdk_id, proxy_url=proxy_url, payment_amount=amount, control=handle, on_cancel=on_cancel)
+            future = _EXECUTOR.submit(task_control.gated(_run_lumen_extract, handle, on_cancel=on_cancel), account_id=account_id, email=email, access_token=access_token, link_type=lt, cdk=code, trigger=trigger, provider=provider, cdk_id=resolved_cdk_id, proxy_url=proxy_url, payment_amount=amount)
         else:
-            future = _EXECUTOR.submit(_legacy_run_extract, account_id=account_id, email=email, access_token=access_token, link_type=lt, cdk=code, trigger=trigger, metadata=meta, api_base=provider["api_base"], control=handle, on_cancel=on_cancel)
+            future = _EXECUTOR.submit(task_control.gated(_legacy_run_extract, handle, on_cancel=on_cancel), account_id=account_id, email=email, access_token=access_token, link_type=lt, cdk=code, trigger=trigger, metadata=meta, api_base=provider["api_base"])
         if future is False:
             raise RuntimeError("提链队列已关闭")
         return {"accepted": True, "busy": False, "future": future, "link_type": lt, **meta}
@@ -925,10 +925,13 @@ def enqueue_account_extract_bulk(*, accounts, trigger="manual_bulk", link_type=N
                     db.update_account_extract(a["account_id"], {"status": "failed", "error": "本地队列提交失败，批次未创建"})
                     _log_enqueue(a["account_id"], provider, lt, code, accepted=False, trigger=trigger,
                                  message="本地队列提交失败，批次未创建", cdk_id=resolved_cdk_id)
+                    task_control.release(KIND, a["account_id"])
                 raise
             finally:
                 if not scheduled:
                     _QUEUE_SLOTS.release()
+                    for a in claimed:
+                        task_control.release(KIND, a["account_id"])
     out["ok"] = True
     for name in ("started", "busy", "failed", "skipped"):
         out[name + "_count"] = len(out[name])

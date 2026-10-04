@@ -263,14 +263,16 @@ def enqueue_account_totp_setup(
     _append_log(email, f"[2FA] 已入队 account_id={account_id} trigger={trigger}", clear=True)
     try:
         accepted = _EXECUTOR.submit(
-            _run_twofa,
+            task_control.gated(
+                _run_twofa,
+                task_control.control(KIND, account_id),
+                on_cancel=lambda: _cancel_pending_twofa(account_id),
+            ),
             account_id=account_id,
             email=email,
             access_token=access_token,
             proxy=proxy,
             trigger=str(trigger or "manual"),
-            control=task_control.control(KIND, account_id),
-            on_cancel=lambda: _cancel_pending_twofa(account_id),
         )
         if accepted is False:
             raise RuntimeError("2FA 队列已关闭")

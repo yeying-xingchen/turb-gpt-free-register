@@ -307,13 +307,11 @@ def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "m
     handle = task_control.control(KIND, account_id)
     try:
         accepted = _EXECUTOR.submit(
-            _run_live_check,
+            task_control.gated(_run_live_check, handle, on_cancel=lambda: _cancel_pending_live_check(account_id)),
             account_id=account_id,
             email=email,
             proxy=proxy,
             trigger=str(trigger or "manual"),
-            control=handle,
-            on_cancel=lambda: _cancel_pending_live_check(account_id),
         )
         if accepted is False:
             raise RuntimeError("查活队列已关闭")

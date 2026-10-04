@@ -95,13 +95,14 @@ EMAIL_SOURCE = "outlook,generic_api,imap"
 - Roxy/Cloak 浏览器注册完成后统计整个浏览器会话的上传、下载和总流量，任务列表与账号扩展信息均会保存结果；Browser Use/Skyvern 云端浏览器不启用本地流量监听、资源拦截或 JS 覆盖率采集。
 - 配置页支持热加载，保存后无需重启。
 - 提链服务商支持 UPI-GIT5：单账号与多账号合并批次、CDK 额度查询、进度刷新、取消和二维码；使用前需填写上游可连接的入口代理，详见 [UPI-GIT5 提链接入](docs/upi_git5_integration.md)。
-- 账号页支持选择已提炼的 UPI 账号并「提交支付」，支付 CDK 由用户当次输入；默认 Astra Scan Workbench 只发送链接和邮箱，masi 与 UPI OrderHub 自动发送所选账号的完整 AT；OrderHub 支持 API Key 或数字雇主账号登录。支持逐条结果、订单查询和幂等恢复，详见 [支付接入说明](docs/payment_integration.md)。
+- 账号页支持选择已提炼的 UPI 账号并「提交支付」；支付凭据可以保存后直接选用，也可以当次输入临时 CDK。默认 Astra Scan Workbench 只发送链接和邮箱，masi、UPI OrderHub 与 seashore 发布者 API 自动发送所选账号的完整 AT；OrderHub 支持 API Key 或数字雇主账号登录，seashore 的 `PBK-` CDK 直接作为 `Authorization: Bearer` 凭据。支持逐条结果、订单查询和幂等恢复，详见 [支付接入说明](docs/payment_integration.md)。
+- 「服务与凭据」页统一管理提链供应商与支付平台：新增/编辑/停用/删除平台，保存各自的 CDK（列表只显示掩码，明文仅服务端可读），并可一键查询额度。已保存的支付 CDK 覆盖 Astra、masi、OrderHub 和 seashore，提交支付与开通 Plus 时可直接选择，无需反复粘贴；旧版界面在「管理提链服务商 / CDK」中点「管理支付平台 / CDK」。详见 [支付接入说明](docs/payment_integration.md)。
 - 管理员可在账号页勾选账号并点击「开通 Plus」，选择提链和支付凭据后，后台自动完成资格查询、UPI 提链、支付及真实套餐核验；支持进度展示、重复点击保护和中断后核对原任务。当前适用于 free 且可 Plus 试用的账号，详见 [开通与支付说明](docs/payment_integration.md)。
 - 支持 CDK 兑换：管理员在「兑换管理」生成绑定分组、带数量/有效期的 CDK，用户访问 `/redeem` 输入 CDK 和本次兑换数量（默认 1 个，支持分次领取），成功后先在页面查看邮箱、密码和 2FA 密钥，再手动下载 TXT。页面保留当前会话内各批次结果；同一账号只会发放一次，数量无效、超出剩余额度或库存不足时不会扣减 CDK。`POST /api/redeem` 支持整数 `quantity`，省略时兼容旧行为，兑换全部剩余额度。
 
 ### 数据存储
 
-- 账号、邮箱库、任务、Codex 凭证及兑换数据运行时默认存储在项目根目录 `turb.sqlite3`（可通过进程环境变量 `TURB_DATA_DIR` 指定目录），按业务拆分为 `accounts`、`email_pool`、`registration_jobs`、`codex_accounts`、`codex_agent_accounts`、`redeem_codes`、`redeem_claims` 和 `redeem_deliveries` 等表。
+- 账号、邮箱库、任务、Codex 凭证及兑换数据运行时默认存储在项目根目录 `turb.sqlite3`（可通过进程环境变量 `TURB_DATA_DIR` 指定目录），按业务拆分为 `accounts`、`email_pool`、`registration_jobs`、`codex_accounts`、`codex_agent_accounts`、`redeem_codes`、`redeem_claims` 和 `redeem_deliveries` 等表；提链与支付凭据分别存放在 `extract_provider_cdks` 和 `payment_cdks`。
 - 同一数据库的 CLI/WebUI 使用进程运行锁；应用构造不再恢复任务，启动入口持锁后执行恢复。任务进度、套餐/查活/Codex 状态和邮箱领取等热点使用行级事务。
 - 兑换领取与交付快照在同一事务提交；带原 `request_id` 的重试可恢复原批次，下载固定 10 分钟内可重复读取。启动、隔离测试及分批恢复协议详见 [运行与交付说明](docs/runtime_reliability.md)。
 - 数据库启用 WAL、超时等待和常用字段索引，WebUI 的账号、套餐状态、邮箱库、Codex 和任务分页直接执行 SQLite `COUNT(*) + LIMIT/OFFSET`，不再先读取全量数据后由 Python 切片。
@@ -802,7 +803,7 @@ WebUI 配置页保存后会调用热加载；Roxy、Codex、邮箱、代理、�
 
 | 路径 | 内容 |
 |---|---|
-| `turb.sqlite3` | 账号、邮箱库、任务、Codex 和 Agent 凭证全部数据 |
+| `turb.sqlite3` | 账号、邮箱库、任务、Codex 和 Agent 凭证全部数据；含已保存的提链 CDK 与支付 CDK（明文，等同凭据） |
 | 旧 JSON/TXT/Codex 文件 | 仅用于首次迁移，运行期间不再读写 |
 | `注册日志/` | 注册任务日志、Codex 补跑日志 |
 | `注册日志/scan-payment-<id>.log` | 「提交支付」完整日志：逐步动作、目标地址、请求头、请求体、响应、状态码、耗时、任务 ID 与错误；默认明文记录支付 CDK、OrderHub API Key 和账号 AT |

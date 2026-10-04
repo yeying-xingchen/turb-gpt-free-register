@@ -33,6 +33,7 @@ let JOB_STATUS_COUNTS = {};
 let jobsRenderSignature = '';
 const JOB_SELECTED = new Set();
 let TASK_CENTER_JOBS = [];
+let TASK_CENTER_POOLS = [];
 let TASK_CENTER_HISTORY = [];
 let TASK_CENTER_HISTORY_TOTAL = 0;
 let taskCenterLoading = false;
@@ -875,12 +876,91 @@ async function refreshTaskCenterHistory() {
   renderTaskCenterHistory();
 }
 
+function taskCenterPoolByName(name) {
+  return TASK_CENTER_POOLS.find(pool => pool.name === name) || null;
+}
+
+function renderTaskCenterPools() {
+  const select = document.getElementById('taskCenterPoolSelect');
+  const input = document.getElementById('taskCenterPoolWorkers');
+  const hint = document.getElementById('taskCenterPoolHint');
+  const applyBtn = document.getElementById('btnApplyTaskCenterConcurrency');
+  if (!select || !input) return;
+  const previous = select.value;
+  select.innerHTML = TASK_CENTER_POOLS.map(pool =>
+    `<option value="${esc(pool.name)}">${esc(pool.label || pool.name)}（${Number(pool.workers) || 1}）</option>`).join('');
+  const names = TASK_CENTER_POOLS.map(pool => pool.name);
+  select.value = names.includes(previous) ? previous : (names[0] || '');
+  const current = taskCenterPoolByName(select.value);
+  // 自动刷新不能覆盖用户正在输入、还没点“应用并发”的数字。
+  const editing = typeof document.activeElement !== 'undefined' && document.activeElement === input;
+  if (current && !editing) {
+    input.max = String(Number(current.max_workers) || 16);
+    input.value = String(Number(current.workers) || 1);
+  }
+  if (hint) {
+    hint.textContent = current
+      ? `${Number(current.running) || 0} 运行 · ${Number(current.pending) || 0} 排队 · ${Number(current.threads) || 0} 线程`
+      : '';
+  }
+  if (applyBtn) applyBtn.disabled = !current;
+}
+
+function taskCenterPoolWorkersValue() {
+  const input = document.getElementById('taskCenterPoolWorkers');
+  const value = Number(input?.value);
+  return Number.isInteger(value) ? value : NaN;
+}
+
+async function applyTaskCenterConcurrency(button) {
+  const select = document.getElementById('taskCenterPoolSelect');
+  const current = taskCenterPoolByName(select?.value);
+  const workers = taskCenterPoolWorkersValue();
+  const max = Number(current?.max_workers) || 16;
+  if (!current || !Number.isInteger(workers) || workers < 1 || workers > max) {
+    showToast(`并发数必须是 1-${max} 的整数`);
+    return;
+  }
+  if (workers === Number(current.workers)) {
+    showToast('并发数没有变化');
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/tasks/concurrency', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_type: current.name, workers }),
+    });
+    TASK_CENTER_POOLS = result.pools || TASK_CENTER_POOLS;
+    showToast(result.warning || result.message || `并发已调整为 ${workers}`);
+    renderTaskCenterPools();
+    refreshTaskCenter();
+  } catch (error) {
+    showToast(`修改并发失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+const taskCenterPoolSelect = document.getElementById('taskCenterPoolSelect');
+if (taskCenterPoolSelect) {
+  taskCenterPoolSelect.addEventListener('change', renderTaskCenterPools);
+}
+document.getElementById('btnApplyTaskCenterConcurrency')?.addEventListener('click', (event) => {
+  applyTaskCenterConcurrency(event.currentTarget);
+});
+document.getElementById('taskCenterPoolWorkers')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') applyTaskCenterConcurrency(document.getElementById('btnApplyTaskCenterConcurrency'));
+});
+
 function refreshTaskCenterActive() {
   if (taskCenterActiveRequest) return taskCenterActiveRequest;
   taskCenterActiveRequest = (async () => {
     try {
       const result = await api('/api/tasks/active');
       TASK_CENTER_JOBS = result.items || [];
+      TASK_CENTER_POOLS = Array.isArray(result.pools) ? result.pools : [];
       updateTaskCenterSummary(result.status_counts || {});
       const cancelButton = document.getElementById('btnCancelPendingTaskCenter');
       if (cancelButton) {
@@ -888,6 +968,7 @@ function refreshTaskCenterActive() {
         cancelButton.textContent = `取消排队注册任务（${pendingCount}）`;
         cancelButton.disabled = pendingCount === 0;
       }
+      renderTaskCenterPools();
       return result;
     } finally {
       taskCenterActiveRequest = null;
@@ -925,7 +1006,11 @@ async function refreshTaskCenter() {
 async function handleTaskCenterAction(taskId, action, button) {
   const job = TASK_CENTER_JOBS.find(item => String(item.id) === String(taskId));
   if (!job || !['pause', 'resume', 'cancel'].includes(action) || job.capabilities?.[action] !== true) return;
-  if (action === 'cancel' && !confirm(`确定取消注册任务 #${taskId}？\n\n运行中的任务会在当前检查点停止，排队任务会直接取消。`)) return;
+  if (action === 'cancel') {
+    const label = taskCenterLabel(job);
+    const extra = job.job_id == null ? '\n\n已提交到远端的提链/支付结果不会回滚，请到对应页面核对。' : '';
+    if (!confirm(`确定取消${label} #${taskId}？\n\n运行中的任务会在当前检查点停止，排队任务会直接取消。${extra}`)) return;
+  }
   if (button) button.disabled = true;
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/${action}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });

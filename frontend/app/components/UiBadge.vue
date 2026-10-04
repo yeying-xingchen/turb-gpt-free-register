@@ -15,10 +15,17 @@ const labels: Record<string, string> = {
   pending: "等待中",
   queued: "排队中",
   running: "运行中",
+  processing: "处理中",
+  verifying: "核验中",
+  submitting: "提交中",
+  submission_pending: "提交结果待确认",
   success: "成功",
   succeeded: "成功",
   completed: "已完成",
   failed: "失败",
+  rejected: "已拒绝",
+  not_activated: "未成功激活",
+  timeout: "已超时",
   error: "异常",
   cancelled: "已取消",
   canceled: "已取消",
@@ -54,10 +61,22 @@ const kind = computed(() => {
       "unknown",
       "awaiting_blik",
       "interrupted",
+      "submission_pending",
     ].includes(value)
   )
     return "warning";
-  if (["failed", "error", "revoked", "expired", "deactivated"].includes(value))
+  if (
+    [
+      "failed",
+      "error",
+      "revoked",
+      "expired",
+      "deactivated",
+      "rejected",
+      "not_activated",
+      "timeout",
+    ].includes(value)
+  )
     return "danger";
   if (
     [
@@ -74,9 +93,18 @@ const kind = computed(() => {
   )
     return "success";
   if (
-    ["running", "pending", "queued", "retrying", "stopping", "in_use", "redeemed"].includes(
-      value,
-    )
+    [
+      "running",
+      "pending",
+      "queued",
+      "retrying",
+      "stopping",
+      "in_use",
+      "redeemed",
+      "processing",
+      "verifying",
+      "submitting",
+    ].includes(value)
   )
     return "info";
   return "neutral";

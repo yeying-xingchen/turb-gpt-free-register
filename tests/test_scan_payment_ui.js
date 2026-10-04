@@ -15,6 +15,7 @@ function harness(respond, accounts = []) {
       Object.assign(this, {tagName: tag, children: [], attrs: {}, events: {}, value: '', disabled: false, hidden: false, required: false, _text: '', parent: null});
     }
     append(...nodes) { for (const node of nodes) { node.parent = this; this.children.push(node); } }
+    replaceChildren(...nodes) { for (const child of this.children) child.parent = null; this.children = []; this._text = ''; this.append(...nodes); }
     set textContent(value) { this._text = String(value); this.children = []; }
     get textContent() { return this._text + this.children.map(node => node.textContent).join(' '); }
     setAttribute(key, value) { this.attrs[key] = String(value); if (key === 'required') this.required = true; }
@@ -23,6 +24,7 @@ function harness(respond, accounts = []) {
     emit(event) { for (const callback of this.events[event] || []) callback({preventDefault() {}, target: this, currentTarget: this}); }
     click() { if (!this.disabled) this.emit('click'); }
     focus() { document.activeElement = this; }
+    scrollIntoView() {}
     get isConnected() { return this === body || !!this.parent?.isConnected; }
     get parentElement() { return this.parent; }
     remove() { if (this.parent) this.parent.children = this.parent.children.filter(node => node !== this); this.parent = null; }
@@ -180,6 +182,78 @@ test('OrderHub login clears password; session submit and polls omit CDK and use 
   ui.fire(5000); await settle();
   assert.equal(ui.calls[3].body.auth_mode, 'session'); assert.equal('cdk' in ui.calls[3].body, false); assert.equal('provider' in ui.calls[3].body, false);
   assert.equal(ui.timers.size, 0); ui.dialog.close();
+});
+
+
+test('seashore publisher platform submits its own CDK and never claims safe retry', async () => {
+  const ui = harness(call => response(call.body.account_ids[0], 'unknown', 'unknown', {provider: 'seashore'}));
+  await ui.open('submitPayment', [7]);
+  assert.ok(ui.select('支付服务商', 'seashore'));
+  ui.submit('PBK-04A0-3254-AEB7-9C31'); await settle();
+  assert.equal(ui.calls[0].body.provider, 'seashore');
+  assert.equal(ui.calls[0].body.cdk, 'PBK-04A0-3254-AEB7-9C31');
+  assert.equal('auth_mode' in ui.calls[0].body, false); // 非 OrderHub 由服务端默认 key 模式
+  assert.equal(ui.button('使用原请求安全重试').hidden, true);
+  ui.dialog.close();
+});
+
+test('saved payment CDK is loaded on demand and submitted as cdk_id without the raw secret', async () => {
+  const catalog = {data: {ok: true, items: [{provider_type: 'seashore', enabled: true, cdks: [
+    {id: 9, enabled: true, masked: 'PBK-…9C31', memo: '主号'},
+    {id: 10, enabled: false, masked: 'PBK-…0000', memo: '停用'},
+  ]}]}};
+  const ui = harness(call => call.url === '/api/payment-providers' ? catalog : response(call.body.account_ids[0], 'created', 'queued', {provider: 'seashore', task_id: 'ORD-1A2B3C4D'}));
+  await ui.open('submitPayment', [7]);
+  assert.equal(ui.calls.length, 0);
+  ui.select('支付服务商', 'seashore');
+  ui.select('支付凭据来源', 'saved'); await settle(); await settle();
+  assert.deepEqual(ui.calls.map(call => call.url), ['/api/payment-providers']);
+  const saved = ui.dialog.querySelectorAll('select').find(node => node.attrs['aria-label'] === '已保存的支付 CDK');
+  assert.deepEqual(saved.children.map(option => option.value), ['9']);
+  ui.submit(null); await settle();
+  assert.equal(ui.calls[1].body.provider, 'seashore');
+  assert.equal(ui.calls[1].body.cdk_id, 9);
+  assert.equal('cdk' in ui.calls[1].body, false);
+  assert.ok(!JSON.stringify(ui.calls[1]).includes('PBK-04A0'));
+  ui.dialog.close();
+});
+
+test('saved payment CDK list without usable entries keeps the temporary credential path', async () => {
+  const ui = harness(call => call.url === '/api/payment-providers' ? {data: {ok: true, items: [{provider_type: 'masi', cdks: []}]}} : response(call.body.account_ids[0], 'created', 'queued', {provider: 'masi'}));
+  await ui.open('submitPayment', [7]);
+  ui.select('支付服务商', 'masi');
+  ui.select('支付凭据来源', 'saved'); await settle(); await settle();
+  ui.submit(null); await settle();
+  assert.equal(ui.calls.filter(call => call.url.endsWith('/scan-requests')).length, 0);
+  assert.match(ui.text, /还没有已保存的 CDK/);
+  ui.select('支付凭据来源', 'raw');
+  ui.submit('masi-secret'); await settle();
+  const posted = ui.calls.find(call => call.url.endsWith('/scan-requests'));
+  assert.equal(posted.body.cdk, 'masi-secret');
+  ui.dialog.close();
+});
+
+
+test('legacy manager lists masked payment CDKs and saves a new one without echoing it', async () => {
+  const providers = {data: {ok: true, items: [{id: 3, name: 'seashore 发布者 API', provider_type: 'seashore', enabled: true, is_default: false, effective_api_base: 'https://seashore.lol/api/publisher', note: '', cdks: [{id: 9, enabled: true, masked: 'PBK-…9C31', memo: '主号'}]}]}};
+  const ui = harness(call => call.url === '/api/payment-providers' && call.options.method === 'GET'
+    ? providers
+    : {data: {ok: true, item: {id: 11, enabled: true, masked: 'PBK-…4444', memo: ''}}});
+  await ui.open('manage'); await settle();
+  ui.button('管理支付平台 / CDK').click(); await settle();
+  assert.match(ui.text, /seashore 发布者 API/);
+  assert.match(ui.text, /1 条 CDK/);
+  ui.button('编辑 / 管理 CDK').click(); await settle();
+  assert.match(ui.text, /PBK-…9C31/);
+  const addForm = ui.dialog.querySelectorAll('form').find(node => node.textContent.includes('添加支付 CDK'));
+  const raw = addForm.querySelectorAll('input').find(input => input.attrs.type === 'password');
+  raw.value = 'PBK-1111-2222-3333-4444';
+  addForm.emit('submit'); await settle(); await settle();
+  const posted = ui.calls.find(call => call.url === '/api/payment-providers/3/cdks');
+  assert.equal(posted.options.method, 'POST');
+  assert.equal(posted.body.cdk, 'PBK-1111-2222-3333-4444');
+  assert.ok(!ui.text.includes('PBK-1111-2222-3333-4444'));
+  ui.dialog.close();
 });
 
 

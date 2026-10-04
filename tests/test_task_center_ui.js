@@ -64,6 +64,8 @@ function harness(respond) {
     'taskCenterLabel', 'taskCenterStatus', 'taskCenterStatusPill', 'pendingRegistrationTaskCount',
     'taskCenterProgress', 'updateTaskCenterSummary', 'renderTaskCenter', 'renderTaskCenterHistory',
     'captureTaskOtpInputs', 'restoreTaskOtpInputs',
+    'taskCenterPoolByName', 'renderTaskCenterPools', 'taskCenterPoolWorkersValue',
+    'applyTaskCenterConcurrency',
     'taskCenterHistoryGo', 'refreshTaskCenterHistory', 'refreshTaskCenterActive', 'refreshTaskCenterBadge',
     'refreshTaskCenter', 'refreshJobs', 'handleTaskCenterAction', 'submitTaskManualOtp', 'cancelAllPendingJobs',
     'closeLogModal', 'openLog', 'pollLog', 'renderTaskLogDetails', 'openTaskLog', 'pollTaskLog', 'isTabVisible',
@@ -368,13 +370,70 @@ test('task log URLs encode IDs and failures display as text', async () => {
   assert.equal(ui.node('logContent').textContent, '日志加载失败：<script>offline</script>');
 });
 
-test('task-center copy documents all types and registration-only cancellation', () => {
+test('task-center copy documents all types, per-task controls and concurrency', () => {
   const taskCenter = template.slice(template.indexOf('id="tab-task-center"'), template.indexOf('id="tab-accounts"'));
   for (const label of Object.values(labels)) assert.ok(taskCenter.includes(label), label);
-  assert.match(taskCenter, /账号任务仅支持查看进度与日志/);
+  assert.match(taskCenter, /每类任务按实际能力显示暂停、恢复和取消/);
   assert.match(taskCenter, /id="btnCancelPendingTaskCenter"[^>]*disabled>取消排队注册任务（0）/);
+  assert.match(taskCenter, /id="taskCenterPoolSelect"/);
+  assert.match(taskCenter, /id="taskCenterPoolWorkers"/);
+  assert.match(taskCenter, /id="btnApplyTaskCenterConcurrency"/);
   assert.match(template, /id="logTaskDetails"/);
   const legacy = fs.readFileSync(path.join(root, 'webui/templates/index_legacy.html'), 'utf8');
   assert.match(legacy, /id="btnCancelPending"[^>]*>取消排队注册任务/);
   assert.doesNotMatch(taskCenter, /取消全部排队|取消所有排队/);
+});
+
+test('concurrency panel lists pools and applies a new worker count', async () => {
+  const pools = [
+    {name: 'registration', label: '账号注册', workers: 4, max_workers: 16, running: 1, pending: 2, threads: 4},
+    {name: 'live_check', label: '账号查活', workers: 3, max_workers: 16, running: 0, pending: 0, threads: 3},
+  ];
+  const ui = harness(() => ({pools, items: [], status_counts: {active: 3}}));
+  const c = ui.context;
+  await c.refreshTaskCenterActive();
+  assert.match(ui.node('taskCenterPoolSelect').innerHTML, /账号注册/);
+  assert.match(ui.node('taskCenterPoolSelect').innerHTML, /账号查活/);
+  assert.equal(ui.node('taskCenterPoolWorkers').value, '4');
+  assert.equal(ui.node('taskCenterPoolWorkers').max, '16');
+  assert.match(ui.node('taskCenterPoolHint').textContent, /1 运行 · 2 排队/);
+
+  ui.node('taskCenterPoolSelect').value = 'live_check';
+  c.renderTaskCenterPools();
+  assert.equal(ui.node('taskCenterPoolWorkers').value, '3');
+
+  ui.node('taskCenterPoolWorkers').value = '6';
+  await c.applyTaskCenterConcurrency(ui.node('btnApplyTaskCenterConcurrency'));
+  const call = ui.calls.find(item => item.url === '/api/tasks/concurrency');
+  assert.equal(call.options.method, 'POST');
+  assert.deepEqual(JSON.parse(call.options.body), {job_type: 'live_check', workers: 6});
+  assert.match(ui.toasts[0], /并发/);
+});
+
+test('concurrency panel rejects out-of-range worker counts before calling the API', async () => {
+  const pools = [{name: 'live_check', label: '账号查活', workers: 3, max_workers: 16, running: 0, pending: 0, threads: 3}];
+  const ui = harness(() => ({pools, items: [], status_counts: {}}));
+  const c = ui.context;
+  await c.refreshTaskCenterActive();
+  ui.node('taskCenterPoolWorkers').value = '99';
+  await c.applyTaskCenterConcurrency(ui.node('btnApplyTaskCenterConcurrency'));
+  assert.equal(ui.calls.some(item => item.url === '/api/tasks/concurrency'), false);
+  assert.match(ui.toasts[0], /1-16/);
+});
+
+test('account task rows keep only server-advertised controls', () => {
+  const ui = harness(), c = ui.context;
+  c.TASK_CENTER_JOBS = [
+    task('account-1', 'live_check', {status: 'running', capabilities: {pause: true, resume: false, cancel: true}}),
+    task('account-2', 'plan_check', {status: 'paused', capabilities: {pause: false, resume: true, cancel: true}}),
+    task('account-3', 'extract_link', {status: 'stopping', capabilities: {pause: false, resume: false, cancel: false}}),
+  ];
+  c.renderTaskCenter();
+  const html = ui.node('taskCenterBody').innerHTML;
+  assert.match(html, /data-task-pause="account-1"/);
+  assert.match(html, /data-task-cancel="account-1"/);
+  assert.match(html, /data-task-resume="account-2"/);
+  assert.match(html, /取消中…/);
+  for (const action of ['pause', 'resume', 'cancel'])
+    assert.ok(!html.includes(`data-task-${action}="account-3"`), action);
 });

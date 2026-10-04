@@ -227,7 +227,7 @@
     <div class="task-center-heading">
       <div>
         <h1 class="register-title">任务中心</h1>
-        <p class="task-center-subtitle">集中查看账号注册、Codex 补跑、开通 Plus、查活、查套餐、提链、扫码支付、开启 2FA、换绑邮箱和 Codex 授权的进度与历史。注册任务按状态支持暂停、恢复和取消；账号任务仅支持查看进度与日志。</p>
+        <p class="task-center-subtitle">集中查看账号注册、Codex 补跑、开通 Plus、查活、查套餐、提链、扫码支付、开启 2FA、换绑邮箱和 Codex 授权的进度与历史。每类任务按实际能力显示暂停、恢复和取消，运行中的批次还能直接调整后台并发；已提交到远端的支付或提链结果不会回滚，请到对应页面核对。</p>
       </div>
       <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRefreshTaskCenter">刷新任务</button>
     </div>
@@ -240,6 +240,16 @@
     <section class="jobs-panel-v2 task-center-panel" aria-label="进行中任务列表">
       <div class="jobs-toolbar-v2 task-center-toolbar">
         <div class="task-center-toolbar-title">进行中任务 <span id="taskCenterLastUpdated" class="muted">自动刷新中</span></div>
+        <div class="task-center-concurrency" aria-label="后台并发设置">
+          <label class="task-center-concurrency-field" title="选择要调整后台并发的任务类型">后台并发
+            <select id="taskCenterPoolSelect" aria-label="任务类型"></select>
+          </label>
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--icon" id="btnTaskCenterPoolMinus" title="并发减一" onclick="(function(){const i=document.getElementById('taskCenterPoolWorkers');if(!i)return;const v=Math.max(1,(Number(i.value)||1)-1);i.value=String(v);})()">−</button>
+          <input type="number" id="taskCenterPoolWorkers" class="task-center-concurrency-input" min="1" max="16" step="1" aria-label="并发线程数">
+          <button type="button" class="jobs-tb-btn jobs-tb-btn--icon" id="btnTaskCenterPoolPlus" title="并发加一" onclick="(function(){const i=document.getElementById('taskCenterPoolWorkers');if(!i)return;const max=Number(i.max)||16;const v=Math.min(max,(Number(i.value)||1)+1);i.value=String(v);})()">＋</button>
+          <button type="button" class="jobs-tb-btn" id="btnApplyTaskCenterConcurrency" title="立即对排队和运行中的任务生效，并写回配置">应用并发</button>
+          <span class="muted" id="taskCenterPoolHint"></span>
+        </div>
         <button type="button" class="jobs-tb-btn" id="btnCancelPendingTaskCenter" title="仅取消排队注册任务（含 Codex 补跑），不影响运行中任务或账号任务（含支付）" disabled>取消排队注册任务（0）</button>
       </div>
       <div id="taskCenterHint"></div>

@@ -134,6 +134,9 @@ class SeashoreServiceTests(unittest.TestCase):
         self.assertNotIn("not_activated", store._FALLBACK_TERMINAL)
         record = {"status": "not_activated", "task": {"status": "not_activated"}}
         self.assertFalse(store.can_fallback(record))
+        # 任务中心把「未成功激活」归到失败，而不是待核实。
+        from core import task_center_store
+        self.assertEqual(task_center_store._NORMALIZED[task_center_store._source("not_activated")], "failed")
 
     def test_verifying_state_blocks_fallback_until_settled(self):
         verifying = self.response("verifying", provider_status="submitted")

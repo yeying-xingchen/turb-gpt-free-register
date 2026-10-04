@@ -5,16 +5,29 @@ import hashlib
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from core import db, extract_link_service as extraction, plan_check_service
+from config import scan_api as scan_cfg
+from core import db, extract_link_service as extraction, plan_check_service, task_control
 from core import plus_activation_store as store, scan_api_service as payments
 from core import scan_payment_store as payment_store
 from core.scan_api_client import _safe_message
 from core.upi_git5_extract import entry_proxies
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="plus-activation")
+KIND = "plus_activation"
+_MAX_WORKERS = task_control.MAX_WORKERS
+
+
+def _workers_setting() -> int:
+    try:
+        value = int(getattr(scan_cfg, "PLUS_ACTIVATION_WORKERS", 4) or 4)
+    except (TypeError, ValueError, OverflowError):
+        value = 4
+    return max(1, min(_MAX_WORKERS, value))
+
+
+_WORKERS = _workers_setting()
+_EXECUTOR = task_control.register_pool(KIND, _WORKERS, max_workers=_MAX_WORKERS)
 _QUEUE_SLOTS = threading.BoundedSemaphore(500)
 _POLL_INTERVAL = 5
 _EXTRACT_TIMEOUT = 1800
@@ -136,14 +149,49 @@ def enqueue_accounts(*, account_ids, extraction_options, payment_options, auth_s
                 _QUEUE_SLOTS.release()
                 continue
             run_id = account["plus_activation_run_id"]
-            _EXECUTOR.submit(_run, account_id, run_id, extraction_candidates, payment_candidates)
+            accepted = _EXECUTOR.submit(
+                task_control.gated(
+                    _run,
+                    task_control.control(KIND, account_id),
+                    on_cancel=lambda: _cancel_pending_activation(account_id, run_id),
+                ),
+                account_id, run_id, extraction_candidates, payment_candidates,
+            )
+            if accepted is False:
+                raise RuntimeError("Plus 开通队列已关闭")
             result["started"].append(store.public_view(account))
         except Exception:
+            task_control.release(KIND, account_id)
             _QUEUE_SLOTS.release()
             if claimed:
                 store.update(account_id, account["plus_activation_run_id"], "failed", "本地开通队列提交失败，请重试")
             result["failed"].append({"id": account_id, "error": "本地开通队列提交失败，请重试"})
     return {"ok": True, **result, **{key + "_count": len(items) for key, items in result.items()}}
+
+
+def _cancel_pending_activation(account_id: int, run_id: str) -> None:
+    """排队中的开通任务被取消：释放队列槽位并写回取消状态。"""
+    try:
+        _QUEUE_SLOTS.release()
+    except ValueError:
+        pass
+    try:
+        store.update(int(account_id), run_id, "cancelled", "用户取消开通 Plus（未提交支付）")
+    except Exception:
+        pass
+    task_control.release(KIND, account_id)
+
+
+def apply_settings() -> dict:
+    """热加载开通 Plus 并发数并立即对运行中的批次生效。"""
+    global _WORKERS
+    _WORKERS = _workers_setting()
+    _EXECUTOR.set_workers(_WORKERS)
+    return {"workers": _WORKERS}
+
+
+def queue_settings() -> dict:
+    return {"workers": _WORKERS}
 
 
 def _account(account_id, run_id):
@@ -162,6 +210,7 @@ def _progress(account_id, run_id, status, message, step=None, checkout_key=None,
 
 
 def _check_plan(account_id, run_id):
+    task_control.checkpoint(KIND, account_id)
     account = _account(account_id, run_id)
     token = str(account.get("access_token") or "").strip()
     if not token:
@@ -183,12 +232,13 @@ def _complete(account_id, run_id, message):
 def _verify(account_id, run_id):
     _progress(account_id, run_id, "verifying", "支付已完成，正在核验 Plus 套餐", "verifying")
     for attempt in range(_VERIFY_ATTEMPTS):
+        task_control.checkpoint(KIND, account_id)
         result = _check_plan(account_id, run_id)
         if result.get("ok") and _is_plus(result):
             _complete(account_id, run_id, "Plus 已开通，套餐核验成功")
             return
         if attempt + 1 < _VERIFY_ATTEMPTS:
-            time.sleep(_VERIFY_INTERVAL)
+            task_control.sleep(KIND, account_id, _VERIFY_INTERVAL)
     raise ActivationStop("支付已完成，暂未查到 Plus 生效；稍后点击开通 Plus 继续核验，不会再次支付")
 
 
@@ -305,6 +355,7 @@ def _wait_payment(account_id, run_id, payment, record, label=""):
     _progress(account_id, run_id, "paying", label + "正在等待支付完成", "paying")
     deadline = time.monotonic() + _PAYMENT_TIMEOUT
     while True:
+        task_control.checkpoint(KIND, account_id)
         _account(account_id, run_id)
         status = record["status"]
         if status in _PAID:
@@ -320,7 +371,7 @@ def _wait_payment(account_id, run_id, payment, record, label=""):
             raise ActivationStop(result["failed"][0].get("error") or "支付查询失败，请核对原任务")
         record = payment_store.latest(account_id)
         if record["status"] not in payment_store.TERMINAL:
-            time.sleep(_POLL_INTERVAL)
+            task_control.sleep(KIND, account_id, _POLL_INTERVAL)
 
 
 def _upstream_payment(account_id, run_id, account, options, code):
@@ -414,6 +465,7 @@ def _pay_candidates(account_id, run_id, candidates, record=None):
         raise ActivationStop("支付候选已用尽，请核对失败原因后调整候选配置", "failed")
     for index in range(start, len(candidates)):
         payment = candidates[index]
+        task_control.checkpoint(KIND, account_id)
         label = f"支付方案 {index + 1}/{len(candidates)}：" if len(candidates) > 1 else ""
         try:
             if record is None:
@@ -450,6 +502,7 @@ def _run(account_id, run_id, extraction_candidates, payment_candidates):
     for options, code in extraction_candidates:
         secrets.extend([code, options.get("proxy_url"), *(options.get("entry_proxies") or [])])
     try:
+        task_control.checkpoint(KIND, account_id)
         account = _account(account_id, run_id)
         secrets.append(account.get("access_token"))
         options, code = extraction_candidates[_extract_start(account, extraction_candidates)]
@@ -485,7 +538,10 @@ def _run(account_id, run_id, extraction_candidates, payment_candidates):
         _verify(account_id, run_id)
     except ActivationStop as exc:
         store.update(account_id, run_id, exc.status, _safe_message(str(exc), secrets))
+    except task_control.TaskCancelled:
+        store.update(account_id, run_id, "cancelled", "用户取消开通 Plus；已提交的提链或支付结果请在对应页面核对")
     except Exception:
         store.update(account_id, run_id, "needs_attention", "开通流程中断，请核对原提链或支付任务后继续")
     finally:
         _QUEUE_SLOTS.release()
+        task_control.release(KIND, account_id)
