@@ -79,6 +79,7 @@ class UiAssetTests(unittest.TestCase):
         self.assertRegex(html, r'<link rel="stylesheet" href="/assets/console.css\?v=[a-f0-9]+">')
         self.assertNotIn('async function loadAccounts()', html)
         self.assertIn('accountsBodyV2', html)
+        self.assertIn('id="showRedeemedAccountsV2"', html)
         self.assertIn('data-extract-manage', html)
         self.assertRegex(html, r'<link rel="stylesheet" href="/assets/extract-links.css\?v=[a-f0-9]+">')
 

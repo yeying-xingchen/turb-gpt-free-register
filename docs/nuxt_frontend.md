@@ -45,7 +45,7 @@ NUXT_API_PROXY=http://127.0.0.1:8000 npm --prefix frontend run dev
 | --- | --- |
 | `/` | 注册概览、注册数量/并发、任务分页、日志、手动验证码 |
 | `/accounts` | 账号筛选分页、跨页选择、导入、分组、查活/套餐、2FA、邮箱换绑、提链/支付/Plus、Agent 与导出 |
-| `/tasks` | 统一任务进度、历史、完整详细日志，后端允许的暂停/恢复/取消，以及手动模式下的邮箱验证码提交 |
+| `/tasks` | 统一任务进度、历史、按类型/状态/关键词筛选、完整详细日志，后端允许的暂停/恢复/取消，以及手动模式下的邮箱验证码提交 |
 | `/mailboxes` | Outlook、API、IMAP、域名邮箱池及批量操作 |
 | `/codex` | 账号授权状态、重试/停止、凭证文件归档与下载 |
 | `/redemptions` | 兑换码、分组公开库存、交付记录 |
@@ -77,8 +77,9 @@ NUXT_API_PROXY=http://127.0.0.1:8000 npm --prefix frontend run dev
 
 `/accounts` 的「状态」列第一行固定显示该账号是否已被兑换码领取（`redeemed` / `unredeemed`）。数据来自 `redeem_claims` 表：`/api/accounts` 的列表项始终带 `redeemed` 布尔值，已兑换时额外返回领取时间 `redeemed_at`（鼠标悬停徽章可见），但不返回 CDK、密码或 Token。
 
-- 高级筛选新增「兑换状态」（已兑换 / 未兑换）；`redemption=redeemed|unredeemed` 作为 SQL `EXISTS (SELECT 1 FROM redeem_claims …)` 条件下推到 `COUNT/LIMIT/OFFSET`，分页总数与列表一致。
-- 「按邮箱选中」沿用同一筛选条件；被兑换状态筛掉的邮箱与其他筛选一致地计入“未匹配”。
+- 账号列表默认隐藏已被兑换码领取的账号（`redemption=unredeemed`）；工具栏的「显示已兑换账号」按钮切到不限制兑换状态，按钮随后变成「隐藏已兑换账号」，可随时回到默认视图。旧版控制台账号列表的「显示已兑换」开关行为一致，并在邮箱旁用「已兑换」标记区分。
+- 高级筛选保留「兑换状态」（已兑换 / 未兑换）；`redemption=redeemed|unredeemed` 作为 SQL `EXISTS (SELECT 1 FROM redeem_claims …)` 条件下推到 `COUNT/LIMIT/OFFSET`，分页总数与列表一致。`/api/accounts/plan-check-status` 也接受同一参数，保证列表与轻量状态轮询看到的账号集合完全一致。
+- 「按邮箱选中」沿用同一筛选条件；默认隐藏已兑换账号时，被兑换状态筛掉的邮箱与其他筛选一致地计入“未匹配”，需要匹配已兑换账号时先点「显示已兑换账号」。
 
 ## 代码组织
 
@@ -94,6 +95,15 @@ NUXT_API_PROXY=http://127.0.0.1:8000 npm --prefix frontend run dev
 Nuxt 使用 `ssr: false` 生成静态 SPA；浏览器加载后获取业务数据。管理页面由 Flask 鉴权及客户端路由守卫保护，业务 API 继续执行后端鉴权。授权码不保存到浏览器持久存储，账号密码/Token 仅在用户请求复制或导出时读取。
 
 任务中心的 `/api/tasks/<task_id>/log` 和 `/api/tasks/logs` 返回完整日志内容，不再截取注册日志尾部或账号状态事件数量。查活、2FA、邮箱换绑任务会读取原服务写入的详细日志文件；账号列表提交这些后台任务后，会自动定位最新任务并打开同一个完整日志弹窗，支持自动刷新、复制和下载。
+
+## 任务中心筛选
+
+`/tasks` 顶部的筛选栏对进行中和历史任务同时生效：
+
+- 任务类型来自 `/api/tasks/active` 返回的 `filters.job_types`（`codex_retry` 由注册任务 payload 推导，与账号侧投影共用同一套标签），状态取统一状态分组（`failed` 覆盖 `deactivated`、`not_activated` 等来源状态）。
+- 关键词按邮箱或任务 ID（`registration-12` / `account-7`）模糊匹配，`%`、`_` 和 `\` 按字面量转义。
+- 筛选条件下推到 `registration_jobs` 与 `account_tasks` 的 `COUNT/LIMIT/OFFSET`，分页总数、状态统计和列表始终同一口径；旧版侧边栏的活跃任务徽章仍用 `global_status_counts` 的全局口径。未知类型或状态返回 400，而不是静默返回空列表。
+- 表单值在点击「应用筛选」后才生效，轮询刷新不会打断正在输入的关键词；旧版控制台的任务中心提供同一组筛选。
 
 公开兑换沿用 `redeem_recovery_v2:<SHA-256(CDK)>` 的标签页存储索引，并兼容旧版恢复记录。存储中只有请求 ID 与完成状态，没有兑换码或账号凭据。刷新后先恢复原批次，只有明确点击“继续兑换下一批”才创建新请求。HTTP 局域网环境同样支持哈希索引和安全随机 ID。浏览器禁止标签页存储时阻止提交，避免丢失恢复信息。
 

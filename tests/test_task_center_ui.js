@@ -43,6 +43,7 @@ function harness(respond) {
   };
   const context = {
     TASK_CENTER_JOBS: [], TASK_CENTER_HISTORY: [], TASK_CENTER_HISTORY_TOTAL: 0,
+    TASK_CENTER_FILTERS: {job_type: '', status: '', q: ''},
     taskCenterLoading: false, taskCenterActiveRequest: null, taskCenterHistoryRequest: 0,
     taskCenterHistoryPage: 1, taskCenterHistorySize: 20,
     JOBS: [], JOBS_TOTAL: 0, JOB_STATUS_COUNTS: {}, jobsRenderSignature: '', PAGERS: {jobs: {page: 1, size: 20}},
@@ -64,6 +65,8 @@ function harness(respond) {
     'taskCenterLabel', 'taskCenterStatus', 'taskCenterStatusPill', 'pendingRegistrationTaskCount',
     'taskCenterProgress', 'updateTaskCenterSummary', 'renderTaskCenter', 'renderTaskCenterHistory',
     'captureTaskOtpInputs', 'restoreTaskOtpInputs',
+    'taskCenterFilterState', 'taskCenterFilterQuery', 'taskCenterFilterActive',
+    'updateTaskCenterFilterSummary', 'applyTaskCenterFilters', 'resetTaskCenterFilters',
     'taskCenterPoolByName', 'renderTaskCenterPools', 'taskCenterPoolWorkersValue',
     'applyTaskCenterConcurrency',
     'taskCenterHistoryGo', 'refreshTaskCenterHistory', 'refreshTaskCenterActive', 'refreshTaskCenterBadge',
@@ -378,6 +381,11 @@ test('task-center copy documents all types, per-task controls and concurrency', 
   assert.match(taskCenter, /id="taskCenterPoolSelect"/);
   assert.match(taskCenter, /id="taskCenterPoolWorkers"/);
   assert.match(taskCenter, /id="btnApplyTaskCenterConcurrency"/);
+  assert.match(taskCenter, /id="taskCenterFilterType"/);
+  assert.match(taskCenter, /id="taskCenterFilterStatus"/);
+  assert.match(taskCenter, /id="taskCenterFilterKeyword"/);
+  assert.match(taskCenter, /id="btnApplyTaskCenterFilters"/);
+  assert.match(taskCenter, /id="btnResetTaskCenterFilters"/);
   assert.match(template, /id="logTaskDetails"/);
   const legacy = fs.readFileSync(path.join(root, 'webui/templates/index_legacy.html'), 'utf8');
   assert.match(legacy, /id="btnCancelPending"[^>]*>取消排队注册任务/);
@@ -436,4 +444,72 @@ test('account task rows keep only server-advertised controls', () => {
   assert.match(html, /取消中…/);
   for (const action of ['pause', 'resume', 'cancel'])
     assert.ok(!html.includes(`data-task-${action}="account-3"`), action);
+});
+
+test('task filter helpers build an encoded query from applied values only', () => {
+  const ui = harness(), c = ui.context;
+  assert.equal(c.taskCenterFilterQuery(), '');
+  assert.equal(c.taskCenterFilterActive(), false);
+  c.TASK_CENTER_FILTERS = {job_type: 'live_check', status: '', q: 'demo@example.test'};
+  assert.equal(c.taskCenterFilterQuery(), 'job_type=live_check&q=demo%40example.test');
+  assert.equal(c.taskCenterFilterActive(), true);
+  c.TASK_CENTER_FILTERS = {job_type: '', status: 'failed', q: ''};
+  assert.equal(c.taskCenterFilterQuery(), 'status=failed');
+});
+
+test('active and history refreshes send the applied task filters', async () => {
+  const ui = harness(() => ({items: [], total: 0, status_counts: {}}));
+  const c = ui.context;
+  c.TASK_CENTER_FILTERS = {job_type: 'registration', status: 'failed', q: 'a@b.test'};
+  await c.refreshTaskCenterActive();
+  assert.match(ui.calls[0].url, /^\/api\/tasks\/active\?job_type=registration&status=failed&q=a%40b\.test$/);
+  ui.calls.length = 0;
+  await c.refreshTaskCenterHistory();
+  assert.match(ui.calls[0].url, /^\/api\/tasks\/history\?page=1&page_size=20&job_type=registration&status=failed&q=a%40b\.test$/);
+});
+
+test('applying task filters reads the form, resets paging and refreshes once', () => {
+  const ui = harness(), c = ui.context;
+  let refreshes = 0;
+  c.refreshTaskCenter = () => { refreshes += 1; };
+  ui.node('taskCenterFilterType').value = 'scan_payment';
+  ui.node('taskCenterFilterStatus').value = 'needs_attention';
+  ui.node('taskCenterFilterKeyword').value = '  demo@example.test  ';
+  c.taskCenterHistoryPage = 4;
+  c.applyTaskCenterFilters();
+  assert.deepEqual(JSON.parse(JSON.stringify(c.TASK_CENTER_FILTERS)),
+    {job_type: 'scan_payment', status: 'needs_attention', q: 'demo@example.test'});
+  assert.equal(c.taskCenterHistoryPage, 1);
+  assert.equal(refreshes, 1);
+  assert.match(ui.node('taskCenterFilterSummary').textContent, /已筛选/);
+
+  c.resetTaskCenterFilters();
+  assert.deepEqual(JSON.parse(JSON.stringify(c.TASK_CENTER_FILTERS)), {job_type: '', status: '', q: ''});
+  assert.equal(ui.node('taskCenterFilterSummary').textContent, '');
+  assert.equal(refreshes, 2);
+});
+
+test('filtered task tables explain that no row matched', () => {
+  const ui = harness(), c = ui.context;
+  c.TASK_CENTER_FILTERS = {job_type: 'live_check', status: '', q: ''};
+  c.renderTaskCenter(); c.renderTaskCenterHistory();
+  assert.match(ui.node('taskCenterBody').innerHTML, /没有符合筛选条件的进行中任务/);
+  assert.match(ui.node('taskCenterHistoryBody').innerHTML, /没有符合筛选条件的历史任务/);
+  c.TASK_CENTER_FILTERS = {job_type: '', status: '', q: ''};
+  c.renderTaskCenter(); c.renderTaskCenterHistory();
+  assert.match(ui.node('taskCenterBody').innerHTML, /当前没有进行中的任务/);
+  assert.match(ui.node('taskCenterHistoryBody').innerHTML, /暂无历史任务/);
+});
+
+test('sidebar badge keeps the global active count while the table is filtered', async () => {
+  const ui = harness(() => ({
+    items: [], total: 0,
+    status_counts: {active: 0, running: 0},
+    global_status_counts: {active: 7, running: 5},
+  }));
+  await ui.context.refreshTaskCenterActive();
+  // 页面统计跟随筛选，导航徽章仍是全局口径。
+  assert.equal(ui.node('taskCenterActiveCount').textContent, '0');
+  assert.equal(ui.node('taskCenterBadge').textContent, '7');
+  assert.equal(ui.node('taskCenterBadge').classList.contains('hidden'), false);
 });

@@ -383,3 +383,18 @@ def test_safe_result_details_survive_projection_and_registration_redaction():
     assert "private-" not in json.dumps(public)
     assert "checkout.test" not in json.dumps(public)
     assert tasks.get_task("account-" + "9" * 5000) is None
+
+
+def test_task_filters_validate_allowlists_and_escape_like_wildcards():
+    """筛选条件只接受白名单取值，关键词里的 LIKE 通配符按字面量处理。"""
+    with pytest.raises(ValueError):
+        tasks.normalize_filters(job_type="not_a_type")
+    with pytest.raises(ValueError):
+        tasks.normalize_filters(status="not_a_status")
+    assert tasks.normalize_filters("registration", "failed", "") == ("registration", "failed", None)
+    assert tasks.normalize_filters("", "", "  a%b_c  ")[2] == "a\\%b\\_c"
+    options = tasks.filter_options()
+    assert [item["value"] for item in options["job_types"]][:2] == ["registration", "codex_retry"]
+    assert {"pending", "success", "failed", "needs_attention"} <= {
+        item["value"] for item in options["statuses"]
+    }

@@ -10,6 +10,8 @@ let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
 let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
 let SHOW_FREE_ACCOUNTS_ONLY = false;
+// 默认隐藏已被 CDK 领取的账号，点「显示已兑换」后才一起查询/展示。
+let SHOW_REDEEMED_ACCOUNTS = false;
 const ACCOUNT_SELECTED = new Set();
 const ACCOUNT_SELECTED_ROWS = new Map();
 let accountSelectionRevision = 0;
@@ -36,6 +38,8 @@ let TASK_CENTER_JOBS = [];
 let TASK_CENTER_POOLS = [];
 let TASK_CENTER_HISTORY = [];
 let TASK_CENTER_HISTORY_TOTAL = 0;
+// 任务筛选：表单值在点击“应用筛选”后才进入状态，轮询不会打断正在编辑的条件。
+let TASK_CENTER_FILTERS = { job_type: '', status: '', q: '' };
 let taskCenterLoading = false;
 let taskCenterActiveRequest = null;
 let taskCenterHistoryRequest = 0;
@@ -713,6 +717,46 @@ async function refreshJobs({refreshSummary = true} = {}) {
   } catch(e) {}
 }
 
+function taskCenterFilterState() {
+  return {
+    job_type: String(document.getElementById('taskCenterFilterType')?.value || '').trim(),
+    status: String(document.getElementById('taskCenterFilterStatus')?.value || '').trim(),
+    q: String(document.getElementById('taskCenterFilterKeyword')?.value || '').trim(),
+  };
+}
+
+function taskCenterFilterQuery() {
+  return Object.entries(TASK_CENTER_FILTERS)
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+    .join('&');
+}
+
+function taskCenterFilterActive() {
+  return Object.values(TASK_CENTER_FILTERS).some(Boolean);
+}
+
+function updateTaskCenterFilterSummary() {
+  const summary = document.getElementById('taskCenterFilterSummary');
+  if (!summary) return;
+  summary.textContent = taskCenterFilterActive() ? '已筛选：列表与统计只包含匹配任务' : '';
+}
+
+function applyTaskCenterFilters() {
+  TASK_CENTER_FILTERS = taskCenterFilterState();
+  taskCenterHistoryPage = 1;
+  updateTaskCenterFilterSummary();
+  refreshTaskCenter();
+}
+
+function resetTaskCenterFilters() {
+  for (const id of ['taskCenterFilterType', 'taskCenterFilterStatus', 'taskCenterFilterKeyword']) {
+    const input = document.getElementById(id);
+    if (input) input.value = '';
+  }
+  applyTaskCenterFilters();
+}
+
 function taskCenterLabel(task) {
   const labels = {
     plus_activation: '开通 Plus', live_check: '查活', plan_check: '查套餐',
@@ -749,7 +793,7 @@ function taskCenterProgress(job) {
   return status === 'success' ? 100 : 30;
 }
 
-function updateTaskCenterSummary(counts = {}) {
+function updateTaskCenterSummary(counts = {}, globalCounts = counts) {
   const active = Number(counts.active || 0);
   const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = String(value); };
   setText('taskCenterActiveCount', active);
@@ -758,8 +802,10 @@ function updateTaskCenterSummary(counts = {}) {
   setText('taskCenterPausedCount', Number(counts.paused || 0));
   const badge = document.getElementById('taskCenterBadge');
   if (badge) {
-    badge.textContent = active > 99 ? '99+' : String(active);
-    badge.classList.toggle('hidden', active <= 0);
+    // 侧边栏徽章是全局活跃任务数，不跟随任务中心的筛选条件。
+    const globalActive = Number(globalCounts.active || 0);
+    badge.textContent = globalActive > 99 ? '99+' : String(globalActive);
+    badge.classList.toggle('hidden', globalActive <= 0);
   }
 }
 
@@ -822,7 +868,7 @@ function renderTaskCenter() {
       <td class="task-col-time" title="${esc(started)}">${esc(started)}</td>
       <td class="task-col-actions"><div class="task-center-actions">${actionButtons}</div></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="7" class="task-center-empty">当前没有进行中的任务</td></tr>';
+  }).join('') || `<tr><td colspan="7" class="task-center-empty">${taskCenterFilterActive() ? '没有符合筛选条件的进行中任务' : '当前没有进行中的任务'}</td></tr>`;
   restoreTaskOtpInputs(pendingOtp);
 }
 
@@ -846,7 +892,7 @@ function renderTaskCenterHistory() {
       <td class="task-col-time" title="${esc(completed)}">${esc(completed)}</td>
       <td class="task-col-actions"><button type="button" class="task-action-btn task-action-btn--view" data-task-history-log="${esc(id)}">查看日志</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="7" class="task-center-empty">暂无历史任务</td></tr>';
+  }).join('') || `<tr><td colspan="7" class="task-center-empty">${taskCenterFilterActive() ? '没有符合筛选条件的历史任务' : '暂无历史任务'}</td></tr>`;
   const count = document.getElementById('taskCenterHistoryCount');
   if (count) count.textContent = `共 ${TASK_CENTER_HISTORY_TOTAL} 条`;
   const pager = document.getElementById('pager-task-center-history');
@@ -867,7 +913,8 @@ function taskCenterHistoryGo(delta) {
 
 async function refreshTaskCenterHistory() {
   const request = ++taskCenterHistoryRequest;
-  const result = await api(`/api/tasks/history?page=${taskCenterHistoryPage}&page_size=${taskCenterHistorySize}`);
+  const filters = taskCenterFilterQuery();
+  const result = await api(`/api/tasks/history?page=${taskCenterHistoryPage}&page_size=${taskCenterHistorySize}${filters ? `&${filters}` : ''}`);
   if (request !== taskCenterHistoryRequest) return;
   TASK_CENTER_HISTORY = result.items || [];
   TASK_CENTER_HISTORY_TOTAL = Number(result.total || 0);
@@ -953,15 +1000,26 @@ document.getElementById('btnApplyTaskCenterConcurrency')?.addEventListener('clic
 document.getElementById('taskCenterPoolWorkers')?.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') applyTaskCenterConcurrency(document.getElementById('btnApplyTaskCenterConcurrency'));
 });
+document.getElementById('btnApplyTaskCenterFilters')?.addEventListener('click', () => applyTaskCenterFilters());
+document.getElementById('btnResetTaskCenterFilters')?.addEventListener('click', () => resetTaskCenterFilters());
+document.getElementById('taskCenterFilterKeyword')?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  applyTaskCenterFilters();
+});
+for (const id of ['taskCenterFilterType', 'taskCenterFilterStatus']) {
+  document.getElementById(id)?.addEventListener('change', () => applyTaskCenterFilters());
+}
 
 function refreshTaskCenterActive() {
   if (taskCenterActiveRequest) return taskCenterActiveRequest;
   taskCenterActiveRequest = (async () => {
     try {
-      const result = await api('/api/tasks/active');
+      const filters = taskCenterFilterQuery();
+      const result = await api(`/api/tasks/active${filters ? `?${filters}` : ''}`);
       TASK_CENTER_JOBS = result.items || [];
       TASK_CENTER_POOLS = Array.isArray(result.pools) ? result.pools : [];
-      updateTaskCenterSummary(result.status_counts || {});
+      updateTaskCenterSummary(result.status_counts || {}, result.global_status_counts || result.status_counts || {});
       const cancelButton = document.getElementById('btnCancelPendingTaskCenter');
       if (cancelButton) {
         const pendingCount = pendingRegistrationTaskCount();
@@ -1359,6 +1417,10 @@ function getAccountsGroupFilter() {
   const el = document.getElementById('groupFilterV2');
   return (el ? el.value : '').trim();
 }
+function getAccountsRedemptionFilter() {
+  // 返回 '' 表示不限制兑换状态；默认只查询未兑换账号。
+  return SHOW_REDEEMED_ACCOUNTS ? '' : 'unredeemed';
+}
 function getAccountLookupFilters() {
   return {
     archived: SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0',
@@ -1366,6 +1428,7 @@ function getAccountLookupFilters() {
     codex_status: getAccountsCodexFilter(),
     totp_status: getAccountsTotpFilter(),
     group: getAccountsGroupFilter(),
+    redemption: getAccountsRedemptionFilter(),
     date_from: document.getElementById('dateFromAccountsV2')?.value || '',
     date_to: document.getElementById('dateToAccountsV2')?.value || '',
   };
@@ -1472,11 +1535,12 @@ async function loadAccounts() {
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
     const group = getAccountsGroupFilter();
+    const redemption = getAccountsRedemptionFilter();
     const q = getAccountsQuery();
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -1494,11 +1558,12 @@ async function pollAccountPlanStatuses() {
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
     const group = getAccountsGroupFilter();
+    const redemption = getAccountsRedemptionFilter();
     const q = getAccountsQuery();
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -1892,7 +1957,7 @@ function renderAccounts() {
       <td class="col-check"><input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''}></td>
       <td class="col-id" data-label="ID">#${esc(r.id)}</td>
       <td class="col-email" title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}">
-        <div class="acc-v2-email">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>
+        <div class="acc-v2-email">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}${r.redeemed ? ` <span class="pill status-used" title="已被兑换码领取${r.redeemed_at ? '：' + esc(r.redeemed_at) : ''}">已兑换</span>` : ''}</div>
         ${r.original_email ? `<div class="acc-v2-email-history">原邮箱: ${esc(r.original_email)}</div>` : ''}
         <div class="acc-v2-email-group">分组：${esc(r.group_name || '默认分组')}</div>
         <div class="acc-v2-email-user">${esc(r.user_name || '-')}</div>
@@ -2432,6 +2497,14 @@ async function applyAccountsFreeFilter(on) {
   await loadAccounts();
   await pollAccountPlanStatuses();
 }
+async function applyAccountsRedeemedFilter(on) {
+  SHOW_REDEEMED_ACCOUNTS = !!on;
+  setAccountsFilterToggle($('#showRedeemedAccountsV2'), SHOW_REDEEMED_ACCOUNTS);
+  clearAccountSelection();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+}
 async function refreshAccountsList(btn) {
   if (!btn) return;
   const old = btn.textContent;
@@ -2511,6 +2584,10 @@ async function refreshAccountsList(btn) {
   const freeV2 = $('#showFreeAccountsOnlyV2');
   if (freeV2) freeV2.addEventListener('click', () => {
     applyAccountsFreeFilter(!SHOW_FREE_ACCOUNTS_ONLY);
+  });
+  const redeemedV2 = $('#showRedeemedAccountsV2');
+  if (redeemedV2) redeemedV2.addEventListener('click', () => {
+    applyAccountsRedeemedFilter(!SHOW_REDEEMED_ACCOUNTS);
   });
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));

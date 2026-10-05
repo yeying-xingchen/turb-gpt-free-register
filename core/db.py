@@ -2448,6 +2448,7 @@ def list_account_plan_check_statuses(
     date_to: str | None = None,
     totp_filter: str | None = None,
     group_filter: str | None = None,
+    redemption_filter: str | None = None,
 ) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
@@ -2495,6 +2496,7 @@ def list_account_plan_check_statuses(
             codex_filter=codex_filter,
             totp_filter=totp_filter,
             group_filter=group_filter,
+            redemption_filter=redemption_filter,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",

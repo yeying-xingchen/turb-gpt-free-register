@@ -237,6 +237,43 @@
       <div class="task-center-stat"><span>排队中</span><strong id="taskCenterPendingCount">0</strong></div>
       <div class="task-center-stat"><span>已暂停</span><strong id="taskCenterPausedCount">0</strong></div>
     </div>
+    <div class="task-center-filters" id="taskCenterFilters" aria-label="任务筛选">
+      <label class="task-center-filter-field" title="按任务类型筛选">任务类型
+        <select id="taskCenterFilterType">
+          <option value="">全部类型</option>
+          <option value="registration">账号注册</option>
+          <option value="codex_retry">Codex 补跑</option>
+          <option value="plus_activation">开通 Plus</option>
+          <option value="live_check">账号查活</option>
+          <option value="plan_check">套餐查询</option>
+          <option value="extract_link">提取链接</option>
+          <option value="scan_payment">扫码支付</option>
+          <option value="totp_setup">开启 2FA</option>
+          <option value="email_change">换绑邮箱</option>
+          <option value="codex_agent">Codex 授权</option>
+        </select>
+      </label>
+      <label class="task-center-filter-field" title="按任务状态筛选">状态
+        <select id="taskCenterFilterStatus">
+          <option value="">全部状态</option>
+          <option value="pending">等待执行</option>
+          <option value="running">执行中</option>
+          <option value="success">已完成</option>
+          <option value="failed">失败</option>
+          <option value="cancelled">已取消</option>
+          <option value="stopped">已停止</option>
+          <option value="needs_attention">待核实</option>
+          <option value="paused">已暂停</option>
+          <option value="stopping">取消中</option>
+        </select>
+      </label>
+      <label class="task-center-filter-field" title="按邮箱或任务 ID 筛选">关键词
+        <input id="taskCenterFilterKeyword" type="search" placeholder="邮箱或任务 ID" autocomplete="off">
+      </label>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnApplyTaskCenterFilters" title="筛选进行中与历史任务，统计数字同步收窄">应用筛选</button>
+      <button type="button" class="jobs-tb-btn" id="btnResetTaskCenterFilters" title="清空任务类型、状态和关键词">重置</button>
+      <span class="muted" id="taskCenterFilterSummary"></span>
+    </div>
     <section class="jobs-panel-v2 task-center-panel" aria-label="进行中任务列表">
       <div class="jobs-toolbar-v2 task-center-toolbar">
         <div class="task-center-toolbar-title">进行中任务 <span id="taskCenterLastUpdated" class="muted">自动刷新中</span></div>
@@ -302,7 +339,7 @@
         <details class="acc-v2-email-picker">
           <summary class="jobs-tb-btn">按邮箱选择</summary>
           <div class="acc-v2-btn-group acc-v2-email-select-group" title="输入多个邮箱，支持换行、逗号、分号或空格分隔">
-            <p class="acc-v2-email-select-help">在当前筛选范围内跨页追加选择，不受搜索词限制。清空输入会保留已选账号。</p>
+            <p class="acc-v2-email-select-help">在当前筛选范围内跨页追加选择，不受搜索词限制。清空输入会保留已选账号。默认隐藏已兑换账号，需要匹配时先点上方「显示已兑换」。</p>
             <textarea id="accountEmailsToSelectV2" class="acc-v2-email-select-input" rows="1" placeholder="输入邮箱，多个邮箱用换行、逗号或分号分隔" aria-label="批量选择账号邮箱"></textarea>
             <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSelectAccountsByEmailV2">查找并追加选择</button>
             <button type="button" class="jobs-tb-btn" id="btnClearAccountEmailSelectionV2">清空输入</button>
@@ -312,6 +349,7 @@
 
         <div class="acc-v2-btn-group accounts-filter-options-v2">
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
+          <button type="button" class="acc-v2-toggle" id="showRedeemedAccountsV2" aria-pressed="false" title="默认隐藏已被 CDK 领取的账号；开启后把已兑换账号一起显示（已兑换账号会带标记）">显示已兑换</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通套餐的账号">已开通套餐</button>
           <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">有套餐优惠</button>
           <label class="acc-v2-inline" title="指定 eligible_promo_campaigns 中的套餐类型；留空表示全部优惠类型">优惠类型

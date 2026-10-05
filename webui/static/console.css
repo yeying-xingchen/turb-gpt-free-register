@@ -2238,6 +2238,15 @@
 }
 .task-center-stat span { display: block; color: #909399; font-size: 12px; }
 .task-center-stat strong { display: block; margin-top: 8px; color: #303133; font-size: 24px; line-height: 1; }
+.task-center-filters {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  padding: 12px 16px; border: 1px solid #ebeef5; border-radius: 8px; background: #fafbfc;
+  font-size: 12px; color: #606266;
+}
+.task-center-filter-field { display: inline-flex; align-items: center; gap: 6px; }
+.task-center-filter-field select { min-width: 140px; }
+.task-center-filter-field input { min-width: 180px; min-height: 30px; padding: 2px 8px; }
+.task-center-filters .muted { white-space: nowrap; }
 .task-center-panel { min-width: 0; }
 .task-center-toolbar { justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .task-center-toolbar-title { display: flex; align-items: baseline; gap: 10px; color: #303133; font-size: 15px; font-weight: 700; }

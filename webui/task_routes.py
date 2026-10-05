@@ -49,23 +49,47 @@ def _with_registration_result(task):
     return task
 
 
+def _task_filters():
+    """解析任务中心筛选参数；未知类型/状态返回 400，避免静默匹配不到数据。"""
+    args = request.args
+    try:
+        job_type, status, keyword = task_center_store.normalize_filters(
+            args.get("job_type"), args.get("status"), args.get("q") or args.get("keyword"),
+        )
+    except ValueError as exc:
+        return None, (jsonify({"ok": False, "error": str(exc)}), 400)
+    return {"job_type": job_type, "status": status, "keyword": keyword}, None
+
+
 def register_task_routes(app):
     @app.get("/api/tasks/active")
     def task_center_active():
-        items = [_with_registration_result(task) for task in task_center_store.list_active_tasks(limit=5000)]
-        counts = task_center_store.task_status_counts()
+        filters, error = _task_filters()
+        if error:
+            return error
+        items = [_with_registration_result(task)
+                 for task in task_center_store.list_active_tasks(limit=5000, **filters)]
+        counts = task_center_store.task_status_counts(**filters)
+        # 侧边栏徽章是全局活跃任务数：有筛选时单独统计，避免导航数字跟着筛选缩水。
+        global_counts = counts if not any(filters.values()) else task_center_store.task_status_counts()
         return jsonify({"ok": True, "items": items, "total": counts.get("active", len(items)),
-                        "status_counts": counts, "pools": task_center_store.concurrency_overview()})
+                        "status_counts": counts, "global_status_counts": global_counts,
+                        "pools": task_center_store.concurrency_overview(),
+                        "filters": task_center_store.filter_options()})
 
     @app.get("/api/tasks/history")
     def task_center_history():
+        filters, error = _task_filters()
+        if error:
+            return error
         page = max(1, request.args.get("page", default=1, type=int) or 1)
         page_size = max(1, min(100, request.args.get("page_size", default=20, type=int) or 20))
         result = task_center_store.list_history_tasks_page(
-            limit=page_size, offset=(page - 1) * page_size,
+            limit=page_size, offset=(page - 1) * page_size, **filters,
         )
         result["items"] = [_with_registration_result(task) for task in result["items"]]
-        return jsonify({**result, "ok": True, "page": page, "page_size": page_size})
+        return jsonify({**result, "ok": True, "page": page, "page_size": page_size,
+                        "filters": task_center_store.filter_options()})
 
     @app.get("/api/tasks/concurrency")
     def task_center_concurrency():

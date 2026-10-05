@@ -235,3 +235,92 @@ def test_account_task_log_uses_complete_service_log_and_latest_lookup(client):
     assert result["log"] == "运行中"
     assert result["job"]["id"] == task_id
     assert "log_file" not in result["job"]
+
+
+def test_active_filters_narrow_by_type_status_and_keyword(client):
+    account_id = account()
+    job = db.create_job("outlook")
+    db.update_job(job["id"], email="other@example.test")
+    assert db.claim_account_live_check(account_id)
+    plus_activation_store.claim(account_id)
+
+    payload = client.get("/api/tasks/active?job_type=registration").get_json()
+    assert [row["job_type"] for row in payload["items"]] == ["registration"]
+    # 筛选后的计数与列表一致，避免标签数字和表格对不上。
+    assert payload["total"] == 1
+    assert payload["status_counts"]["total"] == 1
+    assert payload["status_counts"]["active"] == 1
+    assert payload["status_counts"]["pending"] == 1
+    # 侧边栏徽章用的全局计数不受筛选影响。
+    assert payload["global_status_counts"]["active"] == 3
+
+    assert [row["job_type"] for row in client.get("/api/tasks/active?job_type=live_check").get_json()["items"]] == ["live_check"]
+    empty = client.get("/api/tasks/active?job_type=scan_payment").get_json()
+    assert empty["items"] == [] and empty["total"] == 0
+
+    running = client.get("/api/tasks/active?status=running").get_json()
+    assert running["items"] == []
+    pending = client.get("/api/tasks/active?status=pending").get_json()
+    assert len(pending["items"]) == 3
+    # 类型与状态可叠加，注册任务里只有 pending。
+    both = client.get("/api/tasks/active?job_type=registration&status=running").get_json()
+    assert both["items"] == []
+
+    by_email = client.get("/api/tasks/active", query_string={"q": "tasks@example.test"}).get_json()
+    assert {row["job_type"] for row in by_email["items"]} == {"live_check", "plus_activation"}
+    by_id = client.get("/api/tasks/active", query_string={"q": f"registration-{job['id']}"}).get_json()
+    assert [row["job_type"] for row in by_id["items"]] == ["registration"]
+    assert client.get("/api/tasks/active", query_string={"q": "nobody@example.test"}).get_json()["items"] == []
+    # LIKE 通配符按字面量转义，`%` 不会变成“匹配全部”。
+    assert client.get("/api/tasks/active", query_string={"q": "%"}).get_json()["items"] == []
+
+
+def test_history_filters_narrow_total_and_page(client):
+    account_id = account()
+    assert db.claim_account_live_check(account_id)
+    db.mark_account_live_check_running(account_id)
+    db.update_account_liveness(account_id, {"ok": True, "status": "live"})
+    job = db.create_job("outlook")
+    db.update_job(job["id"], status="success", completed_at=db._now(), progress=100)
+
+    assert client.get("/api/tasks/history").get_json()["total"] == 2
+    registration = client.get("/api/tasks/history?job_type=registration").get_json()
+    assert registration["total"] == 1
+    assert [row["job_type"] for row in registration["items"]] == ["registration"]
+    assert client.get("/api/tasks/history?status=success").get_json()["total"] == 2
+    failed = client.get("/api/tasks/history?status=failed").get_json()
+    assert failed["total"] == 0 and failed["items"] == []
+    # 分页参数仍然生效：每页 1 条时总数保持筛选后的口径。
+    paged = client.get("/api/tasks/history?status=success&page=2&page_size=1").get_json()
+    assert paged["total"] == 2
+    assert len(paged["items"]) == 1
+    assert paged["page"] == 2
+
+
+def test_codex_retry_filter_matches_derived_registration_jobs(client):
+    source = db.create_job("outlook")
+    db.update_job(source["id"], status="failed", completed_at=db._now())
+    retry, created = db.create_retry_job(source["id"], job_type="codex_retry", email_source="outlook")
+    assert created is True
+
+    retries = client.get("/api/tasks/active?job_type=codex_retry").get_json()["items"]
+    assert [row["id"] for row in retries] == [f"registration-{retry['id']}"]
+    # 补跑任务不算普通注册任务，否则两种筛选会互相串数据。
+    assert client.get("/api/tasks/active?job_type=registration").get_json()["items"] == []
+
+
+def test_unknown_task_filters_are_rejected_and_options_exposed(client):
+    for query in ("job_type=unknown", "status=unknown"):
+        for endpoint in ("/api/tasks/active", "/api/tasks/history"):
+            response = client.get(f"{endpoint}?{query}")
+            assert response.status_code == 400
+            assert response.get_json()["ok"] is False
+
+    payload = client.get("/api/tasks/active").get_json()
+    job_types = [item["value"] for item in payload["filters"]["job_types"]]
+    assert job_types[0] == "registration"
+    assert {"codex_retry", "plus_activation", "scan_payment", "codex_agent"} <= set(job_types)
+    statuses = [item["value"] for item in payload["filters"]["statuses"]]
+    assert {"pending", "running", "success", "failed", "cancelled", "needs_attention"} <= set(statuses)
+    assert client.get("/api/tasks/history").get_json()["filters"] == payload["filters"]
+

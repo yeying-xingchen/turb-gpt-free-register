@@ -46,3 +46,44 @@ export function taskPoolHint(pool: PoolRow | null): string {
   const threads = Number(pool.threads) || 0;
   return `${running} 运行 · ${pending} 排队 · ${threads} 线程`;
 }
+
+// 任务中心筛选：纯函数，便于 Node 单测直接复用。
+export type TaskFilterState = {
+  job_type?: string;
+  status?: string;
+  q?: string;
+};
+
+export type TaskFilterOption = { value: string; label: string };
+
+/** 只把非空筛选项拼进查询串，空值不产生 ?job_type=&status= 这类噪声。 */
+export function taskFilterQuery(
+  filters: TaskFilterState | null | undefined,
+): Record<string, string> {
+  const query: Record<string, string> = {};
+  const jobType = String(filters?.job_type ?? "").trim();
+  const status = String(filters?.status ?? "").trim();
+  const keyword = String(filters?.q ?? "").trim();
+  if (jobType) query.job_type = jobType;
+  if (status) query.status = status;
+  if (keyword) query.q = keyword;
+  return query;
+}
+
+export function taskFilterActive(
+  filters: TaskFilterState | null | undefined,
+): boolean {
+  return Object.keys(taskFilterQuery(filters)).length > 0;
+}
+
+/** 后端下发的筛选下拉项；缺失时返回空数组，界面回退到默认文案。 */
+export function taskFilterOptions(payload: PoolRow | null | undefined): {
+  jobTypes: TaskFilterOption[];
+  statuses: TaskFilterOption[];
+} {
+  const options = payload?.filters;
+  return {
+    jobTypes: Array.isArray(options?.job_types) ? options.job_types : [],
+    statuses: Array.isArray(options?.statuses) ? options.statuses : [],
+  };
+}

@@ -80,3 +80,45 @@ test('task page exposes the concurrency control and applies it through the API',
 test('task page keeps a pending concurrency edit across polling refreshes', () => {
   assert.match(page, /if \(!concurrencyDirty\.value\)[\s\S]{0,120}poolWorkers\.value = taskPoolWorkers/);
 });
+
+test('task filter helpers keep only non-empty values', async () => {
+  const { taskFilterQuery, taskFilterActive } = await modulePromise;
+  assert.deepEqual(taskFilterQuery({}), {});
+  assert.deepEqual(taskFilterQuery({ job_type: '', status: '', q: '   ' }), {});
+  assert.deepEqual(
+    taskFilterQuery({ job_type: 'live_check', status: '', q: ' demo@example.test ' }),
+    { job_type: 'live_check', q: 'demo@example.test' },
+  );
+  assert.equal(taskFilterActive({}), false);
+  assert.equal(taskFilterActive({ status: 'failed' }), true);
+  assert.equal(taskFilterActive({ q: 'x' }), true);
+});
+
+test('task filter options ignore malformed payloads', async () => {
+  const { taskFilterOptions } = await modulePromise;
+  assert.deepEqual(taskFilterOptions(null), { jobTypes: [], statuses: [] });
+  assert.deepEqual(taskFilterOptions({ filters: { job_types: 'bad', statuses: null } }), {
+    jobTypes: [],
+    statuses: [],
+  });
+  const options = taskFilterOptions({
+    filters: { job_types: [{ value: 'a', label: 'A' }], statuses: [{ value: 'b', label: 'B' }] },
+  });
+  assert.equal(options.jobTypes[0].value, 'a');
+  assert.equal(options.statuses[0].label, 'B');
+});
+
+test('task page wires type, status and keyword filters into both endpoints', () => {
+  assert.match(page, /aria-label="按任务类型筛选"/);
+  assert.match(page, /aria-label="按任务状态筛选"/);
+  assert.match(page, /aria-label="按邮箱或任务 ID 筛选"/);
+  assert.match(page, /@submit\.prevent="applyFilters"/);
+  assert.match(page, /@click="resetFilters"/);
+  assert.match(page, /request\("\/api\/tasks\/active", \{ query \}\)/);
+  assert.match(
+    page,
+    /query: \{ \.\.\.query, page: targetPage, page_size: pageSize\.value \}/,
+  );
+  assert.match(page, /applied\.value = \{/);
+  assert.match(page, /watch\(\[view, historyPage, applied\]/);
+});

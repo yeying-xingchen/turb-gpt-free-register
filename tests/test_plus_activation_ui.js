@@ -633,7 +633,7 @@ for (const legacy of [false, true]) test(`${legacy ? 'legacy' : 'modern'} page s
   const context = {
     $: selector => node(selector.slice(1)), document: {getElementById: node, querySelectorAll: () => []}, ACCOUNT_SELECTED: selected, ACCOUNTS: [account], ACCOUNTS_TOTAL: 1,
     SHOW_ARCHIVED_ACCOUNTS: false, planStatusLoading: false, accountsLoading: false, planStatusRevision: '', PAGERS: {accounts: {page: 1, size: 20}},
-    getAccountsPlanFilter: () => '', getAccountsCodexFilter: () => '', getAccountsTotpFilter: () => '', getAccountsGroupFilter: () => '', getAccountsQuery: () => '',
+    getAccountsPlanFilter: () => '', getAccountsCodexFilter: () => '', getAccountsTotpFilter: () => '', getAccountsGroupFilter: () => '', getAccountsRedemptionFilter: () => '', getAccountsQuery: () => '',
     api: async url => { assert.match(url, /^\/api\/accounts\/plan-check-status\?/); return snapshot; },
     renderAccounts: () => { renders++; }, loadAccounts: async () => { reloads++; }, window: {ExtractLinks: {activatePlus: ids => { clicked = Array.from(ids); }}},
     showToast: message => { throw new Error(message); },

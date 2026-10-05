@@ -757,6 +757,12 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         ).strip().lower()
         q = str(request.args.get("q", default="") or "").strip()
         group_filter = str(request.args.get("group", default="") or "").strip()
+        redemption_filter = str(
+            request.args.get("redemption")
+            or request.args.get("redeem_status")
+            or request.args.get("redeemed")
+            or ""
+        ).strip().lower()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
         page_arg = request.args.get("page", default=None, type=int)
@@ -765,10 +771,10 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 

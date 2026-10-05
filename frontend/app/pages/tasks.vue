@@ -9,6 +9,9 @@ import type {
   OperationRow,
 } from "~/components/operations/helpers";
 import {
+  taskFilterActive,
+  taskFilterOptions,
+  taskFilterQuery,
   taskPoolByName,
   taskPoolDirty,
   taskPoolHint,
@@ -16,6 +19,7 @@ import {
   taskPoolWorkers,
   taskPoolWorkersValid,
 } from "~/utils/tasks";
+import type { TaskFilterOption } from "~/utils/tasks";
 useHead({ title: "任务中心" });
 const { request } = useApi();
 const toast = useToast();
@@ -38,6 +42,24 @@ const updated = ref("");
 const confirmation = shallowRef<ActionPrompt | null>(null);
 const logOpen = ref(false);
 const logTask = ref<OperationRow | null>(null);
+// 任务筛选：表单值在提交后才进入 applied，轮询刷新不会打断正在编辑的条件。
+const filters = reactive({ job_type: "", status: "", q: "" });
+const applied = ref<{ job_type: string; status: string; q: string }>({
+  job_type: "",
+  status: "",
+  q: "",
+});
+const filterOptions = ref<{
+  jobTypes: TaskFilterOption[];
+  statuses: TaskFilterOption[];
+}>({ jobTypes: [], statuses: [] });
+const filterActive = computed(() => taskFilterActive(applied.value));
+const filterDirty = computed(
+  () =>
+    filters.job_type !== applied.value.job_type ||
+    filters.status !== applied.value.status ||
+    filters.q.trim() !== applied.value.q,
+);
 // 后台并发：每类任务一个线程池，运行中即可调整。
 const pools = ref<OperationRow[]>([]);
 const poolName = ref("");
@@ -48,7 +70,7 @@ const currentPoolMax = computed(() => taskPoolMax(currentPool.value));
 function syncPoolWorkers() {
   if (!pools.value.length) return;
   if (!pools.value.some((pool) => pool.name === poolName.value))
-    poolName.value = pools.value[0].name;
+    poolName.value = pools.value[0]?.name || "";
   // 轮询刷新时不要覆盖用户正在输入但尚未应用的并发数。
   if (!concurrencyDirty.value)
     poolWorkers.value = taskPoolWorkers(currentPool.value);
@@ -106,6 +128,45 @@ const labels: Record<string, string> = {
   email_change: "换绑邮箱",
   codex_agent: "Codex 授权",
 };
+// 后端会下发筛选下拉项；接口异常时回退到本地标签，筛选框依旧可用。
+const statusLabels: Record<string, string> = {
+  pending: "等待执行",
+  running: "执行中",
+  success: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  stopped: "已停止",
+  needs_attention: "待核实",
+  paused: "已暂停",
+  stopping: "取消中",
+};
+const jobTypeOptions = computed<TaskFilterOption[]>(() =>
+  filterOptions.value.jobTypes.length
+    ? filterOptions.value.jobTypes
+    : Object.entries(labels).map(([value, label]) => ({ value, label })),
+);
+const statusOptions = computed<TaskFilterOption[]>(() =>
+  filterOptions.value.statuses.length
+    ? filterOptions.value.statuses
+    : Object.entries(statusLabels).map(([value, label]) => ({ value, label })),
+);
+const filterSummary = computed(() => {
+  const parts: string[] = [];
+  if (applied.value.job_type)
+    parts.push(
+      jobTypeOptions.value.find(
+        (option) => option.value === applied.value.job_type,
+      )?.label || applied.value.job_type,
+    );
+  if (applied.value.status)
+    parts.push(
+      statusOptions.value.find(
+        (option) => option.value === applied.value.status,
+      )?.label || applied.value.status,
+    );
+  if (applied.value.q) parts.push(`“${applied.value.q}”`);
+  return parts.join(" · ");
+});
 function status(task: OperationRow) {
   return ["deactivated", "needs_attention"].includes(task.source_status)
     ? task.source_status
@@ -127,13 +188,14 @@ async function refresh() {
   const current = ++revision;
   const currentView = view.value;
   const targetPage = historyPage.value;
+  const query = taskFilterQuery(applied.value);
   loading.value = true;
   const results = await Promise.allSettled([
-    request("/api/tasks/active"),
+    request("/api/tasks/active", { query }),
     ...(currentView === "history"
       ? [
           request("/api/tasks/history", {
-            query: { page: targetPage, page_size: pageSize.value },
+            query: { ...query, page: targetPage, page_size: pageSize.value },
           }),
         ]
       : []),
@@ -147,6 +209,9 @@ async function refresh() {
       active.value = result.items || [];
       counts.value = result.status_counts || {};
       if (Array.isArray(result.pools)) pools.value = result.pools;
+      const options = taskFilterOptions(result);
+      if (options.jobTypes.length || options.statuses.length)
+        filterOptions.value = options;
       activeTotal.value = Number(result.total || 0);
       activeLoaded.value = true;
       activePage.value = Math.min(
@@ -180,10 +245,22 @@ async function refresh() {
 usePolling(() => {
   if (auto.value && !busy.value) return refresh();
 });
-watch(view, refresh);
-watch(historyPage, () => {
-  if (view.value === "history") void refresh();
-});
+function applyFilters() {
+  activePage.value = 1;
+  historyPage.value = 1;
+  applied.value = {
+    job_type: filters.job_type,
+    status: filters.status,
+    q: filters.q.trim(),
+  };
+}
+function resetFilters() {
+  filters.job_type = "";
+  filters.status = "";
+  filters.q = "";
+  applyFilters();
+}
+watch([view, historyPage, applied], () => void refresh());
 watch(pageSize, () => {
   activePage.value = 1;
   if (historyPage.value !== 1) historyPage.value = 1;
@@ -327,7 +404,9 @@ function cancelPending() {
       <div class="stat-card">
         <span class="stat-label">进行中</span
         ><strong class="stat-value">{{ counts.active ?? "—" }}</strong
-        ><span class="muted">全部类型的活跃任务</span>
+        ><span class="muted">{{
+          filterActive ? "当前筛选范围内的活跃任务" : "全部类型的活跃任务"
+        }}</span>
       </div>
       <div class="stat-card">
         <span class="stat-label">正在执行</span
@@ -370,6 +449,64 @@ function cancelPending() {
           </button>
         </div>
       </div>
+      <form
+        class="toolbar task-filters"
+        aria-label="任务筛选"
+        @submit.prevent="applyFilters"
+      >
+        <label class="inline filter-field"
+          >任务类型<select
+            v-model="filters.job_type"
+            class="select"
+            aria-label="按任务类型筛选"
+          >
+            <option value="">全部类型</option>
+            <option
+              v-for="option in jobTypeOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select></label
+        >
+        <label class="inline filter-field"
+          >状态<select
+            v-model="filters.status"
+            class="select"
+            aria-label="按任务状态筛选"
+          >
+            <option value="">全部状态</option>
+            <option
+              v-for="option in statusOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select></label
+        >
+        <label class="inline filter-field filter-search"
+          >关键词<input
+            v-model="filters.q"
+            class="input"
+            type="search"
+            placeholder="邮箱或任务 ID"
+            aria-label="按邮箱或任务 ID 筛选"
+        /></label>
+        <button type="submit" class="btn btn-sm btn-primary">应用筛选</button>
+        <button
+          type="button"
+          class="btn btn-sm"
+          :disabled="!filterActive && !filterDirty"
+          @click="resetFilters"
+        >
+          重置
+        </button>
+        <span v-if="filterActive" class="muted filter-summary"
+          >已筛选：{{ filterSummary }}</span
+        >
+      </form>
       <div class="toolbar task-toolbar">
         <span class="muted">{{
           updated ? `更新于 ${updated}` : "正在同步任务状态"
@@ -465,18 +602,27 @@ function cancelPending() {
         v-if="view === 'active' && activeTotal > active.length"
         class="alert table-alert"
       >
-        当前展示最近 {{ active.length }} 个活跃任务，共 {{ activeTotal }} 个。
+        当前展示最近 {{ active.length }} 个{{ filterActive ? "符合筛选条件的" : "" }}活跃任务，共
+        {{ activeTotal }} 个。
       </div>
       <div v-if="loading && !loaded" class="empty-state" role="status">
         正在加载{{ view === "active" ? "进行中" : "历史" }}任务…
       </div>
       <UiEmpty
         v-else-if="!rows.length && !error"
-        :title="view === 'active' ? '当前没有进行中的任务' : '暂无历史任务'"
+        :title="
+          filterActive
+            ? '没有符合筛选条件的任务'
+            : view === 'active'
+              ? '当前没有进行中的任务'
+              : '暂无历史任务'
+        "
         :description="
-          view === 'active'
-            ? '所有任务已经处理完毕，新任务将在这里显示。'
-            : '任务完成后，执行结果和日志会保留在这里。'
+          filterActive
+            ? '换个任务类型、状态或关键词，或者重置筛选条件。'
+            : view === 'active'
+              ? '所有任务已经处理完毕，新任务将在这里显示。'
+              : '任务完成后，执行结果和日志会保留在这里。'
         "
       />
       <div v-else-if="rows.length" class="table-wrap" :aria-busy="loading">
@@ -643,6 +789,32 @@ function cancelPending() {
   gap: 12px;
   font-size: 12px;
   border-bottom: 1px solid var(--border, #e5e7eb);
+}
+.task-filters {
+  padding: 14px 20px;
+  gap: 10px;
+  font-size: 12px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  background: var(--surface-secondary, #f8fafc);
+}
+.filter-field {
+  gap: 6px;
+  color: var(--text-secondary, #64748b);
+}
+.filter-field select {
+  width: 150px;
+}
+.filter-search .input {
+  width: 200px;
+  min-height: 30px;
+  padding: 2px 8px;
+}
+.filter-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
 }
 .page-size {
   margin-left: auto;

@@ -76,7 +76,7 @@ def test_login_navigation_mobile_and_session_expiry(browser_page):
     expect(page.get_by_role('heading', name='账号管理', exact=True)).to_be_visible()
     for path, heading in [('/', '注册与概览'), ('/tasks', '任务中心'), ('/mailboxes', '邮箱池'),
                           ('/codex', 'Codex 授权'), ('/redemptions', '兑换管理'),
-                          ('/providers', '提链服务'), ('/settings', '系统配置')]:
+                          ('/providers', '服务与凭据'), ('/settings', '系统配置')]:
         page.locator(f'nav[aria-label="主导航"] a[href="{path}"]').click()
         expect(page.get_by_role('heading', name=heading, exact=True).first).to_be_visible()
         page.reload(wait_until='networkidle')
@@ -120,14 +120,18 @@ def test_account_import_dialog_and_sensitive_data(browser_page):
     page.get_by_role('button', name='导入账号', exact=True).click()
     expect(page.get_by_role('dialog', name='导入已有账号').get_by_label('账号内容')).to_have_value('')
     page.keyboard.press('Escape')
-    # 每一行都显示兑换状态；账号被 CDK 领取后该行切换为「已兑换」。
+    # 每行都带兑换状态；默认隐藏已兑换账号，点「显示已兑换账号」后才一起出现。
     from core import db
     row = page.locator('tbody tr', has=page.get_by_role('button', name='demo0@example.test', exact=True))
     expect(row.get_by_text('未兑换', exact=True)).to_be_visible()
     db.redeem_plus_accounts(db.create_redeem_code(quantity=1, account_group='默认分组')['code'])
     page.reload(wait_until='networkidle')
+    expect(page.get_by_role('button', name='demo0@example.test', exact=True)).to_have_count(0)
+    page.get_by_role('button', name='显示已兑换账号', exact=True).click()
     claimed = page.locator('tbody tr', has=page.get_by_role('button', name='demo0@example.test', exact=True))
     expect(claimed.get_by_text('已兑换', exact=True)).to_be_visible()
+    page.get_by_role('button', name='隐藏已兑换账号', exact=True).click()
+    expect(page.get_by_role('button', name='demo0@example.test', exact=True)).to_have_count(0)
     assert not errors
 
 

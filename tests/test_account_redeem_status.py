@@ -116,3 +116,33 @@ def test_account_api_exposes_redemption_state_without_leaking_code(redeemed_acco
     assert lookup["matches"][0]["redeemed"] is True
     # 与其他筛选一致：被当前兑换状态筛掉的邮箱按“未匹配”返回。
     assert lookup["not_found"] == ["available@example.test"]
+
+
+def test_redemption_filter_applies_to_plan_check_status(redeemed_accounts, client):
+    """账号列表默认隐藏已兑换账号，套餐状态轮询必须使用同一筛选。"""
+    claimed_id, available_id, _ = redeemed_accounts
+
+    snapshot = db.list_account_plan_check_statuses(limit=10, redemption_filter="unredeemed")
+    assert [item["id"] for item in snapshot["items"]] == [available_id]
+    assert snapshot["total"] == 1
+
+    claimed_snapshot = db.list_account_plan_check_statuses(limit=10, redemption_filter="redeemed")
+    assert [item["id"] for item in claimed_snapshot["items"]] == [claimed_id]
+
+    response = client.get(
+        "/api/accounts/plan-check-status?page=1&page_size=10&redemption=unredeemed", headers=AUTH
+    )
+    payload = response.get_json()
+    assert [item["id"] for item in payload["items"]] == [available_id]
+    assert payload["total"] == 1
+
+    claimed_payload = client.get(
+        "/api/accounts/plan-check-status?page=1&page_size=10&redemption=redeemed", headers=AUTH
+    ).get_json()
+    assert [item["id"] for item in claimed_payload["items"]] == [claimed_id]
+
+    # 不传或传空表示全部账号，兼容旧页面和外部调用。
+    all_payload = client.get(
+        "/api/accounts/plan-check-status?page=1&page_size=10&redemption=", headers=AUTH
+    ).get_json()
+    assert all_payload["total"] == 2

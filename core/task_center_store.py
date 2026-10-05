@@ -520,34 +520,101 @@ def _account_capabilities(job_type: str, account_id, status: str) -> tuple[dict,
     }, state
 
 
-def _union(where):
-    return f"{_REG_SELECT} WHERE {where} UNION ALL {_ACCOUNT_SELECT} WHERE {where}"
+def filter_options() -> dict:
+    """筛选下拉项：任务类型取展示标签，状态取统一状态分组。"""
+    return {
+        "job_types": [{"value": name, "label": label} for name, label in LABELS.items()],
+        "statuses": [{"value": name, "label": _STAGE[name]} for name in _STAGE],
+    }
 
 
-def list_active_tasks(limit=5000) -> list[dict]:
+def normalize_filters(job_type=None, status=None, keyword=None) -> tuple:
+    """校验并归一化筛选条件；未知类型/状态直接拒绝，关键词只做 LIKE 转义。"""
+    kind = str(job_type or "").strip().lower()
+    if kind and kind not in LABELS:
+        raise ValueError("不支持的任务类型")
+    group = str(status or "").strip().lower()
+    if group and group not in _STATUS_GROUPS:
+        raise ValueError("不支持的任务状态")
+    text = str(keyword or "").strip()[:200]
+    text = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return kind or None, group or None, text or None
+
+
+def _filter_clauses(table, job_type, status, keyword):
+    """一侧 UNION 的筛选片段；值经白名单校验并全部走参数绑定。"""
+    clauses, params = [], []
+    if job_type:
+        if table == "registration":
+            if job_type == "codex_retry":
+                clauses.append("json_extract(payload,'$.job_type')='codex_retry'")
+            elif job_type == "registration":
+                clauses.append("COALESCE(json_extract(payload,'$.job_type'),'')!='codex_retry'")
+            else:
+                clauses.append("1=0")  # 注册任务表没有这类账号任务
+        else:
+            clauses.append("job_type=?")
+            params.append(job_type)
+    if status:
+        sources = sorted(_STATUS_GROUPS.get(status, ()))
+        if sources:
+            clauses.append("status IN (" + ",".join("?" for _ in sources) + ")")
+            params.extend(sources)
+        else:
+            clauses.append("1=0")
+    if keyword:
+        prefix = "registration" if table == "registration" else "account"
+        clauses.append(f"(email LIKE ? ESCAPE '\\' OR ('{prefix}-' || id) LIKE ? ESCAPE '\\')")
+        params.extend((f"%{keyword}%", f"%{keyword}%"))
+    return clauses, params
+
+
+def _filtered_union(base, job_type=None, status=None, keyword=None) -> tuple:
+    """两个来源各自的 WHERE 与参数：筛选条件按表下推，分页总数与列表保持一致。"""
+    reg_extra, reg_params = _filter_clauses("registration", job_type, status, keyword)
+    acct_extra, acct_params = _filter_clauses("account", job_type, status, keyword)
+    reg_where = " AND ".join([base, *reg_extra])
+    acct_where = " AND ".join([base, *acct_extra])
+    sql = f"{_REG_SELECT} WHERE {reg_where} UNION ALL {_ACCOUNT_SELECT} WHERE {acct_where}"
+    return sql, [*reg_params, *acct_params]
+
+
+def _filter_where(base, job_type, status, keyword) -> tuple:
+    """COUNT 查询的按表 WHERE 与参数（顺序与 _filtered_union 一致）。"""
+    reg_extra, reg_params = _filter_clauses("registration", job_type, status, keyword)
+    acct_extra, acct_params = _filter_clauses("account", job_type, status, keyword)
+    return " AND ".join([base, *reg_extra]), " AND ".join([base, *acct_extra]), [*reg_params, *acct_params]
+
+
+def list_active_tasks(limit=5000, *, job_type=None, status=None, keyword=None) -> list[dict]:
     """Newest executions first, globally across types; at most 5,000 rows."""
     _expire_payment_leases()
     limit = max(1, min(5000, int(limit)))
+    job_type, status, keyword = normalize_filters(job_type, status, keyword)
+    sql, params = _filtered_union("status IN " + _ACTIVE_SQL, job_type, status, keyword)
     with closing(db._sqlite_conn()) as conn:
         rows = conn.execute(
-            f"SELECT * FROM ({_union('status IN ' + _ACTIVE_SQL)}) ORDER BY sort_at DESC,sequence DESC,kind DESC LIMIT ?",
-            (limit,),
+            f"SELECT * FROM ({sql}) ORDER BY sort_at DESC,sequence DESC,kind DESC LIMIT ?",
+            (*params, limit),
         )
         return [_public(row, conn) for row in rows]
 
 
-def list_history_tasks_page(limit=20, offset=0) -> dict:
+def list_history_tasks_page(limit=20, offset=0, *, job_type=None, status=None, keyword=None) -> dict:
     """SQL COUNT and global LIMIT/OFFSET, with needs_attention included in history."""
     _expire_payment_leases()
     limit, offset = max(1, min(500, int(limit))), max(0, int(offset))
-    where = "status NOT IN " + _ACTIVE_SQL
+    job_type, status, keyword = normalize_filters(job_type, status, keyword)
+    base = "status NOT IN " + _ACTIVE_SQL
+    reg_where, acct_where, count_params = _filter_where(base, job_type, status, keyword)
+    sql, params = _filtered_union(base, job_type, status, keyword)
     with closing(db._sqlite_conn()) as conn, conn:
         conn.execute("BEGIN")  # count and page share a consistent WAL snapshot
-        total = conn.execute(f"""SELECT (SELECT COUNT(*) FROM registration_jobs WHERE {where})
-            + (SELECT COUNT(*) FROM account_tasks WHERE {where})""").fetchone()[0]
+        total = conn.execute(f"""SELECT (SELECT COUNT(*) FROM registration_jobs WHERE {reg_where})
+            + (SELECT COUNT(*) FROM account_tasks WHERE {acct_where})""", count_params).fetchone()[0]
         rows = conn.execute(
-            f"SELECT * FROM ({_union(where)}) ORDER BY sort_at DESC,sequence DESC,kind DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            f"SELECT * FROM ({sql}) ORDER BY sort_at DESC,sequence DESC,kind DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
         )
         return {"items": [_public(row, conn) for row in rows], "total": total}
 
@@ -561,15 +628,21 @@ def concurrency_overview() -> list[dict]:
     return sorted(items, key=lambda item: item["name"])
 
 
-def task_status_counts() -> dict:
+def task_status_counts(*, job_type=None, status=None, keyword=None) -> dict:
+    """各状态计数；带筛选时统计口径与当前列表一致。"""
     _expire_payment_leases()
-    counts = {status: 0 for status in _STATUS_GROUPS}
+    counts = {group: 0 for group in _STATUS_GROUPS}
+    job_type, status, keyword = normalize_filters(job_type, status, keyword)
+    reg_where, acct_where, params = _filter_where("1=1", job_type, status, keyword)
     with closing(db._sqlite_conn()) as conn:
-        for row in conn.execute("""SELECT status,COUNT(*) AS n FROM registration_jobs GROUP BY status
-            UNION ALL SELECT status,COUNT(*) AS n FROM account_tasks GROUP BY status"""):
+        for row in conn.execute(
+            f"""SELECT status,COUNT(*) AS n FROM registration_jobs WHERE {reg_where} GROUP BY status
+                UNION ALL SELECT status,COUNT(*) AS n FROM account_tasks WHERE {acct_where} GROUP BY status""",
+            params,
+        ):
             counts[_NORMALIZED[_source(row["status"])]] += row["n"]
-    counts["active"] = sum(counts[status] for status in ACTIVE)
-    counts["total"] = sum(value for status, value in counts.items() if status != "active")
+    counts["active"] = sum(counts[group] for group in ACTIVE)
+    counts["total"] = sum(value for group, value in counts.items() if group != "active")
     return counts
 
 

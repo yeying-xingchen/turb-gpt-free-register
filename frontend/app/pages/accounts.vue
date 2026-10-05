@@ -34,14 +34,18 @@ const filters = reactive({
   plan: "",
   codex_status: "",
   totp_status: "",
-  redemption: "",
+  redemption: "unredeemed",
   group: "",
   date_from: "",
   date_to: "",
   promo_type: "",
   promo_discount: "",
 });
-const applied = ref<Record<string, string>>({ archived: "0" });
+// 默认隐藏已被兑换码领取的账号，点工具栏按钮后再一起显示。
+const applied = ref<Record<string, string>>({
+  archived: "0",
+  redemption: "unredeemed",
+});
 const advancedFilters = ref(false);
 const autoRefresh = ref(true);
 const lastUpdated = ref("");
@@ -79,6 +83,10 @@ const somePageSelected = computed(() =>
   rows.value.some((row) => selected.value.has(row.id)),
 );
 const selectedRows = computed(() => Array.from(selected.value.values()));
+// 只要当前没有限定「未兑换」，就说明已兑换账号正在一起显示。
+const showRedeemed = computed(
+  () => applied.value.redemption !== "unredeemed",
+);
 const operationRows = computed(() =>
   operationSeed.value.map(
     (account) =>
@@ -224,7 +232,7 @@ function resetFilters() {
     plan: "",
     codex_status: "",
     totp_status: "",
-    redemption: "",
+    redemption: "unredeemed",
     group: "",
     date_from: "",
     date_to: "",
@@ -232,6 +240,13 @@ function resetFilters() {
     promo_discount: "",
   });
   applyFilters();
+}
+function toggleRedeemed() {
+  const redemption = showRedeemed.value ? "unredeemed" : "";
+  filters.redemption = redemption;
+  applied.value = { ...applied.value, redemption };
+  page.value = 1;
+  clearSelection();
 }
 watch([page, pageSize, applied], () => {
   if (initialized) void loadAccounts();
@@ -673,6 +688,19 @@ async function afterOperation() {
           ><button class="btn btn-sm" @click="lookupOpen = true">
             按邮箱选中
           </button>
+          <button
+            class="btn btn-sm"
+            type="button"
+            :aria-pressed="showRedeemed"
+            :title="
+              showRedeemed
+                ? '当前已兑换账号一起显示，点击后恢复默认隐藏'
+                : '默认隐藏已被兑换码领取的账号，点击后一起显示'
+            "
+            @click="toggleRedeemed"
+          >
+            {{ showRedeemed ? "隐藏已兑换账号" : "显示已兑换账号" }}
+          </button>
         </div>
       </div>
       <div class="account-actionbar" role="group" aria-label="批量操作">
@@ -927,7 +955,7 @@ async function afterOperation() {
       </div>
     </section>
     <p class="muted list-hint">
-      列表只加载账号状态。密码、AT、2FA 密钥和 Agent 凭据仅在复制或导出时读取。
+      列表只加载账号状态。密码、AT、2FA 密钥和 Agent 凭据仅在复制或导出时读取。默认隐藏已被兑换码领取的账号，可点「显示已兑换账号」一起查看。
     </p>
 
     <ImportModal
@@ -969,7 +997,7 @@ async function afterOperation() {
     <UiModal v-model:open="lookupOpen" title="按邮箱批量选中">
       <form id="accounts-lookup" class="stack" @submit.prevent="lookup">
         <p class="muted">
-          每行一个邮箱，也可用空格、逗号或分号分隔。按当前归档、套餐、分组和日期筛选查找，支持原邮箱匹配；不会受搜索关键词限制。
+          每行一个邮箱，也可用空格、逗号或分号分隔。按当前归档、套餐、分组和日期筛选查找，支持原邮箱匹配；不会受搜索关键词限制。列表默认隐藏已兑换账号，需要匹配时先点工具栏的「显示已兑换账号」。
         </p>
         <label class="field"
           >邮箱列表<textarea

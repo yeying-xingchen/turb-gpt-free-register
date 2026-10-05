@@ -554,6 +554,9 @@
             <label class="inline-num" title="默认只显示未归档账号；勾选后单独查看归档账号">
               <input id="showArchivedAccounts" type="checkbox" style="width:auto;min-height:auto;"> 查看归档
             </label>
+            <label class="inline-num" title="默认隐藏已被 CDK 领取的账号；勾选后把已兑换账号一起显示（已兑换账号会带标记）">
+              <input id="showRedeemedAccounts" type="checkbox" style="width:auto;min-height:auto;"> 显示已兑换
+            </label>
             <label class="inline-num" title="只查询/显示已开通套餐的账号">
               <input id="showPlusAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 已开通套餐
             </label>
@@ -845,6 +848,8 @@ let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
 let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
 let SHOW_FREE_ACCOUNTS_ONLY = false;
+// 默认隐藏已被 CDK 领取的账号，勾选「显示已兑换」后才一起查询/展示。
+let SHOW_REDEEMED_ACCOUNTS = false;
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
@@ -1438,6 +1443,10 @@ function getAccountsGroupFilter() {
   const el = $('#groupFilter');
   return (el ? el.value : '').trim();
 }
+function getAccountsRedemptionFilter() {
+  // 返回 '' 表示不限制兑换状态；默认只查询未兑换账号。
+  return SHOW_REDEEMED_ACCOUNTS ? '' : 'unredeemed';
+}
 function getAccountsPlanFilter() {
   if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
   if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) {
@@ -1457,9 +1466,10 @@ async function loadAccounts() {
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
     const group = getAccountsGroupFilter();
+    const redemption = getAccountsRedemptionFilter();
     const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&q=${encodeURIComponent(q)}`);
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -1477,9 +1487,10 @@ async function pollAccountPlanStatuses() {
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
     const group = getAccountsGroupFilter();
+    const redemption = getAccountsRedemptionFilter();
     const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&q=${encodeURIComponent(q)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -1780,7 +1791,7 @@ function renderAccounts() {
     <tr>
       <td><input type="checkbox" class="account-row-check" data-account-id="${esc(r.id)}" ${ACCOUNT_SELECTED.has(Number(r.id)) ? 'checked' : ''}></td>
       <td class="muted">#${esc(r.id)}</td>
-      <td class="account-email-cell" title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}"><div class="main-cell">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>${r.original_email ? `<div class="account-email-history">原邮箱: ${esc(r.original_email)}</div>` : ''}<div class="account-email-group">分组：${esc(r.group_name || '默认分组')}</div><div class="account-email-user">${esc(r.user_name || '-')}</div>${['queued','running'].includes(r.email_change_status) ? '<div class="account-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? '<div class="account-email-status">换绑失败</div>' : '')}</td>
+      <td class="account-email-cell" title="${esc(r.email || '-')}${r.original_email ? `\n原邮箱: ${esc(r.original_email)}` : ''}\n${esc(r.user_name || '-')}"><div class="main-cell">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}${r.redeemed ? ` <span class="pill status-used" title="已被兑换码领取${r.redeemed_at ? '：' + esc(r.redeemed_at) : ''}">已兑换</span>` : ''}</div>${r.original_email ? `<div class="account-email-history">原邮箱: ${esc(r.original_email)}</div>` : ''}<div class="account-email-group">分组：${esc(r.group_name || '默认分组')}</div><div class="account-email-user">${esc(r.user_name || '-')}</div>${['queued','running'].includes(r.email_change_status) ? '<div class="account-email-status">换绑中</div>' : (r.email_change_status === 'failed' ? '<div class="account-email-status">换绑失败</div>' : '')}</td>
       <td>${esc(r.email_source || '-')}</td>
       <td><span class="mono" title="列表仅显示预览，完整 Token 请点复制">${r.has_access_token ? '有Token' : '<span class="muted">无Token</span>'}</span>${_liveStatusSub(r)}</td>
       <td class="col-password">${_passwordCell(r)}</td>
@@ -2241,6 +2252,13 @@ $('#btnStopSelectedCodex').addEventListener('click', stopSelectedCodex);
 $('#btnCheckSelectedPlans').addEventListener('click', checkSelectedPlans);
 $('#showArchivedAccounts').addEventListener('change', async (e) => {
   SHOW_ARCHIVED_ACCOUNTS = !!e.target.checked;
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+});
+$('#showRedeemedAccounts').addEventListener('change', async (e) => {
+  SHOW_REDEEMED_ACCOUNTS = !!e.target.checked;
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
   await loadAccounts();
