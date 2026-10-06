@@ -73,6 +73,13 @@ IP_GEO_ENDPOINTS = [
     "https://ipapi.co/json",
     "https://ipwho.is/",
 ]
+# 出口 IP 地理信息缓存（秒 / 条数）。Cloak 每次启动都要先按出口解析 locale/timezone，
+# 同一个代理出口在批量查活里会被反复命中；缓存后同一出口只在首次真正发起 HTTP 查询，
+# 后续启动直接复用，省掉一次完整网络往返。0 表示关闭缓存。
+IP_GEO_CACHE_TTL = 1800.0
+IP_GEO_CACHE_SIZE = 256
+# 解析失败（网络抖动/出口被墙）时的短缓存秒数，避免每次启动都重试全部 endpoint。
+IP_GEO_FAILURE_CACHE_TTL = 60.0
 
 # 代理出口质量诊断：默认不拦截，只在手动开启时拒绝云厂商/DC ASN。
 # 用户可能明确使用固定云出口复现实验抓包，因此默认 False。
@@ -404,4 +411,4 @@ def validate_browser_profile(profile: dict) -> list[str]:
     return issues
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'BROWSER_LOCALE_PROFILE': 'str', 'AUTO_BROWSER_LOCALE_FROM_IP': 'bool', 'IP_GEO_TIMEOUT': 'float', 'REJECT_CLOUD_PROXY': 'bool', 'BROWSER_DATA_SAVER_MODE': 'bool', 'BROWSER_DATA_SAVER_DEEP_MODE': 'bool', 'BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES': 'list_str_multiline', 'BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS': 'list_str_multiline', 'BROWSER_TRAFFIC_DETAIL_LOG': 'bool', 'BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES': 'int', 'BROWSER_JS_COVERAGE_LOG': 'bool', 'BROWSER_JS_COVERAGE_MAX_ENTRIES': 'int'})
+apply_env_overrides(globals(), {'BROWSER_LOCALE_PROFILE': 'str', 'AUTO_BROWSER_LOCALE_FROM_IP': 'bool', 'IP_GEO_TIMEOUT': 'float', 'IP_GEO_CACHE_TTL': 'float', 'IP_GEO_CACHE_SIZE': 'int', 'IP_GEO_FAILURE_CACHE_TTL': 'float', 'REJECT_CLOUD_PROXY': 'bool', 'BROWSER_DATA_SAVER_MODE': 'bool', 'BROWSER_DATA_SAVER_DEEP_MODE': 'bool', 'BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES': 'list_str_multiline', 'BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS': 'list_str_multiline', 'BROWSER_TRAFFIC_DETAIL_LOG': 'bool', 'BROWSER_TRAFFIC_DETAIL_MAX_ENTRIES': 'int', 'BROWSER_JS_COVERAGE_LOG': 'bool', 'BROWSER_JS_COVERAGE_MAX_ENTRIES': 'int'})

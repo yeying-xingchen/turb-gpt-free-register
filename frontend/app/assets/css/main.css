@@ -558,7 +558,8 @@ input[type="number"] {
   border-collapse: collapse;
   text-align: left;
   font-size: 12px;
-  white-space: nowrap;
+  /* 表头保持单行，单元格内容默认可换行（见下方 td 规则）。 */
+  white-space: normal;
 }
 .data-table th {
   background: #fafbfc;
@@ -568,11 +569,15 @@ input[type="number"] {
   letter-spacing: 0.4px;
   color: #84909f;
   border-bottom: 1px solid var(--border);
+  white-space: nowrap;
 }
 .data-table td {
   padding: 15px 17px;
   border-bottom: 1px solid #f0f2f5;
   vertical-align: middle;
+  /* 列设有 max-width 时，长文本/长邮箱在列内换行断词，
+     而不是因为 nowrap 溢出到相邻列上。单行省略的单元格自行声明 nowrap。 */
+  overflow-wrap: anywhere;
 }
 .data-table tr:last-child td {
   border-bottom: 0;

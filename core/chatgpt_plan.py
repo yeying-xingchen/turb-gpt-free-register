@@ -230,6 +230,22 @@ def _common_headers(
     return headers
 
 
+def chatgpt_api_headers(
+    env: BrowserSession,
+    token: str,
+    claims: dict | None = None,
+    *,
+    target_path: str = ACCOUNTS_CHECK_PATH,
+) -> dict[str, str]:
+    """其它 backend-api 只读查询（额度、重置券等）复用的公开请求头入口。"""
+    return _common_headers(env, token, claims, target_path=target_path)
+
+
+def warm_chatgpt_session(env: BrowserSession) -> None:
+    """公开别名：先访问 ChatGPT document 建立同一会话的边缘 Cookie。"""
+    _warm_plan_session(env)
+
+
 def parse_subscription(data: dict) -> dict:
     """提取订阅接口中的订阅和挽留期字段。"""
     if not isinstance(data, dict):
@@ -592,6 +608,29 @@ def check_account_plan(
                                 timeout=timeout_seconds,
                             )
                         )
+                        # 额度与「银行重置」券和套餐查询共用同一条已登录会话；
+                        # 两个接口都只读，失败只写入 quota_*/reset_credits_* 错误字段，
+                        # 不影响本次套餐结果。
+                        try:
+                            from core.chatgpt_quota import fetch_account_quota
+
+                            parsed.update(
+                                fetch_account_quota(
+                                    env,
+                                    token,
+                                    subscription_account_id,
+                                    timeout=timeout_seconds,
+                                    claims=claims,
+                                )
+                            )
+                        except Exception as exc:
+                            logger.debug("额度查询失败，保留套餐结果: %s: %s", type(exc).__name__, exc)
+                            parsed.update({
+                                "quota_checked_at": now_iso(),
+                                "quota_error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                                "reset_credits_checked_at": now_iso(),
+                                "reset_credits_error": f"{type(exc).__name__}: {str(exc)[:180]}",
+                            })
                         return parsed
             except Exception as exc:
                 logger.debug("套餐查询失败: %s: %s", type(exc).__name__, exc, exc_info=True)

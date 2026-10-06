@@ -30,8 +30,14 @@ def runtime(monkeypatch):
         CLOAK_FINGERPRINT_SEED="12345",
         CLOAK_LICENSE_KEY="test-license",
         CLOAK_SELENIUM_TIMEOUT=37,
+        CLOAK_KEEP_BROWSER_OPEN=False,
+        CLOAK_MEMORY_SAVER=True,
+        CLOAK_JS_HEAP_MB=512,
+        CLOAK_MAX_CONCURRENT=0,
     )
     monkeypatch.setattr(cloak, "_cfg", cfg)
+    # 每个用例使用独立的并发额度，避免跨用例残留影响。
+    monkeypatch.setattr(cloak, "_BROWSER_GATE", cloak._BrowserGate())
     locale = Mock(return_value={
         "locale": "ja-JP",
         "timezone": "Asia/Tokyo",
@@ -143,7 +149,11 @@ def test_default_call_preserves_registration_options_and_metadata(runtime, persi
         "locale": "ja-JP",
         "timezone": "Asia/Tokyo",
         "proxy": "http://127.0.0.1:18080",
-        "args": ["--disable-dev-shm-usage", "--fingerprint=12345"],
+        "args": [
+            "--js-flags=--max-old-space-size=512",
+            "--disable-dev-shm-usage",
+            "--fingerprint=12345",
+        ],
         "license_key": "test-license",
     }
     if persistent:

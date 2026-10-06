@@ -379,6 +379,25 @@
               <option value="failed">2FA：设置失败</option>
             </select>
           </label>
+          <label class="acc-v2-inline" title="按 access_token 是否过期筛选账号；过期账号需要重新查活刷新 AT">
+            <select id="atStatusFilterV2">
+              <option value="">AT：全部</option>
+              <option value="expired">AT：已过期</option>
+              <option value="valid">AT：未过期</option>
+              <option value="unknown">AT：信息不足</option>
+            </select>
+          </label>
+          <label class="acc-v2-inline" title="按最近一次查活结果筛选账号；「未查活」表示从未查活或状态被重置">
+            <select id="liveStatusFilterV2">
+              <option value="">查活：全部</option>
+              <option value="failed">查活：失败</option>
+              <option value="success">查活：正常</option>
+              <option value="deactivated">查活：已废号</option>
+              <option value="checking">查活：进行中</option>
+              <option value="cancelled">查活：已取消</option>
+              <option value="never">查活：未查活</option>
+            </select>
+          </label>
           <label class="acc-v2-inline" title="只显示指定分组的账号">
             <select id="groupFilterV2">
               <option value="">分组：全部</option>
@@ -401,8 +420,11 @@
           <label class="acc-v2-bulk-workers" title="用于批量查活、查套餐和补跑 Codex">任务并发
             <input id="codexBulkWorkersV2" type="number" min="1" max="16" value="3" inputmode="numeric">
           </label>
+          <button type="button" class="jobs-tb-btn" id="btnSelectFilteredAccountsV2" title="按当前筛选条件（归档/套餐/Codex/2FA/分组/兑换/日期/关键词）收集全部账号 ID 并替换当前选择；不受分页限制">选择全部筛选结果</button>
+          <button type="button" class="jobs-tb-btn" id="btnSelectAllAccountsV2" title="忽略全部筛选条件，收集账号库里的全部账号 ID 并替换当前选择，包含已兑换与已归档账号">全选所有账号</button>
+          <span id="accountsSelectAllHintV2" title="「选择全部筛选结果」只选中当前筛选条件命中的账号；「全选所有账号」忽略筛选条件，包含已兑换与已归档账号。两者都会替换当前选择，选择数量不受限制。">筛选结果 = 当前筛选；所有账号 = 含已兑换与已归档</span>
           <button type="button" class="jobs-tb-btn" id="btnClearAccountSelectionV2" disabled>清空选择</button>
-          <p id="accountsSelectionHelpV2">以下操作仅作用于已选账号；翻页保留选择，修改筛选会清空。</p>
+          <p id="accountsSelectionHelpV2">以下操作仅作用于已选账号；翻页保留选择，修改筛选会清空。选择超过后端单次上限时会自动分批提交。</p>
         </div>
         <div class="acc-v2-bulk-actions">
           <button type="button" class="jobs-tb-btn" id="btnCheckSelectedLiveV2" disabled onclick="checkSelectedLive()" title="重新登录选中账号；成功且未封号则标记正常，并刷新最新 AT/accessToken">查活</button>

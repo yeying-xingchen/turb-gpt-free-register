@@ -9,6 +9,7 @@ CONCURRENCY_KEYS = {
     "registration": "REGISTRATION_WORKERS",
     "live_check": "LIVE_CHECK_WORKERS",
     "plan_check": "PLAN_CHECK_WORKERS",
+    "quota_check": "QUOTA_CHECK_WORKERS",
     "codex_agent": "CODEX_AGENT_WORKERS",
     "totp_setup": "TWOFA_WORKERS",
     "email_change": "EMAIL_CHANGE_WORKERS",
@@ -17,7 +18,8 @@ CONCURRENCY_KEYS = {
 }
 # 热加载配置后需要重新应用并发数的后台队列。
 _SETTINGS_SERVICES = (
-    "registration_service", "live_check_service", "plan_check_service", "codex_agent_service",
+    "registration_service", "live_check_service", "plan_check_service", "quota_check_service",
+    "codex_agent_service",
     "twofa_service", "email_change_service", "extract_link_service", "plus_activation_service",
 )
 

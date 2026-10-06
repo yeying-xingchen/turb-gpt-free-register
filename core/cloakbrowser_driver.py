@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +13,13 @@ from typing import Any
 from config import cloakbrowser as _cfg
 
 logger = logging.getLogger(__name__)
+
+# 单个 Cloak 浏览器（Chromium + Playwright 驱动进程）在批量任务里的经验内存占用。
+# 只用于自动推算并发上限，不是硬性预留。
+_BROWSER_MEMORY_MB = 700
+_MAX_AUTO_CONCURRENCY = 32
+# 拿不到并发额度时的最长等待；超过后放行并告警，避免一次异常泄漏把整条队列卡死。
+_GATE_WAIT_SECONDS = 180.0
 
 
 @dataclass
@@ -123,14 +132,116 @@ class _SwitchTo:
         self._driver._switch_window(handle)
 
 
+def _available_memory_mb() -> float | None:
+    """读取当前可用内存（MB）；读不到时返回 None，调用方退回不限制。"""
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    try:
+        pages = os.sysconf("SC_AVPHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            return pages * page_size / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    return None
+
+
+class _BrowserGate:
+    """限制同时存活的 Cloak 浏览器数量，避免并发过高把内存打满。
+
+    上限可以按可用内存动态计算：内存越紧张，同时启动的浏览器越少；已经在跑的
+    浏览器不受影响，只有新的启动请求会排队等待。
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._in_use = 0
+        self._local = threading.local()
+
+    @staticmethod
+    def _configured_limit() -> int:
+        try:
+            value = int(getattr(_cfg, "CLOAK_MAX_CONCURRENT", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            value = 0
+        return max(0, min(_MAX_AUTO_CONCURRENCY, value))
+
+    def limit(self) -> int | None:
+        """返回当前允许的并发上限；None 表示不限制。"""
+        configured = self._configured_limit()
+        if configured:
+            return configured
+        available = _available_memory_mb()
+        if available is None:
+            return None
+        return max(1, min(_MAX_AUTO_CONCURRENCY, int(available // _BROWSER_MEMORY_MB)))
+
+    def acquire(self, *, timeout: float = _GATE_WAIT_SECONDS) -> bool:
+        """占用一个浏览器额度；返回 False 表示等超时后放行（调用方已告警）。
+
+        同一线程内可重入：已经持有额度的线程再次启动浏览器时不再排队，
+        避免注册→授权这类同线程嵌套流程互相等待。
+        """
+        depth = getattr(self._local, "depth", 0)
+        if depth > 0:
+            self._local.depth = depth + 1
+            return True
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        logged = False
+        with self._cond:
+            while True:
+                limit = self.limit()
+                if limit is None or self._in_use < limit:
+                    self._in_use += 1
+                    self._local.depth = 1
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # 额度长时间拿不到（例如某个浏览器卡死）时放行，保证队列能继续。
+                    self._in_use += 1
+                    self._local.depth = 1
+                    return False
+                if not logged:
+                    logged = True
+                    logger.info(
+                        "[Cloak] 等待浏览器并发额度：运行中=%s 上限=%s 可用内存=%sMB",
+                        self._in_use, limit, int(_available_memory_mb() or 0),
+                    )
+                self._cond.wait(min(2.0, remaining))
+
+    def release(self) -> None:
+        depth = getattr(self._local, "depth", 0)
+        if depth > 1:
+            self._local.depth = depth - 1
+            return
+        self._local.depth = 0
+        with self._cond:
+            if self._in_use > 0:
+                self._in_use -= 1
+            self._cond.notify_all()
+
+    def snapshot(self) -> dict:
+        return {"in_use": self._in_use, "limit": self.limit()}
+
+
+_BROWSER_GATE = _BrowserGate()
+
+
 class CloakSeleniumDriver:
     """只实现本项目 Roxy Selenium 流程实际用到的 WebDriver 子集。"""
 
-    def __init__(self, browser: Any, context: Any | None, page: Any, proxy_relay: Any | None = None):
+    def __init__(self, browser: Any, context: Any | None, page: Any, proxy_relay: Any | None = None,
+                 gate_slot: bool = False):
         self.browser = browser
         self.context = context
         self.page = page
         self._proxy_relay = proxy_relay
+        self._gate_slot = bool(gate_slot)
         self._page_load_timeout_ms = int(getattr(_cfg, "CLOAK_SELENIUM_TIMEOUT", 90) or 90) * 1000
         self.switch_to = _SwitchTo(self)
 
@@ -191,12 +302,20 @@ class CloakSeleniumDriver:
         except Exception:
             pass
         try:
-            self.browser.close()
+            if self.browser is not None:
+                self.browser.close()
         except Exception:
             pass
         relay, self._proxy_relay = self._proxy_relay, None
         if relay is not None:
             relay.close()
+        self._release_gate_slot()
+
+    def _release_gate_slot(self) -> None:
+        """归还浏览器并发额度；重复调用安全。"""
+        if self._gate_slot:
+            self._gate_slot = False
+            _BROWSER_GATE.release()
 
     def find_elements(self, by: Any, selector: str) -> list[CloakElement]:
         loc = self._locator(by, selector)
@@ -327,8 +446,67 @@ def _normalize_proxy(proxy: str | None) -> str | None:
     return proxy.replace("socks5h://", "socks5://")
 
 
+_GEO_CACHE: dict[str, tuple[float, dict]] = {}
+_GEO_CACHE_LOCK = threading.Lock()
+
+
+def _geo_cache_settings() -> tuple[float, float, int]:
+    """(成功 TTL, 失败 TTL, 条数上限)。"""
+    from config import browser as _browser_cfg
+    def _number(name: str, default: float) -> float:
+        try:
+            value = float(getattr(_browser_cfg, name, default))
+        except (TypeError, ValueError, OverflowError):
+            return default
+        if value != value or value < 0:  # NaN / 负数按默认值处理
+            return default
+        return value
+    def _count(name: str, default: int) -> int:
+        try:
+            value = int(getattr(_browser_cfg, name, default))
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return max(0, value)
+    return (
+        _number("IP_GEO_CACHE_TTL", 1800.0),
+        _number("IP_GEO_FAILURE_CACHE_TTL", 60.0),
+        _count("IP_GEO_CACHE_SIZE", 256),
+    )
+
+
+def _geo_cache_get(key: str) -> dict | None:
+    with _GEO_CACHE_LOCK:
+        entry = _GEO_CACHE.get(key)
+        if entry is None:
+            return None
+        expires_at, value = entry
+        if expires_at <= time.monotonic():
+            _GEO_CACHE.pop(key, None)
+            return None
+        return dict(value)
+
+
+def _geo_cache_put(key: str, value: dict, ttl: float) -> None:
+    if ttl <= 0:
+        return
+    with _GEO_CACHE_LOCK:
+        if len(_GEO_CACHE) >= _geo_cache_size_limit():
+            # 简单淘汰：dict 保持插入顺序，一次性清掉最早写入的四分之一。
+            for oldest in list(_GEO_CACHE)[: max(1, len(_GEO_CACHE) // 4)]:
+                _GEO_CACHE.pop(oldest, None)
+        _GEO_CACHE[key] = (time.monotonic() + ttl, dict(value))
+
+
+def _geo_cache_size_limit() -> int:
+    return _geo_cache_settings()[2]
+
+
 def _detect_cloak_exit_geo(proxy_url: str | None = None) -> dict:
-    """按当前/代理出口检测地理信息，供 Cloak 显式 locale/timezone 使用。"""
+    """按当前/代理出口检测地理信息，供 Cloak 显式 locale/timezone 使用。
+
+    结果按出口缓存：同一代理在批量查活里会被反复使用，缓存命中时不再发起
+    HTTP 查询，浏览器启动也就少一次完整网络往返。
+    """
     try:
         import requests
         from config import browser as _browser_cfg
@@ -336,6 +514,13 @@ def _detect_cloak_exit_geo(proxy_url: str | None = None) -> dict:
         timeout = float(getattr(_browser_cfg, "IP_GEO_TIMEOUT", 6) or 6)
     except Exception:
         return {}
+    success_ttl, failure_ttl, size_limit = _geo_cache_settings()
+    cache_key = str(proxy_url or "direct")
+    if size_limit > 0:
+        cached = _geo_cache_get(cache_key)
+        if cached is not None:
+            logger.debug("[Cloak] 出口地理信息命中缓存：%s", cache_key)
+            return cached
     proxies = None
     if proxy_url:
         proxies = {"http": proxy_url, "https": proxy_url}
@@ -362,9 +547,14 @@ def _detect_cloak_exit_geo(proxy_url: str | None = None) -> dict:
                     "[Cloak] 出口IP地理信息：ip=%s country=%s city=%s timezone=%s",
                     geo.get("ip") or "?", geo.get("country") or "?", geo.get("city") or "?", geo.get("timezone") or "?",
                 )
+                if size_limit > 0:
+                    _geo_cache_put(cache_key, geo, success_ttl)
                 return geo
         except Exception as exc:
             logger.debug("[Cloak] 出口 IP 地理检测失败 endpoint=%s: %s: %s", url, type(exc).__name__, exc)
+    if size_limit > 0:
+        # 失败也短缓存，避免出口抖动时每次启动都把所有 endpoint 重试一遍。
+        _geo_cache_put(cache_key, {}, failure_ttl)
     return {}
 
 
@@ -396,6 +586,25 @@ def _build_cloak_locale_options(proxy_url: str | None = None) -> dict:
     return {k: v for k, v in out.items() if v}
 
 
+def _memory_saver_args() -> list[str]:
+    """低内存模式的启动参数。
+
+    只追加 V8 老生代上限：页面 JS 堆是单个 Cloak 浏览器里最容易失控的部分，
+    设上限能挡住异常增长把整机内存吃满。放在用户 CLOAK_EXTRA_ARGS 之前，
+    用户显式配置的同名参数仍然优先。
+    """
+    if not bool(getattr(_cfg, "CLOAK_MEMORY_SAVER", True)):
+        return []
+    try:
+        heap_mb = int(getattr(_cfg, "CLOAK_JS_HEAP_MB", 512) or 0)
+    except (TypeError, ValueError, OverflowError):
+        heap_mb = 512
+    if heap_mb <= 0:
+        return []
+    heap_mb = max(64, min(4096, heap_mb))
+    return [f"--js-flags=--max-old-space-size={heap_mb}"]
+
+
 def build_cloak_driver(
     proxy: str | None = None,
     *,
@@ -409,9 +618,17 @@ def build_cloak_driver(
     proxy=""    时显式禁用代理；
     proxy="..." 时使用指定代理。
     isolated=True 忽略 CLOAK_USER_DATA_DIR，每次创建临时独立 browser/context。
+
+    启动前会占用一个浏览器并发额度（CLOAK_MAX_CONCURRENT，0=按可用内存自动），
+    driver.quit() 时归还；这样批量任务的浏览器峰值内存可控。
     """
     browser = context = proxy_relay = None
     proxy_pool_target = ""
+    gate_slot = False
+    keep_open = bool(getattr(_cfg, "CLOAK_KEEP_BROWSER_OPEN", False))
+    if keep_open:
+        # 调试保留浏览器时不会调用 quit()，不占用额度，避免把额度泄漏光。
+        logger.debug("[Cloak] CLOAK_KEEP_BROWSER_OPEN=True，本次启动不占用浏览器并发额度")
     try:
         use_proxy = force_proxy or bool(getattr(_cfg, "CLOAK_USE_PROXY", True))
         if proxy is None and use_proxy:
@@ -428,7 +645,7 @@ def build_cloak_driver(
         except ImportError as exc:
             raise RuntimeError("未安装 cloakbrowser，请执行：pip install cloakbrowser") from exc
 
-        launch_args = list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
+        launch_args = _memory_saver_args() + list(getattr(_cfg, "CLOAK_EXTRA_ARGS", []) or [])
         seed = str(getattr(_cfg, "CLOAK_FINGERPRINT_SEED", "") or "").strip()
         if seed:
             launch_args.append(f"--fingerprint={seed}")
@@ -470,6 +687,17 @@ def build_cloak_driver(
         if locale_opts.get("accept_language"):
             context_kwargs["extra_http_headers"] = {"Accept-Language": locale_opts["accept_language"]}
 
+        if not keep_open:
+            # 只在真正要拉起浏览器前排队，出口地理查询/代理中继可以在等待期间并行完成。
+            # 无论是否在额度内拿到，acquire 都占用了一个计数，退出时必须由 quit() 归还。
+            gate_slot = True
+            if not _BROWSER_GATE.acquire():
+                logger.warning(
+                    "[Cloak] 等待浏览器并发额度超时，仍继续启动；如频繁出现请调低并发或检查残留浏览器进程"
+                )
+            logger.info("[Cloak] 浏览器并发额度：%s", _BROWSER_GATE.snapshot())
+
+        started_at = time.monotonic()
         if user_data_dir:
             context = launch_persistent_context(user_data_dir, **opts)
             browser = getattr(context, "browser", None) or context
@@ -478,8 +706,12 @@ def build_cloak_driver(
             browser = launch(**opts)
             context = browser.new_context(**context_kwargs)
         page = context.new_page()
+        logger.info("[Cloak] 浏览器启动耗时 %.2fs", time.monotonic() - started_at)
 
-        driver = CloakSeleniumDriver(browser=browser, context=context, page=page, proxy_relay=proxy_relay)
+        driver = CloakSeleniumDriver(
+            browser=browser, context=context, page=page,
+            proxy_relay=proxy_relay, gate_slot=gate_slot,
+        )
         # Roxy/Cloak 共用部分页面操作函数；给共享函数一个显式日志前缀，
         # 避免 Cloak 注册流程里出现 `[Roxy注册]`。
         driver._registration_log_prefix = "[Cloak注册]"
@@ -500,4 +732,6 @@ def build_cloak_driver(
                     resource.close()
                 except Exception:
                     logger.debug("[Cloak] 启动失败后的资源清理失败", exc_info=True)
+        if gate_slot:
+            _BROWSER_GATE.release()
         raise

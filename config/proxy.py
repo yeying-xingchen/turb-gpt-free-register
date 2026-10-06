@@ -61,6 +61,13 @@ PLAN_CHECK_QUEUE_LIMIT = 500
 PLAN_CHECK_MIN_INTERVAL = 1.0
 PLAN_CHECK_JITTER = 0.8
 
+# 额度 / 用量 / 「银行重置」券查询使用独立队列，但复用 PLAN_CHECK_PROXY_* 网络策略，
+# 因为两者请求的是同一批 chatgpt.com 只读接口。
+QUOTA_CHECK_WORKERS = 3
+QUOTA_CHECK_QUEUE_LIMIT = 500
+QUOTA_CHECK_MIN_INTERVAL = 1.0
+QUOTA_CHECK_JITTER = 0.8
+
 
 def _valid_port(value: str) -> bool:
     return value.isdigit() and 1 <= int(value) <= 65535
@@ -126,6 +133,10 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_QUEUE_LIMIT': 'int',
     'PLAN_CHECK_MIN_INTERVAL': 'float',
     'PLAN_CHECK_JITTER': 'float',
+    'QUOTA_CHECK_WORKERS': 'int',
+    'QUOTA_CHECK_QUEUE_LIMIT': 'int',
+    'QUOTA_CHECK_MIN_INTERVAL': 'float',
+    'QUOTA_CHECK_JITTER': 'float',
 })
 PROXY_POOL = normalize_proxy_list(PROXY_POOL)
 PLAN_CHECK_PROXY = normalize_proxy_list(PLAN_CHECK_PROXY)

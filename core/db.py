@@ -4,19 +4,22 @@ SQLite 持久化层（JSON/TXT 仅用于首次迁移）。
 
 运行时数据全部存储在根目录 `turb.sqlite3`；旧 JSON/TXT/Codex 文件仅用于一次性迁移。
 """
+import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import string
 import threading
+import time
 import unicodedata
 import uuid
 from contextlib import closing, contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = Path(os.environ.get("TURB_DATA_DIR") or _PROJECT_ROOT).expanduser().resolve()
@@ -54,6 +57,156 @@ _TABLES = {
 }
 _EMAIL_SOURCES = {"outlook": "outlook", "generic_api": "generic_api", "imap": "imap", "domain": "cloudflare_domain"}
 _LEGACY_TABLES = {"outlook": "outlook_pool", "generic_api": "generic_api_pool", "domain": "domain_email_pool"}
+
+# ---------------------------------------------------------------
+# 账号列表的筛选条件下推到 SQLite 索引列。
+#
+# 套餐/Codex/查活/2FA/分组/AT 状态都存在 accounts.payload 里，直接对 payload 做
+# json_extract 会让每次分页都全表解析 JSON（5 万账号约数百毫秒）。这里用 SQLite
+# VIRTUAL 生成列把同一批表达式固化下来并建索引：生成列由 SQLite 在写入时求值，
+# 不存在“代码忘了同步”的失配问题，任何写路径都自动保持一致。
+# ---------------------------------------------------------------
+
+DEFAULT_ACCOUNT_GROUP = "默认分组"
+
+# Python str.strip()/isspace() 认作空白的字符集合（SQLite trim 默认只去 ASCII 空格）。
+_PY_WS_CHARS = (
+    "\t\n\r\x0b\x0c\x1c\x1d\x1e\x1f\x85\xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000 "
+)
+_SQL_WS_CHARS = "'" + _PY_WS_CHARS.replace("'", "''") + "'"
+
+_TOKEN_EXPIRED_EXPR = "lower(COALESCE(CAST(json_extract(payload, '$.token_expired') AS TEXT), ''))"
+_PLAN_NORM_EXPR = (
+    "lower(COALESCE(NULLIF(CAST(json_extract(payload, '$.current_plan_type') AS TEXT), ''), "
+    "CAST(json_extract(payload, '$.plan_type') AS TEXT), ''))"
+)
+# “已开通 Plus”在 SQL 里只能写成 LIKE '%plus%'（前导通配符用不上索引），固化成 0/1 列后
+# 可以直接等值索引。plan_norm 已经小写，GLOB 与 Python 的 `"plus" in plan and "free" not in plan` 等价。
+_PLAN_PLUS_EXPR = (
+    "CASE WHEN plan_norm GLOB '*plus*' AND plan_norm NOT GLOB '*free*' THEN 1 ELSE 0 END"
+)
+# julianday 口径的“AT 何时算过期”：
+#   0.0 = 已标记过期（无论时间），5373484.5 = 9999-12-31（标记为未过期且无时间戳），
+#   NULL = 无法判断。与 _account_at_state 的判定优先级完全一致。
+_AT_NEVER_EXPIRES_JULIAN = 5373484.5
+# CASE <值> WHEN ... 只求值一次 json_extract（原来的 IN (...) 形式要求值两次）。
+_AT_FLAG_EXPR = (
+    f"CASE {_TOKEN_EXPIRED_EXPR} "
+    "WHEN '1' THEN 1 WHEN 'true' THEN 1 WHEN 'yes' THEN 1 WHEN 'on' THEN 1 "
+    "WHEN '0' THEN 0 WHEN 'false' THEN 0 WHEN 'no' THEN 0 WHEN 'off' THEN 0 "
+    "ELSE NULL END"
+)
+_AT_EXPIRES_TS_EXPR = "julianday(json_extract(payload, '$.token_expires_at'))"
+# 直接引用前面两个生成列，避免同一行把 payload 反复解析。
+_AT_STATE_EXP_EXPR = (
+    f"CASE WHEN at_flag = 1 THEN 0.0 "
+    "WHEN at_expires_ts IS NOT NULL THEN at_expires_ts "
+    f"WHEN at_flag = 0 THEN {_AT_NEVER_EXPIRES_JULIAN} "
+    "ELSE NULL END"
+)
+_GROUP_KEY_EXPR = (
+    "COALESCE(NULLIF(trim(COALESCE(CAST(json_extract(payload, '$.group_name') AS TEXT), ''), "
+    f"{_SQL_WS_CHARS}), ''), '{DEFAULT_ACCOUNT_GROUP}')"
+)
+_TOTP_FLAG_EXPR = (
+    "CASE WHEN length(trim(lower(COALESCE(CAST(json_extract(payload, '$.totp_secret') AS TEXT), '')))) > 0 "
+    "THEN 1 ELSE 0 END"
+)
+
+
+# 与 _extract_registration_password 对齐：extra_json 既可能是对象，也可能是 JSON 字符串；
+# Python 用 `extra.get(k) or row.get(k) or ""` 取值，所以先按“真值”逐级回退，最后统一 strip。
+# 多路径 json_extract 只解析一次 payload，返回 [extra.registration_password,
+# registration_password, extra_json] 三个槽位，后续都只解析这个小数组。
+_PASSWORD_SLOTS_EXPR = (
+    "json_extract(payload, '$.extra_json.registration_password', "
+    "'$.registration_password', '$.extra_json')"
+)
+
+
+def _password_slot_expr(slot: int) -> str:
+    value = f"json_extract({_PASSWORD_SLOTS_EXPR}, '$[{slot}]')"
+    # Python 里空对象/空数组是假值，SQL 取出来是 '{}' / '[]' 这样的真值文本，需要显式排除。
+    return (
+        f"CASE WHEN {value} IS NOT NULL AND {value} <> '' AND {value} <> 0 "
+        f"AND json_type({_PASSWORD_SLOTS_EXPR}, '$[{slot}]') NOT IN ('object', 'array') "
+        f"THEN CAST({value} AS TEXT) END"
+    )
+
+
+def _password_field_expr(base: str, path: str) -> str:
+    value = f"json_extract({base}, '{path}')"
+    return (
+        f"CASE WHEN {value} IS NOT NULL AND {value} <> '' AND {value} <> 0 "
+        f"AND json_type({base}, '{path}') NOT IN ('object', 'array') "
+        f"THEN CAST({value} AS TEXT) END"
+    )
+
+
+_EXTRA_JSON_SLOT_EXPR = f"json_extract({_PASSWORD_SLOTS_EXPR}, '$[2]')"
+_ROW_PASSWORD_EXPR = (
+    "COALESCE("
+    + _password_slot_expr(0)
+    + f", CASE WHEN json_valid({_EXTRA_JSON_SLOT_EXPR}) THEN "
+    + _password_field_expr(_EXTRA_JSON_SLOT_EXPR, "$.registration_password")
+    + " END"
+    + ", "
+    + _password_slot_expr(1)
+    + ")"
+)
+_HAS_PASSWORD_EXPR = (
+    f"CASE WHEN length(trim({_ROW_PASSWORD_EXPR}, {_SQL_WS_CHARS})) > 0 THEN 1 ELSE 0 END"
+)
+# 账号是否有可兑换凭据：生成列只覆盖 SQL 能判定的部分，真正的兑换仍走 Python 复核。
+_ACCOUNT_GENERATED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("plan_norm", _PLAN_NORM_EXPR),
+    ("plan_plus", _PLAN_PLUS_EXPR),
+    ("codex_norm", "lower(COALESCE(CAST(json_extract(payload, '$.codex_status') AS TEXT), ''))"),
+    ("live_norm", "lower(COALESCE(CAST(json_extract(payload, '$.live_check_status') AS TEXT), ''))"),
+    ("totp_flag", _TOTP_FLAG_EXPR),
+    ("group_key", _GROUP_KEY_EXPR),
+    ("email_key", f"lower(trim(email, {_SQL_WS_CHARS}))"),
+    (
+        "orig_email_key",
+        f"lower(trim(COALESCE(CAST(json_extract(payload, '$.original_email') AS TEXT), ''), {_SQL_WS_CHARS}))",
+    ),
+    ("has_password", _HAS_PASSWORD_EXPR),
+    ("at_flag", _AT_FLAG_EXPR),
+    ("at_expires_ts", _AT_EXPIRES_TS_EXPR),
+    ("at_state_exp", _AT_STATE_EXP_EXPR),
+)
+# (archived, <筛选列>, id DESC, updated_at) 同时服务分页（按 id 倒序取一页）与
+# COUNT/MAX(updated_at) 聚合（覆盖索引，无需回表）。
+_ACCOUNT_FILTER_INDEXES: tuple[tuple[str, str], ...] = (
+    ("idx_accounts_archived_page", "(archived, id DESC, updated_at)"),
+    ("idx_accounts_archived_plan", "(archived, plan_norm, id DESC, updated_at)"),
+    ("idx_accounts_archived_plan_plus", "(archived, plan_plus, id DESC, updated_at)"),
+    ("idx_accounts_archived_codex", "(archived, codex_norm, id DESC, updated_at)"),
+    ("idx_accounts_archived_live", "(archived, live_norm, id DESC, updated_at)"),
+    ("idx_accounts_archived_totp", "(archived, totp_flag, id DESC, updated_at)"),
+    ("idx_accounts_archived_group", "(archived, group_key, id DESC, updated_at)"),
+    ("idx_accounts_archived_at", "(archived, at_state_exp, id DESC, updated_at)"),
+    # 按入库时间筛选：equality(archived) + range(created_at) + 覆盖 updated_at，
+    # 否则 COUNT/MAX 要为每一行回表取 payload/updated_at（5 万行约 85ms）。
+    ("idx_accounts_archived_created", "(archived, created_at, updated_at)"),
+    ("idx_accounts_at_state_exp", "(at_state_exp)"),
+    ("idx_accounts_email_key", "(email_key)"),
+    ("idx_accounts_orig_email_key", "(orig_email_key)"),
+    # 分组统计：GROUP BY group_key 走索引即有序，可兑换数则在部分覆盖索引上判定
+    # （生成列的值已存进索引，扫描时不必再解析 payload）。
+    ("idx_accounts_group_key", "(group_key)"),
+    (
+        "idx_accounts_redeemable",
+        "(group_key, has_password, live_norm, email) WHERE archived=0",
+    ),
+)
+# 一次性回填：早期入库的账号只有 access_token，没有 token_expires_at/token_expired。
+# 补上这两项（与 insert_account 的约定一致）后，AT 状态无需再逐行回调 Python 解析 JWT。
+_AT_BACKFILL_KEY = "account_at_expiry_backfill_v1"
+# 生成列表达式集合的指纹，用于在升级后重建定义有变化的列。
+_ACCOUNT_FILTER_SCHEMA_KEY = "account_filter_schema_v1"
 
 _LEGACY_SQLITE = _LEGACY_DATA_DIR / "registrations.db"
 _LEGACY_OUTLOOK_JSON = _LEGACY_DATA_DIR / "outlook_accounts.json"
@@ -94,9 +247,99 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _is_ascii(value: str) -> bool:
+    """SQLite 的 lower()/NOCASE 只处理 ASCII；非 ASCII 需要回退到 Python 的 lower()/casefold()。"""
+    try:
+        str(value).encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _ensure_storage() -> None:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _jwt_expiry_seconds(token: object) -> float | None:
+    """仅本地解析 JWT payload 的 exp（不校验签名）；非 JWT 或缺少 exp 时返回 None。"""
+    text = str(token or "").strip().strip('"').strip("'")
+    if not text:
+        return None
+    parts = text.split(".")
+    if len(parts) < 2 or not parts[1]:
+        return None
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    except Exception:
+        return None
+    exp = data.get("exp") if isinstance(data, dict) else None
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return None
+    return float(exp)
+
+
+def _iso_utc_timestamp(value: object) -> float | None:
+    """把 ISO 时间串转成 UTC 时间戳；无时区后缀按 UTC 解释，与 SQLite julianday 一致。"""
+    parsed = _parse_iso_dt(str(value or ""))
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _account_at_state(row: dict) -> str:
+    """判断账号 AT 状态：expired（已过期）/ valid（未过期）/ unknown（信息不足）。
+
+    与 `_account_at_state_sql` 保持同一口径：先看套餐查询写回的 token_expired，
+    再看 token_expires_at 是否已到点（时间流逝会让旧结果失效），最后回退到直接解析
+    当前 access_token 的 exp，避免从未查过套餐的账号无法筛选。
+    """
+    flag = row.get("token_expired")
+    if isinstance(flag, str):
+        normalized = flag.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            flag = True
+        elif normalized in {"0", "false", "no", "off"}:
+            flag = False
+        else:
+            flag = None
+    if flag is True:
+        return "expired"
+    expires_at = _iso_utc_timestamp(row.get("token_expires_at"))
+    if expires_at is not None:
+        return "expired" if time.time() >= expires_at else "valid"
+    if flag is False:
+        return "valid"
+    derived = _jwt_expiry_seconds(row.get("access_token"))
+    if derived is None:
+        return "unknown"
+    return "expired" if time.time() >= derived else "valid"
+
+
+def _account_at_expired_sql(token: object) -> int | None:
+    """SQLite 回调（account_at_expired）：1=已过期，0=未过期，NULL=无法判断。"""
+    exp = _jwt_expiry_seconds(token)
+    if exp is None:
+        return None
+    return 1 if time.time() >= exp else 0
+
+
+def _refresh_token_expiry(row: dict) -> bool:
+    """按最新 access_token 刷新 token_expired/token_expires_at，返回是否写入。
+
+    查活成功会换发新 AT，若不刷新，旧 AT 留下的“已过期”标记会让账号一直被筛选为过期。
+    """
+    exp = _jwt_expiry_seconds(row.get("access_token"))
+    if exp is None:
+        return False
+    row["token_expires_at"] = (
+        datetime.fromtimestamp(exp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    row["token_expired"] = time.time() >= exp
+    return True
 
 
 def _sqlite_conn() -> sqlite3.Connection:
@@ -107,10 +350,23 @@ def _sqlite_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     # Use the same Unicode whitespace handling and exact identity as Python.
     conn.create_function("account_group_name", 1, lambda value: _account_group_name({"group_name": value}), deterministic=True)
+    # AT 是否过期需要解码 JWT，SQLite 无法只用 SQL 完成；仅在没有已存过期信息时才回调。
+    conn.create_function("account_at_expired", 1, _account_at_expired_sql, deterministic=True)
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
+
+
+@contextmanager
+def _connection() -> Iterator[sqlite3.Connection]:
+    """一次查询作用域内的连接：让筛选探测与分页共用同一个连接。"""
+    _ensure_sqlite()
+    conn = _sqlite_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _active_sqlite_path() -> Path:
@@ -137,6 +393,235 @@ def _read_legacy_sqlite_collection(collection: str) -> list[dict] | None:
             return [dict(row) for row in legacy_conn.execute(f"SELECT * FROM {table}").fetchall()]
     except Exception:
         return None
+
+
+def _existing_indexes(conn: sqlite3.Connection) -> set[str]:
+    return {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+
+
+def _ensure_query_indexes(conn: sqlite3.Connection) -> None:
+    """补齐其余列表页需要的覆盖索引（分页排序 + COUNT/MAX(updated_at) 聚合）。
+
+    email_pool / registration_jobs 的列表接口同样会执行 COUNT(*) 与 MAX(updated_at)；
+    updated_at 不进索引时这两项都是整表扫描（10 万行约 40ms）。
+    """
+    columns = {str(row[1]).lower() for row in conn.execute("PRAGMA table_xinfo(codex_accounts)")}
+    if "exported_count" not in columns:
+        conn.execute(
+            "ALTER TABLE codex_accounts ADD COLUMN exported_count INTEGER GENERATED ALWAYS AS "
+            "(COALESCE(CAST(json_extract(payload, '$._exported_count') AS INTEGER), 0)) VIRTUAL"
+        )
+    statements = (
+        "CREATE INDEX IF NOT EXISTS idx_codex_accounts_exported ON codex_accounts(archived, exported_count)",
+        "CREATE INDEX IF NOT EXISTS idx_email_pool_source_updated ON email_pool(source, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_email_pool_updated ON email_pool(updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_email_pool_source_created ON email_pool(source, created_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_email_pool_created_id ON email_pool(created_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_registration_jobs_updated ON registration_jobs(updated_at DESC)",
+    )
+    existing = _existing_indexes(conn)
+    created = False
+    for statement in statements:
+        name = statement.split(" IF NOT EXISTS ", 1)[1].split(" ON ", 1)[0]
+        if name in existing:
+            continue
+        conn.execute(statement)
+        created = True
+    if created:
+        # 新索引会让优化器手里的基数失效（例如 email_pool 改走建表时的老索引），统一重算。
+        for table in ("codex_accounts", "email_pool", "registration_jobs"):
+            conn.execute(f"ANALYZE {table}")
+
+
+def _repair_email_pool_sources(conn: sqlite3.Connection) -> None:
+    """一次性修复历史 email_pool 行的空 source（三条 UPDATE 都要全表扫描）。
+
+    只针对旧版本写入时漏掉 source 列的行，按素材特征判定来源，避免误分类域名邮箱。
+    """
+    conn.execute(
+        "UPDATE email_pool SET source=? "
+        "WHERE (source IS NULL OR trim(source)='') AND ("
+        "json_extract(payload, '$.code_url') IS NOT NULL OR "
+        "json_extract(payload, '$.url') IS NOT NULL OR "
+        "json_extract(payload, '$.source') IN ('generic_api', 'generic-api') OR "
+        "json_extract(payload, '$.email_source') IN ('generic_api', 'generic-api')"
+        ")",
+        (_EMAIL_SOURCES["generic_api"],),
+    )
+    conn.execute(
+        "UPDATE email_pool SET source=? "
+        "WHERE (source IS NULL OR trim(source)='') AND ("
+        "json_extract(payload, '$.client_id') IS NOT NULL OR "
+        "json_extract(payload, '$.clientId') IS NOT NULL OR "
+        "json_extract(payload, '$.refresh_token') IS NOT NULL OR "
+        "json_extract(payload, '$.refreshToken') IS NOT NULL OR "
+        "json_extract(payload, '$.source') IN ('outlook', 'outlook_pool') OR "
+        "json_extract(payload, '$.email_source') = 'outlook'"
+        ")",
+        (_EMAIL_SOURCES["outlook"],),
+    )
+    # 域名邮箱的历史 payload 没有 client_id/code_url 等特征，剩余的空来源
+    # 记录只能归入域名邮箱池。否则它们会在“全部邮箱池”中显示为未知来源，
+    # 前端又会按 Outlook 处理，导致列表里能看到但删除/改状态找不到。
+    conn.execute(
+        "UPDATE email_pool SET source=? "
+        "WHERE (source IS NULL OR trim(source)='') AND COALESCE(("
+        "json_extract(payload, '$.code_url') IS NOT NULL OR "
+        "json_extract(payload, '$.url') IS NOT NULL OR "
+        "json_extract(payload, '$.source') IN ('generic_api', 'generic-api', 'outlook', 'outlook_pool') OR "
+        "json_extract(payload, '$.email_source') IN ('generic_api', 'generic-api', 'outlook') OR "
+        "json_extract(payload, '$.client_id') IS NOT NULL OR "
+        "json_extract(payload, '$.clientId') IS NOT NULL OR "
+        "json_extract(payload, '$.refresh_token') IS NOT NULL OR "
+        "json_extract(payload, '$.refreshToken') IS NOT NULL"
+        "), 0)=0",
+        (_EMAIL_SOURCES["domain"],),
+    )
+
+
+def _ensure_account_filter_schema(conn: sqlite3.Connection) -> None:
+    """把账号列表的筛选表达式固化成生成列 + 覆盖索引，并回填历史 AT 过期信息。
+
+    生成列是 VIRTUAL 的：SQLite 负责在任何 INSERT/UPDATE 后保持一致，因此旧代码
+    路径（runtime/scan_payment_store/plus_activation_store 等直接写 payload 的地方）
+    也不需要改动。索引让分页排序与 COUNT/MAX(updated_at) 聚合都走覆盖索引。
+
+    表达式集合的指纹存在 storage_meta：升级后表达式有变化时一次性重建生成列与索引，
+    避免旧定义留在一个已经建了索引的库里造成筛选结果与代码不一致。
+    """
+    digest = hashlib.sha1(
+        "\n".join(f"{name}={expression}" for name, expression in _ACCOUNT_GENERATED_COLUMNS).encode("utf-8")
+    ).hexdigest()[:16]
+    recorded = conn.execute(
+        "SELECT value FROM storage_meta WHERE key=?", (_ACCOUNT_FILTER_SCHEMA_KEY,)
+    ).fetchone()
+    columns = {str(row[1]).lower() for row in conn.execute("PRAGMA table_xinfo(accounts)")}
+    if recorded is not None and str(recorded[0]) != digest and any(name in columns for name, _ in _ACCOUNT_GENERATED_COLUMNS):
+        _rebuild_account_filter_columns(conn)
+        columns = {str(row[1]).lower() for row in conn.execute("PRAGMA table_xinfo(accounts)")}
+
+    changed = recorded is None or str(recorded[0]) != digest
+    for name, expression in _ACCOUNT_GENERATED_COLUMNS:
+        if name in columns:
+            continue
+        _execute_schema_statement(
+            conn, f"ALTER TABLE accounts ADD COLUMN {name} GENERATED ALWAYS AS ({expression}) VIRTUAL"
+        )
+        changed = True
+    existing = _existing_indexes(conn)
+    for name, definition in _ACCOUNT_FILTER_INDEXES:
+        if name in existing:
+            continue
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON accounts{definition}")
+        changed = True
+    if changed:
+        # 新建索引后让统计信息跟上，避免优化器仍按旧基数选择全表扫描。
+        conn.execute("ANALYZE accounts")
+    conn.execute(
+        "INSERT OR REPLACE INTO storage_meta(key, value) VALUES(?, ?)",
+        (_ACCOUNT_FILTER_SCHEMA_KEY, digest),
+    )
+    if conn.execute("SELECT 1 FROM storage_meta WHERE key=? LIMIT 1", (_AT_BACKFILL_KEY,)).fetchone():
+        return
+    backfilled = _backfill_account_at_expiry(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO storage_meta(key, value) VALUES(?, ?)",
+        (_AT_BACKFILL_KEY, f"{_now()} rows={backfilled}"),
+    )
+
+
+def _quote_sql_name(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _drop_indexes_referencing_generated_columns(conn: sqlite3.Connection) -> None:
+    """删除 accounts 上所有引用生成列的索引，而不只是当前代码里的固定清单。
+
+    表达式变化后的重建流程必须先把引用生成列的索引删掉，否则
+    ``ALTER TABLE accounts DROP COLUMN`` 会直接失败：
+
+        sqlite3.OperationalError: error in index <索引名> after drop column: no such column: <列名>
+
+    历史版本留下的索引（改过名字、已经不在 ``_ACCOUNT_FILTER_INDEXES`` 里）正好属于
+    这种情况。异常会从 ``_ensure_sqlite()`` 抛到每个接口，``storage_meta`` 里的指纹
+    也写不进去，于是**所有**依赖数据库的接口每次都返回 500（Flask 返回 HTML 错误页，
+    前端只能显示「服务响应异常（500）」，账号页就是「分组加载失败：服务响应异常（500）」）。
+    所以这里按索引定义识别引用关系，把这类索引一并清理，而不是只认名字。
+    """
+    generated = {name.lower() for name, _ in _ACCOUNT_GENERATED_COLUMNS}
+    if not generated:
+        return
+    rows = conn.execute(
+        "SELECT name, COALESCE(sql, '') FROM sqlite_master WHERE type='index' AND tbl_name='accounts'"
+    ).fetchall()
+    for raw_name, raw_sql in rows:
+        name = str(raw_name)
+        if name.startswith("sqlite_autoindex"):
+            continue
+        tokens = {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(raw_sql or ""))}
+        if tokens & generated:
+            conn.execute(f"DROP INDEX IF EXISTS {_quote_sql_name(name)}")
+
+
+def _execute_schema_statement(conn: sqlite3.Connection, statement: str) -> None:
+    """执行重建用的 DDL；若 SQLite 点名某个历史索引，删掉该索引后重试。
+
+    ``ALTER TABLE ... ADD/DROP COLUMN`` 会重新解析整张表的 schema，只要表上还挂着
+    一个引用缺失列的旧索引，SQLite 就会报 ``error in index <索引名>`` 让 DDL 失败，
+    异常一路冒到接口，表现为所有请求 500。报错信息里带了索引名，按名字清理后重试
+    即可自愈。
+    """
+    for _attempt in range(8):
+        try:
+            conn.execute(statement)
+            return
+        except sqlite3.OperationalError as exc:
+            match = re.search(r"error in index\s+([^\s:]+)", str(exc))
+            if not match:
+                raise
+            conn.execute(f"DROP INDEX IF EXISTS {_quote_sql_name(match.group(1))}")
+
+
+def _rebuild_account_filter_columns(conn: sqlite3.Connection) -> None:
+    """表达式变化时重建生成列：先删索引，再按依赖倒序删列，随后由调用方重新创建。"""
+    for name, _definition in _ACCOUNT_FILTER_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+    _drop_indexes_referencing_generated_columns(conn)
+    columns = {str(row[1]).lower() for row in conn.execute("PRAGMA table_xinfo(accounts)")}
+    for name, _expression in reversed(_ACCOUNT_GENERATED_COLUMNS):
+        if name in columns:
+            _execute_schema_statement(conn, f"ALTER TABLE accounts DROP COLUMN {_quote_sql_name(name)}")
+
+
+def _backfill_account_at_expiry(conn: sqlite3.Connection) -> int:
+    """为只有 access_token 的历史账号补写 token_expires_at/token_expired。
+
+    这两项是 insert_account 一直以来的约定；补写后 AT 筛选不必再逐行回调 Python
+    解析 JWT，也不会改变任何账号的 AT 状态（_account_at_state 优先级不变）。
+    """
+    updated = 0
+    cursor = conn.execute(
+        "SELECT id, payload FROM accounts WHERE at_state_exp IS NULL"
+    )
+    while True:
+        batch = cursor.fetchmany(200)
+        if not batch:
+            break
+        rows: list[tuple[str, int]] = []
+        for raw in batch:
+            try:
+                row = json.loads(raw["payload"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(row, dict):
+                continue
+            if not _refresh_token_expiry(row):
+                continue
+            rows.append((json.dumps(row, ensure_ascii=False), int(raw["id"])))
+        if rows:
+            conn.executemany("UPDATE accounts SET payload=? WHERE id=?", rows)
+            updated += len(rows)
+    return updated
 
 
 def _ensure_sqlite() -> None:
@@ -275,6 +760,8 @@ def _ensure_sqlite() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_redeem_codes_created ON redeem_codes(created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_redeem_claims_code ON redeem_claims(code_id, id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_redeem_claims_account ON redeem_claims(account_id)")
+        _ensure_account_filter_schema(conn)
+        _ensure_query_indexes(conn)
         _group_columns = {r[1].lower() for r in conn.execute("PRAGMA table_info(account_groups)").fetchall()}
         for _column, _definition in (
             ("redeem_prefix", "TEXT NOT NULL DEFAULT ''"),
@@ -352,48 +839,14 @@ def _ensure_sqlite() -> None:
                           int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
                           str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False))),
                     )
-        # 兼容早期 SQLite 版本的保存逻辑：当时写入 email_pool 时漏掉了
-        # source 列，导致通用 API 邮箱在“全部邮箱池”中没有类型，按来源筛选
-        # 也查不到。根据素材字段只修复可明确识别的历史行，避免误分类域名邮箱。
-        conn.execute(
-            "UPDATE email_pool SET source=? "
-            "WHERE (source IS NULL OR trim(source)='') AND ("
-            "json_extract(payload, '$.code_url') IS NOT NULL OR "
-            "json_extract(payload, '$.url') IS NOT NULL OR "
-            "json_extract(payload, '$.source') IN ('generic_api', 'generic-api') OR "
-            "json_extract(payload, '$.email_source') IN ('generic_api', 'generic-api')"
-            ")",
-            (_EMAIL_SOURCES["generic_api"],),
-        )
-        conn.execute(
-            "UPDATE email_pool SET source=? "
-            "WHERE (source IS NULL OR trim(source)='') AND ("
-            "json_extract(payload, '$.client_id') IS NOT NULL OR "
-            "json_extract(payload, '$.clientId') IS NOT NULL OR "
-            "json_extract(payload, '$.refresh_token') IS NOT NULL OR "
-            "json_extract(payload, '$.refreshToken') IS NOT NULL OR "
-            "json_extract(payload, '$.source') IN ('outlook', 'outlook_pool') OR "
-            "json_extract(payload, '$.email_source') = 'outlook'"
-            ")",
-            (_EMAIL_SOURCES["outlook"],),
-        )
-        # 域名邮箱的历史 payload 没有 client_id/code_url 等特征，剩余的空来源
-        # 记录只能归入域名邮箱池。否则它们会在“全部邮箱池”中显示为未知来源，
-        # 前端又会按 Outlook 处理，导致列表里能看到但删除/改状态找不到。
-        conn.execute(
-            "UPDATE email_pool SET source=? "
-            "WHERE (source IS NULL OR trim(source)='') AND COALESCE(("
-            "json_extract(payload, '$.code_url') IS NOT NULL OR "
-            "json_extract(payload, '$.url') IS NOT NULL OR "
-            "json_extract(payload, '$.source') IN ('generic_api', 'generic-api', 'outlook', 'outlook_pool') OR "
-            "json_extract(payload, '$.email_source') IN ('generic_api', 'generic-api', 'outlook') OR "
-            "json_extract(payload, '$.client_id') IS NOT NULL OR "
-            "json_extract(payload, '$.clientId') IS NOT NULL OR "
-            "json_extract(payload, '$.refresh_token') IS NOT NULL OR "
-            "json_extract(payload, '$.refreshToken') IS NOT NULL"
-            "), 0)=0",
-            (_EMAIL_SOURCES["domain"],),
-        )
+        # 兼容早期 SQLite 版本的保存逻辑：旧版本写入 email_pool 时漏掉了 source 列，
+        # 导致通用 API 邮箱在“全部邮箱池”里没有类型、按来源筛选也查不到。
+        # 先用 source 索引判断是否真的存在空来源行：修复语句要全表扫描 email_pool
+        # （10 万行约 200ms），而正常库里一行都没有，不该每次启动都付这个代价。
+        if conn.execute(
+            "SELECT 1 FROM email_pool WHERE source IS NULL OR source='' LIMIT 1"
+        ).fetchone():
+            _repair_email_pool_sources(conn)
         # CPA Codex 凭证首次导入数据库；后续列表查询不再扫描 codex_accounts/ 文件。
         if not migration_done and not conn.execute("SELECT 1 FROM codex_accounts LIMIT 1").fetchone() and _CODEX_DIR.exists():
             state = _read_json(_LEGACY_CODEX_EXPORT_STATE, {})
@@ -597,11 +1050,11 @@ def _next_collection_id(conn: sqlite3.Connection, collection: str) -> int:
     return int(conn.execute(f"SELECT COALESCE(MAX(id), 0) + 1 FROM {_TABLES[collection]}").fetchone()[0])
 
 
-def _query_collection(collection: str, *, status: str | None = None, archived: str | bool | None = None,
-                       q: str | None = None, date_from: str | None = None, date_to: str | None = None,
-                       limit: int | None = None, offset: int = 0) -> list[dict]:
-    """利用索引分页读取，避免 WebUI 为一个页面加载整个 JSON 文件。"""
-    _ensure_sqlite()
+def _collection_where(collection: str, *, status: str | None = None, archived: str | bool | None = None,
+                      q: str | None = None, date_from: str | None = None, date_to: str | None = None,
+                      extra_where: list[str] | None = None,
+                      extra_params: list[Any] | None = None) -> tuple[str, list[Any]]:
+    """构造集合查询的 WHERE 子句，供分页、ID 列表等轻量查询复用。"""
     table = _TABLES[collection]
     where = ["1=1"]
     params: list[Any] = []
@@ -612,38 +1065,9 @@ def _query_collection(collection: str, *, status: str | None = None, archived: s
     if archived not in (None, "all", "include"):
         where.append("archived=?"); params.append(int(archived in (True, "1", "true", "yes", "only")))
     if q and str(q).strip():
-        where.append("lower(payload) LIKE ?"); params.append("%" + str(q).strip().lower() + "%")
-    if date_from:
-        where.append("created_at >= ?"); params.append(str(date_from) + ("T00:00:00" if len(str(date_from)) == 10 else ""))
-    if date_to:
-        value = str(date_to)
-        where.append("created_at <= ?"); params.append(value + ("T23:59:59.999999" if len(value) == 10 else ""))
-    sql = f"SELECT payload FROM {table} WHERE " + " AND ".join(where) + " ORDER BY id DESC"
-    if limit is not None:
-        sql += " LIMIT ? OFFSET ?"; params.extend([max(0, int(limit)), max(0, int(offset))])
-    with closing(_sqlite_conn()) as conn:
-        return [json.loads(row["payload"]) for row in conn.execute(sql, params)]
-
-
-def _query_collection_page(collection: str, *, status: str | None = None,
-                           archived: str | bool | None = None, q: str | None = None,
-                           date_from: str | None = None, date_to: str | None = None,
-                           extra_where: list[str] | None = None,
-                           extra_params: list[Any] | None = None,
-                           limit: int = 50, offset: int = 0) -> tuple[list[dict], int, str]:
-    """执行真正的 SQL COUNT/LIMIT/OFFSET 分页，并返回最新更新时间。"""
-    _ensure_sqlite()
-    table = _TABLES[collection]
-    where = ["1=1"]
-    params: list[Any] = []
-    if table == "email_pool":
-        where.append("source=?"); params.append(_EMAIL_SOURCES[collection])
-    if status:
-        where.append("status=?"); params.append(status)
-    if archived not in (None, "all", "include"):
-        where.append("archived=?"); params.append(int(archived in (True, "1", "true", "yes", "only")))
-    if q and str(q).strip():
-        where.append("lower(payload) LIKE ?"); params.append("%" + str(q).strip().lower() + "%")
+        # 关键词已小写；SQLite 的 LIKE 本身对 ASCII 大小写不敏感，再套一层 lower()
+        # 只会把每一行的 payload 复制一遍（搜索框每敲一次都要全表扫）。
+        where.append("payload LIKE ?"); params.append("%" + str(q).strip().lower() + "%")
     if date_from:
         value = str(date_from)
         where.append("created_at >= ?"); params.append(value + ("T00:00:00" if len(value) == 10 else ""))
@@ -653,15 +1077,96 @@ def _query_collection_page(collection: str, *, status: str | None = None,
     if extra_where:
         where.extend(extra_where)
         params.extend(extra_params or [])
-    clause = " AND ".join(where)
+    return " AND ".join(where), params
+
+
+def _query_collection(collection: str, *, status: str | None = None, archived: str | bool | None = None,
+                       q: str | None = None, date_from: str | None = None, date_to: str | None = None,
+                       limit: int | None = None, offset: int = 0) -> list[dict]:
+    """利用索引分页读取，避免 WebUI 为一个页面加载整个 JSON 文件。"""
+    _ensure_sqlite()
+    table = _TABLES[collection]
+    clause, params = _collection_where(
+        collection, status=status, archived=archived, q=q, date_from=date_from, date_to=date_to,
+    )
+    sql = f"SELECT payload FROM {table} WHERE " + clause + " ORDER BY id DESC"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"; params = [*params, max(0, int(limit)), max(0, int(offset))]
     with closing(_sqlite_conn()) as conn:
-        total = int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {clause}", params).fetchone()[0])
-        latest = str(conn.execute(f"SELECT COALESCE(MAX(updated_at), '') FROM {table} WHERE {clause}", params).fetchone()[0] or "")
-        rows = [json.loads(row["payload"]) for row in conn.execute(
+        return [json.loads(row["payload"]) for row in conn.execute(sql, params)]
+
+
+def _query_collection_page(collection: str, *, status: str | None = None,
+                           archived: str | bool | None = None, q: str | None = None,
+                           date_from: str | None = None, date_to: str | None = None,
+                           extra_where: list[str] | None = None,
+                           extra_params: list[Any] | None = None,
+                           limit: int = 50, offset: int = 0,
+                           conn: sqlite3.Connection | None = None) -> tuple[list[dict], int, str]:
+    """执行真正的 SQL COUNT/LIMIT/OFFSET 分页，并返回最新更新时间。
+
+    COUNT(*) 与 MAX(updated_at) 合成一次聚合扫描：两者都需要遍历同一批行，
+    分成两条语句会让带筛选条件的页面查询成本翻倍。
+    """
+    _ensure_sqlite()
+    table = _TABLES[collection]
+    clause, params = _collection_where(
+        collection, status=status, archived=archived, q=q, date_from=date_from, date_to=date_to,
+        extra_where=extra_where, extra_params=extra_params,
+    )
+    own = conn is None
+    active = _sqlite_conn() if own else conn
+    try:
+        total, latest = _collection_totals(active, table, clause, params)
+        rows = [json.loads(row["payload"]) for row in active.execute(
             f"SELECT payload FROM {table} WHERE {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
             [*params, max(1, int(limit)), max(0, int(offset))],
         )]
+    finally:
+        if own:
+            active.close()
     return rows, total, latest
+
+
+def _collection_totals(conn: sqlite3.Connection, table: str, clause: str, params: list[Any]) -> tuple[int, str]:
+    """一次扫描同时取回总行数与最新更新时间。"""
+    row = conn.execute(
+        f"SELECT COUNT(*) AS n, COALESCE(MAX(updated_at), '') AS latest FROM {table} WHERE {clause}",
+        params,
+    ).fetchone()
+    if row is None:
+        return 0, ""
+    if isinstance(row, sqlite3.Row):
+        return int(row["n"] or 0), str(row["latest"] or "")
+    return int(row[0] or 0), str(row[1] or "")
+
+
+def _query_collection_ids(collection: str, *, status: str | None = None,
+                          archived: str | bool | None = None, q: str | None = None,
+                          date_from: str | None = None, date_to: str | None = None,
+                          extra_where: list[str] | None = None,
+                          extra_params: list[Any] | None = None,
+                          limit: int = 5000, offset: int = 0,
+                          conn: sqlite3.Connection | None = None) -> tuple[list[int], int]:
+    """只读 ID 的轻量分页：不反序列化 payload，供前端「全选」按页收集 ID。"""
+    _ensure_sqlite()
+    table = _TABLES[collection]
+    clause, params = _collection_where(
+        collection, status=status, archived=archived, q=q, date_from=date_from, date_to=date_to,
+        extra_where=extra_where, extra_params=extra_params,
+    )
+    own = conn is None
+    active = _sqlite_conn() if own else conn
+    try:
+        total = int(active.execute(f"SELECT COUNT(*) FROM {table} WHERE {clause}", params).fetchone()[0])
+        ids = [int(row["id"]) for row in active.execute(
+            f"SELECT id FROM {table} WHERE {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, max(1, int(limit)), max(0, int(offset))],
+        )]
+    finally:
+        if own:
+            active.close()
+    return ids, total
 
 
 def _normalize_redemption_filter(value: object) -> bool | None:
@@ -674,42 +1179,204 @@ def _normalize_redemption_filter(value: object) -> bool | None:
     return None
 
 
+# AT 状态筛选：expired（AT 已过期）/ valid（AT 未过期）/ unknown（无法判断）。
+# 无法识别的取值返回 _FILTER_NONE，命中空集合，避免拼错参数时静默放大结果集。
+_FILTER_NONE = "__none__"
+_AT_FILTER_ALIASES = {
+    "expired": "expired", "at_expired": "expired", "token_expired": "expired",
+    "at_invalid": "expired", "dead": "expired", "过期": "expired", "已过期": "expired",
+    "valid": "valid", "at_valid": "valid", "alive": "valid", "ok": "valid",
+    "active": "valid", "normal": "valid", "未过期": "valid", "正常": "valid",
+    "unknown": "unknown", "none": "unknown", "unchecked": "unknown",
+    "unset": "unknown", "未知": "unknown",
+}
+_AT_STATE_SQL = (
+    "CASE "
+    "WHEN lower(COALESCE(CAST(json_extract(payload, '$.token_expired') AS TEXT), '')) "
+    "IN ('1', 'true', 'yes', 'on') THEN 1 "
+    "WHEN NULLIF(TRIM(COALESCE(CAST(json_extract(payload, '$.token_expires_at') AS TEXT), '')), '') IS NOT NULL "
+    "AND julianday(json_extract(payload, '$.token_expires_at')) IS NOT NULL "
+    "THEN (CASE WHEN julianday(json_extract(payload, '$.token_expires_at')) <= julianday('now') "
+    "THEN 1 ELSE 0 END) "
+    "WHEN lower(COALESCE(CAST(json_extract(payload, '$.token_expired') AS TEXT), '')) "
+    "IN ('0', 'false', 'no', 'off') THEN 0 "
+    "ELSE account_at_expired(json_extract(payload, '$.access_token')) END"
+)
+# 生成列版本：与 _AT_STATE_SQL 同一判定顺序，但可直接吃 (archived, at_state_exp) 索引。
+_AT_STATE_FAST_SQL = {
+    "expired": "(at_state_exp IS NOT NULL AND at_state_exp <= julianday('now'))",
+    "valid": "(at_state_exp IS NOT NULL AND at_state_exp > julianday('now'))",
+    "unknown": "(at_state_exp IS NULL)",
+}
+# 只有当“没有任何过期信息、但 access_token 能解析出 exp”的行存在时，生成列才会
+# 与 Python 判定不一致；这类行用一次索引探测即可发现，发现后回退到精确表达式。
+# INDEXED BY 让探测只按 at_state_exp IS NULL 定位（否则优化器会整表扫描，白花 40ms）。
+_AT_STATE_PROBE_SQL = (
+    "SELECT 1 FROM accounts INDEXED BY idx_accounts_at_state_exp WHERE at_state_exp IS NULL "
+    "AND account_at_expired(json_extract(payload, '$.access_token')) IS NOT NULL LIMIT 1"
+)
+
+
+def _at_state_filter_sql(conn: sqlite3.Connection | None, state: str) -> str:
+    """返回 AT 状态筛选片段；无法确认生成列覆盖全部行时使用精确表达式。"""
+    exact = f"({_AT_STATE_SQL}) = 1" if state == "expired" else (
+        f"({_AT_STATE_SQL}) = 0" if state == "valid" else f"({_AT_STATE_SQL}) IS NULL"
+    )
+    fast = _AT_STATE_FAST_SQL.get(state)
+    if fast is None or conn is None:
+        return exact
+    try:
+        if conn.execute(_AT_STATE_PROBE_SQL).fetchone() is not None:
+            return exact
+    except sqlite3.Error:
+        return exact
+    return fast
+
+
+def _normalize_at_filter(value: object) -> str:
+    """归一化 AT 状态筛选：expired / valid / unknown / 空字符串（不限制）。"""
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"all", "*", "any"}:
+        return ""
+    return _AT_FILTER_ALIASES.get(raw, _FILTER_NONE)
+
+
+# 查活状态筛选：把别名映射到 live_check_status 的字面量集合。
+_LIVE_FILTER_GROUPS: dict[str, tuple[str, ...]] = {
+    "failed": ("failed", "fail", "error", "dead", "失败", "查活失败"),
+    "success": ("success", "succeeded", "live", "ok", "alive", "active", "normal", "正常", "成功"),
+    "deactivated": ("deactivated", "disabled", "banned", "废号", "已停用"),
+    "checking": ("checking", "queued", "running", "pending", "查活中"),
+    "cancelled": ("cancelled", "canceled", "已取消"),
+    "never": ("never", "unchecked", "none", "empty", "未查活"),
+}
+_LIVE_FILTER_ALIASES: dict[str, tuple[str, ...]] = {}
+for _group, _aliases in _LIVE_FILTER_GROUPS.items():
+    _LIVE_FILTER_ALIASES[_group] = _LIVE_FILTER_GROUPS[_group]
+    for _alias in _aliases:
+        _LIVE_FILTER_ALIASES[_alias] = _LIVE_FILTER_GROUPS[_group]
+# 「未查活」对应 status 字段缺失或为空。
+_LIVE_FILTER_ALIASES["never"] = ("",)
+
+
+def _normalize_live_filter(value: object) -> tuple[str, ...]:
+    """归一化查活状态筛选，返回一组 live_check_status 字面量。
+
+    空元组表示不限制；`(_FILTER_NONE,)` 表示无法识别的取值（命中空集合）。
+    """
+    raw = str(value or "").strip().lower()
+    if not raw or raw in {"all", "*", "any"}:
+        return ()
+    return _LIVE_FILTER_ALIASES.get(raw, (_FILTER_NONE,))
+
+
+# 套餐查询轻量状态快照返回的字段（id/email 单列，scan_request_* 单独处理）。
+_PLAN_CHECK_FIELDS: tuple[str, ...] = (
+
+        "id", "email", "archived", "group_name",
+        "plan_type", "current_plan_type", "plus_trial_eligible",
+        "eligible_promo_campaigns", "plus_trial_discount_percentage",
+        "plan_check_status", "plan_check_ok", "plan_check_error",
+        "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
+        "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
+        "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
+        "quota_check_status", "quota_check_ok", "quota_check_error", "quota_check_trigger",
+        "quota_check_queued_at", "quota_check_started_at", "quota_check_completed_at",
+        "quota_balance", "quota_balance_amount", "quota_currency", "quota_unlimited",
+        "quota_has_credits", "quota_credits_balance", "quota_overage_limit_reached",
+        "quota_balance_fallback",
+        "quota_checked_at", "quota_error", "quota_http_status", "quota_last_success_at",
+        "reset_credits_available", "reset_credits_applicable", "reset_credits_expires_at",
+        "reset_credits_checked_at", "reset_credits_error", "reset_credits_http_status",
+        "usage_plan_type", "usage_allowed", "usage_limit_reached", "usage_limit_reached_type",
+        "usage_5h_percent", "usage_5h_window_seconds", "usage_5h_reset_at",
+        "usage_5h_reset_after_seconds", "usage_5h_started",
+        "usage_week_percent", "usage_week_window_seconds", "usage_week_reset_at",
+        "usage_week_reset_after_seconds", "usage_week_started",
+        "usage_checked_at", "usage_error", "usage_http_status",
+        "live_check_status", "live_check_error", "live_checked_at",
+        "live_check_proxy_used", "live_check_fingerprint_text",
+        "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
+        "billing_period", "billing_currency", "discount_amount", "discount_type",
+        "discount_expires_at", "discount_promo_campaign_id", "is_delinquent",
+        "subscription_active_start", "subscription_active_until",
+        "subscription_became_delinquent_at", "subscription_grace_period_end_at",
+        "subscription_billing_currency", "subscription_billing_period", "subscription_plan_type",
+        "subscription_checked_at", "subscription_http_status", "subscription_error",
+        "extract_link_status", "extract_link_ok", "extract_link_type",
+        "extract_link_message", "extract_link_error",
+        "extract_link_long_url", "extract_link_hosted_instructions_url", "extract_link_copy_paste",
+        "extract_link_image_url_png", "extract_link_image_url_svg",
+        "extract_link_expires_at", "extract_link_job_id", "extract_link_task_id",
+        "extract_link_provider_id", "extract_link_provider_type", "extract_link_provider_name",
+        "extract_link_cdk_id", "extract_link_cdk_suffix", "extract_link_progress", "extract_link_payment_status",
+        "scan_request_provider", "scan_request_status", "scan_request_ok", "scan_request_task_id", "scan_request_message",
+        "scan_request_error", "scan_request_error_code", "scan_request_retryable",
+        "scan_request_duplicate", "scan_request_request_id", "scan_request_checked_at",
+        "plus_activation_status", "plus_activation_message", "plus_activation_updated_at",
+        "codex_status", "codex_error",
+        "codex_agent_status", "codex_agent_message",
+        "codex_agent_runtime_id", "codex_agent_sub2api_url",
+        "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
+        "totp_setup_status", "totp_setup_ok", "totp_setup_error",
+        "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
+        "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
+        "original_email", "email_source", "email_change_status", "email_change_ok",
+        "email_change_error", "email_change_new_email", "email_change_started_at", "email_change_completed_at",
+)
+_PLAN_CHECK_SCAN_FIELDS: tuple[str, ...] = tuple(f for f in _PLAN_CHECK_FIELDS if f.startswith("scan_request_"))
+_PLAN_CHECK_PLAIN_FIELDS: tuple[str, ...] = tuple(
+    f for f in _PLAN_CHECK_FIELDS if not f.startswith("scan_request_") and f not in ("id", "email")
+)
+
+
 def _account_filter_sql(
     plan_filter: str | None = None,
     codex_filter: str | None = None,
     totp_filter: str | None = None,
     group_filter: str | None = None,
     redemption_filter: str | None = None,
+    at_filter: str | None = None,
+    live_filter: str | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> tuple[list[str], list[Any]]:
-    """把账号列表的套餐、Codex、2FA、分组、兑换状态过滤条件下推到 SQLite。
+    """把账号列表的套餐、Codex、2FA、分组、兑换状态、AT/查活状态条件下推到 SQLite。
 
-    套餐、Codex、2FA、分组状态仍保存在账号 payload 中，因此这里使用 SQLite JSON1
-    直接过滤，而不是先把整张 accounts 表反序列化到 Python 再切页。兑换状态来自
-    redeem_claims 表，用 EXISTS 子查询过滤，保持 COUNT/LIMIT/OFFSET 的正确性。
+    套餐、Codex、2FA、分组、AT/查活状态来自账号 payload；这里改写成查询
+    ``_ACCOUNT_GENERATED_COLUMNS`` 维护的生成列，让分页与 COUNT 都走覆盖索引，
+    不再为每次翻页解析整张表的 JSON。兑换状态来自 redeem_claims 表，用 EXISTS
+    子查询过滤。``conn`` 传入时 AT 状态可以用生成列 + 索引探测的快速形式。
     """
     where: list[str] = []
     params: list[Any] = []
     plan = str(plan_filter or "").strip().lower()
     codex = str(codex_filter or "").strip().lower()
     totp = str(totp_filter or "").strip().lower()
+    at_state = _normalize_at_filter(at_filter)
+    live_states = _normalize_live_filter(live_filter)
+    if at_state == _FILTER_NONE:
+        where.append("0=1")
+    elif at_state in _AT_STATE_FAST_SQL:
+        where.append(_at_state_filter_sql(conn, at_state))
+    if live_states == (_FILTER_NONE,):
+        where.append("0=1")
+    elif live_states:
+        where.append(f"live_norm IN ({', '.join('?' for _ in live_states)})")
+        params.extend(live_states)
     redeemed = _normalize_redemption_filter(redemption_filter)
     if redeemed is not None:
         claim_exists = "EXISTS (SELECT 1 FROM redeem_claims AS rc WHERE rc.account_id = accounts.id)"
         where.append(claim_exists if redeemed else f"NOT {claim_exists}")
     if group_filter is not None and group_filter != "":
         wanted = _validate_account_group_name(group_filter)
-        where.append("account_group_name(json_extract(payload, '$.group_name')) = ? COLLATE BINARY")
+        where.append("group_key = ? COLLATE BINARY")
         params.append(wanted)
 
-    plan_expr = (
-        "lower(COALESCE(NULLIF(CAST(json_extract(payload, '$.current_plan_type') AS TEXT), ''), "
-        "CAST(json_extract(payload, '$.plan_type') AS TEXT), ''))"
-    )
+    plan_expr = "plan_norm"
     if plan and plan not in {"all", "any"}:
         if plan == "plus":
             # 与 _account_matches_plan_filter 保持一致：free(可试用)不算已开通 Plus。
-            where.extend([f"{plan_expr} LIKE ?", f"{plan_expr} NOT LIKE ?"])
-            params.extend(["%plus%", "%free%"])
+            where.append("plan_plus = 1")
         elif plan in {"plus_trial", "plus_trial_eligible", "trial", "trial_eligible"}:
             # 只有当前套餐为 free 且套餐查询明确返回可试用资格时才命中。
             trial_expr = "lower(COALESCE(CAST(json_extract(payload, '$.plus_trial_eligible') AS TEXT), ''))"
@@ -773,8 +1440,8 @@ def _account_filter_sql(
             where.append(f"{plan_expr} = ?")
             params.append(plan)
 
-    status_expr = "lower(COALESCE(CAST(json_extract(payload, '$.codex_status') AS TEXT), ''))"
-    live_status_expr = "lower(COALESCE(CAST(json_extract(payload, '$.live_check_status') AS TEXT), ''))"
+    status_expr = "codex_norm"
+    live_status_expr = "live_norm"
     if codex and codex not in {"all", "*"}:
         if codex == "deactivated":
             where.append(f"{live_status_expr} = ?")
@@ -782,13 +1449,13 @@ def _account_filter_sql(
             where.append(f"{status_expr} = ?")
         params.append(codex)
 
-    totp_secret_expr = "lower(COALESCE(CAST(json_extract(payload, '$.totp_secret') AS TEXT), ''))"
+    totp_secret_expr = "totp_flag"
     totp_setup_expr = "lower(COALESCE(CAST(json_extract(payload, '$.totp_setup_status') AS TEXT), ''))"
     if totp and totp not in {"all", "*"}:
         if totp in {"enabled", "on", "active"}:
-            where.append(f"length(trim({totp_secret_expr})) > 0")
+            where.append(f"{totp_secret_expr} = 1")
         elif totp in {"disabled", "off", "not_enabled", "unset"}:
-            where.append(f"length(trim({totp_secret_expr})) = 0")
+            where.append(f"{totp_secret_expr} = 0")
         elif totp in {"pending", "setup", "setting", "queued", "running"}:
             where.append(f"{totp_setup_expr} IN (?, ?)")
             params.extend(["queued", "running"])
@@ -1055,9 +1722,6 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
-DEFAULT_ACCOUNT_GROUP = "默认分组"
-
-
 def _account_group_name(row: dict) -> str:
     value = str(row.get("group_name") or "").strip()
     return value or DEFAULT_ACCOUNT_GROUP
@@ -1073,26 +1737,64 @@ def _validate_account_group_name(value: object) -> str:
     return name
 
 
+def _apply_plan_check_staleness(out: dict) -> None:
+    """把超时的 queued/running 套餐查询标记为失败（列表展示与状态轮询共用）。"""
+    plan_status = out.get("plan_check_status")
+    if plan_status not in {"queued", "running"}:
+        return
+    try:
+        stamp_key = "plan_check_queued_at" if plan_status == "queued" else "plan_check_started_at"
+        stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if plan_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+        started_at = datetime.fromisoformat(str(out.get(stamp_key) or ""))
+        if (datetime.now() - started_at).total_seconds() >= stale_after:
+            out["plan_check_status"] = "failed"
+            out["plan_check_error"] = "上次套餐查询状态已超时，可重新查询"
+            out["plan_check_stale"] = True
+    except (TypeError, ValueError):
+        out["plan_check_status"] = "failed"
+        out["plan_check_error"] = "上次套餐查询状态异常，可重新查询"
+        out["plan_check_stale"] = True
+
+
+def _apply_quota_check_staleness(out: dict) -> None:
+    """把超时的 queued/running 额度查询标记为失败（与套餐查询同一套阈值）。"""
+    status = out.get("quota_check_status")
+    if status not in {"queued", "running"}:
+        return
+    try:
+        stamp_key = "quota_check_queued_at" if status == "queued" else "quota_check_started_at"
+        stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if status == "queued" else _PLAN_CHECK_STALE_SECONDS
+        started_at = datetime.fromisoformat(str(out.get(stamp_key) or ""))
+        if (datetime.now() - started_at).total_seconds() >= stale_after:
+            out["quota_check_status"] = "failed"
+            out["quota_check_error"] = "上次额度查询状态已超时，可重新查询"
+            out["quota_check_stale"] = True
+    except (TypeError, ValueError):
+        out["quota_check_status"] = "failed"
+        out["quota_check_error"] = "上次额度查询状态异常，可重新查询"
+        out["quota_check_stale"] = True
+
+
 def _decorate_account(row: dict) -> dict:
     out = dict(row)
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
     out["group_name"] = _account_group_name(out)
-    plan_status = out.get("plan_check_status")
-    if plan_status in {"queued", "running"}:
-        try:
-            stamp_key = "plan_check_queued_at" if plan_status == "queued" else "plan_check_started_at"
-            stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if plan_status == "queued" else _PLAN_CHECK_STALE_SECONDS
-            started_at = datetime.fromisoformat(str(out.get(stamp_key) or ""))
-            if (datetime.now() - started_at).total_seconds() >= stale_after:
-                out["plan_check_status"] = "failed"
-                out["plan_check_error"] = "上次套餐查询状态已超时，可重新查询"
-                out["plan_check_stale"] = True
-        except (TypeError, ValueError):
-            out["plan_check_status"] = "failed"
-            out["plan_check_error"] = "上次套餐查询状态异常，可重新查询"
-            out["plan_check_stale"] = True
+    _apply_plan_check_staleness(out)
+    _apply_quota_check_staleness(out)
     out["copy_line"] = _account_line(out)
+    # 列表里的「AT 已过期」标记与 at_status 筛选共用同一判定，避免看到的状态和筛出来的集合不一致。
+    out["at_expired"] = _account_at_state(out) == "expired"
+    return out
+
+
+def _decorate_account_status(row: dict) -> dict:
+    """状态轮询专用轻量装饰：不生成 copy_line，避免为数千行白拼展示文本。"""
+    out = dict(row)
+    out["group_name"] = _account_group_name(out)
+    _apply_plan_check_staleness(out)
+    _apply_quota_check_staleness(out)
+    out["at_expired"] = _account_at_state(out) == "expired"
     return out
 
 
@@ -1244,9 +1946,9 @@ def list_email_pool_page(
         # payload 覆盖邮箱池自身字段；source 和关联账号 payload 保持旧 WebUI
         # 的搜索能力（例如搜索 generic_api 或已注册账号 token）。
         where.append(
-            "(lower(ep.payload) LIKE ? OR lower(ep.source) LIKE ? OR EXISTS ("
+            "(ep.payload LIKE ? OR ep.source LIKE ? OR EXISTS ("
             "SELECT 1 FROM accounts AS a "
-            "WHERE a.email = ep.email COLLATE NOCASE AND lower(a.payload) LIKE ?))"
+            "WHERE a.email = ep.email COLLATE NOCASE AND a.payload LIKE ?))"
         )
         params.extend([like, like, like])
     clause = " AND ".join(where)
@@ -1405,39 +2107,40 @@ def _attach_redeem_claims(items: list[dict]) -> list[dict]:
     return items
 
 
-def _redeem_candidate_rows(conn: sqlite3.Connection, group_name: str | None = None) -> list[dict]:
-    plan_expr = (
-        "lower(COALESCE(NULLIF(CAST(a.payload ->> '$.current_plan_type' AS TEXT), ''), "
-        "CAST(a.payload ->> '$.plan_type' AS TEXT), ''))"
-    )
-    group_expr = "account_group_name(json_extract(a.payload, '$.group_name'))"
+def _redeem_candidate_where(group_name: str | None = None, *, alias: str = "a") -> tuple[str, list[Any]]:
+    """兑换候选行的 SQL 条件：与 _redeem_credentials 的硬性条件一一对应。
+
+    这里只做“能确定不满足就直接排除”的粗筛（未归档、有登录密码、未废号、未被领取），
+    真正可兑换与否仍由 Python 的 _redeem_credentials 复核，因此不会放宽语义。
+    """
     wanted_group = _account_group_name({"group_name": group_name}) if group_name else None
-    # JSON ->> 在 SQLite JSON1 中返回已解码的标量；旧 SQLite 不支持时由下面的
-    # Python 计划判断兜底，避免兑换功能影响已有数据库启动。
-    try:
-        if wanted_group:
-            # 指定分组：从该分组取“有登录密码”的账号（不限 Plus）。
-            rows = conn.execute(
-                "SELECT a.id, a.email, a.archived, a.payload FROM accounts AS a "
-                "LEFT JOIN redeem_claims AS c ON c.account_id = a.id "
-                f"WHERE c.id IS NULL AND a.archived=0 AND {group_expr}=? "
-                "ORDER BY a.id ASC",
-                (wanted_group,),
-            ).fetchall()
-        else:
-            # 未指定分组：兼容旧的 Plus 库存逻辑。
-            rows = conn.execute(
-                "SELECT a.id, a.email, a.archived, a.payload FROM accounts AS a "
-                "LEFT JOIN redeem_claims AS c ON c.account_id = a.id "
-                f"WHERE c.id IS NULL AND a.archived=0 AND {plan_expr} LIKE '%plus%' "
-                f"AND {plan_expr} NOT LIKE '%free%' ORDER BY a.id ASC"
-            ).fetchall()
-    except sqlite3.OperationalError:
-        rows = conn.execute(
-            "SELECT a.id, a.email, a.archived, a.payload FROM accounts AS a "
-            "LEFT JOIN redeem_claims AS c ON c.account_id = a.id "
-            "WHERE c.id IS NULL AND a.archived=0 ORDER BY a.id ASC"
-        ).fetchall()
+    where = [
+        f"{alias}.archived=0",
+        f"{alias}.has_password=1",
+        f"{alias}.live_norm<>'deactivated'",
+        f"trim({alias}.email, {_SQL_WS_CHARS})<>''",
+    ]
+    if wanted_group:
+        where.append(f"{alias}.group_key=?")
+        params: list[Any] = [wanted_group]
+    else:
+        where.append(f"{alias}.plan_plus=1")
+        params = []
+    return " AND ".join(where), params
+
+
+def _redeem_candidate_rows(conn: sqlite3.Connection, group_name: str | None = None) -> list[dict]:
+    wanted_group = _account_group_name({"group_name": group_name}) if group_name else None
+    clause, params = _redeem_candidate_where(group_name)
+    rows = conn.execute(
+        "SELECT a.id, a.email, a.archived, a.payload FROM accounts AS a "
+        # INDEXED BY：优化器会改走 plan_plus 索引，并逐行回表判定密码/查活状态。
+        "INDEXED BY idx_accounts_redeemable "
+        f"WHERE {clause} "
+        "AND NOT EXISTS (SELECT 1 FROM redeem_claims AS c WHERE c.account_id = a.id) "
+        "ORDER BY a.id ASC",
+        params,
+    ).fetchall()
 
     result: list[dict] = []
     for raw in rows:
@@ -1606,25 +2309,32 @@ def list_redeem_codes(*, limit: int | None = 200) -> list[dict]:
 
 
 def redeem_stock_summary(group_name: str | None = None) -> dict:
+    """可兑换库存统计：全部在 SQL 里数，不再逐行解析 payload。
+
+    ``available`` 与 _redeem_candidate_rows 使用同一组条件（SQL 粗筛条件即
+    _redeem_credentials 的硬性条件），``known_plus`` 统计分组内已开通 Plus 的账号数。
+    """
     _ensure_sqlite()
+    clause, params = _redeem_candidate_where(group_name)
+    wanted_group = _account_group_name({"group_name": group_name}) if group_name else None
+    plus_where = ["a.archived=0", "a.plan_plus=1"]
+    plus_params: list[Any] = []
+    if wanted_group:
+        plus_where.append("a.group_key=?")
+        plus_params.append(wanted_group)
     with _LOCK, closing(_sqlite_conn()) as conn:
-        candidates = _redeem_candidate_rows(conn, group_name=group_name)
-        total_plus = 0
-        try:
-            raw_rows = conn.execute("SELECT payload FROM accounts WHERE archived=0").fetchall()
-            for raw in raw_rows:
-                try:
-                    payload = json.loads(raw["payload"] or "{}")
-                except (TypeError, ValueError):
-                    payload = {}
-                if isinstance(payload, dict):
-                    plan = _redeem_plan(payload)
-                    group_ok = not group_name or _account_group_name(payload).casefold() == _account_group_name({"group_name": group_name}).casefold()
-                    if group_ok and "plus" in plan and "free" not in plan:
-                        total_plus += 1
-        except sqlite3.Error:
-            total_plus = len(candidates)
-    return {"available": len(candidates), "known_plus": total_plus}
+        available = int(conn.execute(
+            "SELECT COUNT(*) FROM accounts AS a "
+            "INDEXED BY idx_accounts_redeemable "
+            f"WHERE {clause} "
+            "AND NOT EXISTS (SELECT 1 FROM redeem_claims AS c WHERE c.account_id = a.id)",
+            params,
+        ).fetchone()[0])
+        total_plus = int(conn.execute(
+            f"SELECT COUNT(*) FROM accounts AS a WHERE {' AND '.join(plus_where)}",
+            plus_params,
+        ).fetchone()[0])
+    return {"available": available, "known_plus": total_plus}
 
 
 def revoke_redeem_code(code_id: int) -> dict | None:
@@ -1808,6 +2518,8 @@ def insert_account(
             if totp_secret:
                 outlook_row["totp_secret"] = totp_secret
 
+        # 顺手记录 AT 过期时间，让「AT 已过期」筛选对新注册/导入的账号也直接可用。
+        _refresh_token_expiry(row)
         row["copy_line"] = _account_line(row)
         _save_accounts(accounts)
         _save_outlook(outlook_rows)
@@ -2136,9 +2848,235 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
         row["plan_check_network_route"] = result.get("network_route")
         row["plan_check_proxy_used"] = result.get("proxy_used")
         row["plan_check_proxy_fallback_reason"] = result.get("proxy_fallback_reason")
+        # 查套餐会在同一条会话里顺带刷新额度与「银行重置」券：只写结果列，
+        # 不动 quota_check_* 状态机，任务中心仍只记录用户实际发起的任务。
+        _apply_quota_columns(row, result)
         row["token_expired"] = result.get("token_expired")
         row["token_expires_at"] = result.get("token_expires_at")
         row["plan_check_result_json"] = json.dumps(result, ensure_ascii=False)
+        row["updated_at"] = _now()
+        _write_collection_row(conn, "accounts", row)
+        return True
+
+
+def claim_account_quota_check(
+    acc_id: int | None = None,
+    email: str | None = None,
+    trigger: str = "manual",
+) -> bool:
+    """原子占用账号的额度查询；已有未超时查询时返回 False。"""
+    with _row_write_transaction() as conn:
+        row = _select_collection_row(conn, "accounts", row_id=acc_id, email=email or None)
+        if row is None:
+            return False
+
+        current_status = row.get("quota_check_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = "quota_check_queued_at" if current_status == "queued" else "quota_check_started_at"
+                stale_after = _PLAN_CHECK_QUEUE_STALE_SECONDS if current_status == "queued" else _PLAN_CHECK_STALE_SECONDS
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+
+        now = _now()
+        row["quota_check_status"] = "queued"
+        row["quota_check_trigger"] = str(trigger or "manual")
+        row["quota_check_queued_at"] = now
+        row["quota_check_started_at"] = None
+        row["quota_check_completed_at"] = None
+        row["quota_check_error"] = None
+        row["updated_at"] = now
+        _write_collection_row(conn, "accounts", row)
+        return True
+
+
+def mark_account_quota_check_running(acc_id: int) -> bool:
+    """把已排队的额度查询标记为执行中。"""
+    with _row_write_transaction() as conn:
+        row = _select_collection_row(conn, "accounts", row_id=acc_id)
+        if row is None or row.get("quota_check_status") not in {"queued", "running"}:
+            return False
+        row["quota_check_status"] = "running"
+        row["quota_check_started_at"] = _now()
+        row["quota_check_error"] = None
+        row["updated_at"] = _now()
+        _write_collection_row(conn, "accounts", row)
+        return True
+
+
+def recover_interrupted_quota_checks() -> int:
+    """服务启动时把上次进程遗留的内存队列状态恢复为可重试失败。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in accounts:
+            if row.get("quota_check_status") not in {"queued", "running"}:
+                continue
+            row["quota_check_status"] = "failed"
+            row["quota_check_ok"] = False
+            row["quota_check_error"] = "WebUI 重启导致额度查询中断，请重新查询"
+            row["quota_check_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(accounts)
+        return recovered
+
+
+# 额度查询结果里按端点区分归属的字段：某个端点失败时不覆盖它上次成功的数值。
+_QUOTA_BALANCE_FIELDS = (
+    "quota_balance",
+    "quota_balance_amount",
+    "quota_currency",
+    "quota_http_status",
+    "quota_error",
+    "quota_checked_at",
+    "quota_response_preview",
+    # 余额来自 wham/usage 的 credits.balance 兜底时为真（前端提示数值来源）。
+    "quota_balance_fallback",
+)
+_QUOTA_RESET_CREDIT_FIELDS = (
+    "reset_credits_available",
+    "reset_credits_applicable",
+    "reset_credits_expires_at",
+    "reset_credits_detail",
+    "reset_credits_http_status",
+    "reset_credits_error",
+    "reset_credits_checked_at",
+    "reset_credits_response_preview",
+)
+# 用量窗口（5 小时/周月）与 credits 权益面：来自 wham/usage。
+_QUOTA_USAGE_FIELDS = (
+    "usage_plan_type",
+    "usage_allowed",
+    "usage_limit_reached",
+    "usage_limit_reached_type",
+    "usage_5h_percent",
+    "usage_5h_window_seconds",
+    "usage_5h_reset_at",
+    "usage_5h_reset_after_seconds",
+    "usage_5h_started",
+    "usage_week_percent",
+    "usage_week_window_seconds",
+    "usage_week_reset_at",
+    "usage_week_reset_after_seconds",
+    "usage_week_started",
+    "usage_http_status",
+    "usage_error",
+    "usage_checked_at",
+    "usage_response_preview",
+)
+# credits 权益标记可能来自 wham/usage（优先）或 remaining_balance；缺值时保留旧值。
+_QUOTA_CREDITS_FIELDS = (
+    "quota_has_credits",
+    "quota_unlimited",
+    "quota_overage_limit_reached",
+    "quota_credits_balance",
+    "quota_credits_balance_amount",
+)
+# 供 piggyback（查套餐顺带刷新）落盘时裁剪出只属于额度查询的字段。
+_QUOTA_RESULT_FIELDS = (
+    _QUOTA_BALANCE_FIELDS
+    + _QUOTA_RESET_CREDIT_FIELDS
+    + _QUOTA_USAGE_FIELDS
+    + _QUOTA_CREDITS_FIELDS
+)
+
+
+def _apply_quota_columns(row: dict, result: dict) -> bool:
+    """把额度/用量/重置券结果写进账号字段，返回本次是否真的带来了查询结果。
+
+    三个端点各自独立：某一端失败时只更新该端的错误和时间戳，保留上次成功数值。
+    """
+    checked_quota = bool(result.get("quota_checked_at"))
+    checked_credits = bool(result.get("reset_credits_checked_at"))
+    checked_usage = bool(result.get("usage_checked_at"))
+    if not (checked_quota or checked_credits or checked_usage):
+        return False
+
+    # 余额端点失败但 wham/usage 的 credits.balance 兜底成功时，仍按成功落盘。
+    quota_ok = checked_quota and (not result.get("quota_error") or bool(result.get("quota_balance_fallback")))
+    credits_ok = checked_credits and not result.get("reset_credits_error")
+    usage_ok = checked_usage and not result.get("usage_error")
+
+    if quota_ok:
+        for key in _QUOTA_BALANCE_FIELDS:
+            if key in result:
+                row[key] = result.get(key)
+    elif checked_quota:
+        row["quota_error"] = result.get("quota_error") or row.get("quota_error")
+        row["quota_http_status"] = result.get("quota_http_status")
+        row["quota_checked_at"] = result.get("quota_checked_at") or row.get("quota_checked_at")
+
+    if credits_ok:
+        for key in _QUOTA_RESET_CREDIT_FIELDS:
+            if key in result:
+                row[key] = result.get(key)
+    elif checked_credits:
+        row["reset_credits_error"] = result.get("reset_credits_error") or row.get("reset_credits_error")
+        row["reset_credits_http_status"] = result.get("reset_credits_http_status")
+        row["reset_credits_checked_at"] = result.get("reset_credits_checked_at") or row.get("reset_credits_checked_at")
+
+    if usage_ok:
+        # 用量窗口按原值落盘：窗口消失时对应字段会被写成 None，避免展示过期百分比。
+        for key in _QUOTA_USAGE_FIELDS:
+            if key in result:
+                row[key] = result.get(key)
+        for key in _QUOTA_CREDITS_FIELDS:
+            if result.get(key) is not None:
+                row[key] = result.get(key)
+    elif checked_usage:
+        row["usage_error"] = result.get("usage_error") or row.get("usage_error")
+        row["usage_http_status"] = result.get("usage_http_status")
+        row["usage_checked_at"] = result.get("usage_checked_at") or row.get("usage_checked_at")
+
+    row["quota_result_json"] = json.dumps(
+        {key: result.get(key) for key in _QUOTA_RESULT_FIELDS if key in result},
+        ensure_ascii=False,
+    )
+    return True
+
+
+def update_account_quota(acc_id: int | None = None, email: str | None = None, result: dict | None = None) -> bool:
+    """更新账号额度/「银行重置」券查询结果。"""
+    result = result or {}
+    with _row_write_transaction() as conn:
+        row = _select_collection_row(conn, "accounts", row_id=acc_id, email=email or None)
+        if row is None:
+            return False
+
+        # 手动取消/暂停与套餐查询保持一致：只释放占用，不覆盖上次成功的额度。
+        explicit = str(result.get("status") or "").strip().lower()
+        if explicit in {"cancelled", "canceled", "paused", "stopped"}:
+            row["quota_check_status"] = "cancelled" if explicit in {"cancelled", "canceled"} else explicit
+            row["quota_check_ok"] = False
+            row["quota_check_error"] = result.get("error")
+            if explicit != "paused":
+                row["quota_check_completed_at"] = _now()
+            if result.get("message") is not None:
+                row["quota_check_message"] = result.get("message")
+            row["updated_at"] = _now()
+            _write_collection_row(conn, "accounts", row)
+            return True
+
+        ok = bool(result.get("ok"))
+        row["quota_check_status"] = "success" if ok else "failed"
+        row["quota_check_ok"] = ok
+        row["quota_check_completed_at"] = _now()
+        row["quota_check_error"] = None if ok else result.get("error")
+        # 无论整体成败都写一次：端点各自的错误与时间戳要能落到列表上，
+        # 由 _apply_quota_columns 判断哪些端点在本次查询里真的拿到了结果。
+        _apply_quota_columns(row, result)
+
+        row["quota_check_network_route"] = result.get("network_route")
+        row["quota_check_proxy_used"] = result.get("proxy_used")
+        row["quota_check_proxy_fallback_reason"] = result.get("proxy_fallback_reason")
+        if ok:
+            row["quota_last_success_at"] = result.get("checked_at") or _now()
         row["updated_at"] = _now()
         _write_collection_row(conn, "accounts", row)
         return True
@@ -2365,6 +3303,27 @@ def _matches_codex_status_filter(row: dict, codex_filter: str | None) -> bool:
     return status == codex_filter
 
 
+def _matches_at_status_filter(row: dict, at_filter: str | None) -> bool:
+    """按 AT 是否过期筛选账号，口径与 `_account_at_state_sql` 一致。"""
+    wanted = _normalize_at_filter(at_filter)
+    if not wanted:
+        return True
+    if wanted == _FILTER_NONE:
+        return False
+    return _account_at_state(row) == wanted
+
+
+def _matches_live_status_filter(row: dict, live_filter: str | None) -> bool:
+    """按查活状态筛选账号；failed 只匹配查活失败，不含已停用/已取消。"""
+    wanted = _normalize_live_filter(live_filter)
+    if not wanted:
+        return True
+    if wanted == (_FILTER_NONE,):
+        return False
+    status = str(row.get("live_check_status") or "").strip().lower()
+    return status in wanted
+
+
 def _matches_totp_status_filter(row: dict, totp_filter: str | None) -> bool:
     """按 2FA/TOTP 是否已配置及设置任务状态筛选账号。"""
     totp_filter = str(totp_filter or "").strip().lower()
@@ -2394,6 +3353,8 @@ def _filtered_decorated_accounts(
     totp_filter: str | None = None,
     group_filter: str | None = None,
     redemption_filter: str | None = None,
+    at_filter: str | None = None,
+    live_filter: str | None = None,
 ) -> list[dict]:
     rows = _load_accounts()
     if archived in (True, "1", "true", "yes", "only"):
@@ -2406,6 +3367,8 @@ def _filtered_decorated_accounts(
     decorated = [r for r in decorated if _account_matches_plan_filter(r, plan_filter)]
     decorated = [r for r in decorated if _matches_codex_status_filter(r, codex_filter)]
     decorated = [r for r in decorated if _matches_totp_status_filter(r, totp_filter)]
+    decorated = [r for r in decorated if _matches_at_status_filter(r, at_filter)]
+    decorated = [r for r in decorated if _matches_live_status_filter(r, live_filter)]
     decorated = [r for r in decorated if _account_matches_query(r, q)]
     if group_filter:
         wanted = _account_group_name({"group_name": group_filter})
@@ -2449,46 +3412,11 @@ def list_account_plan_check_statuses(
     totp_filter: str | None = None,
     group_filter: str | None = None,
     redemption_filter: str | None = None,
+    at_filter: str | None = None,
+    live_filter: str | None = None,
 ) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
-    fields = (
-        "id", "email", "archived", "group_name",
-        "plan_type", "current_plan_type", "plus_trial_eligible",
-        "eligible_promo_campaigns", "plus_trial_discount_percentage",
-        "plan_check_status", "plan_check_ok", "plan_check_error",
-        "plan_check_trigger", "plan_check_queued_at", "plan_check_started_at",
-        "plan_check_completed_at", "plan_checked_at", "plan_last_success_at",
-        "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
-        "live_check_proxy_used", "live_check_fingerprint_text",
-        "expires_at", "plan_expires_at", "plan_renews_at", "renews_at",
-        "billing_period", "billing_currency", "discount_amount", "discount_type",
-        "discount_expires_at", "discount_promo_campaign_id", "is_delinquent",
-        "subscription_active_start", "subscription_active_until",
-        "subscription_became_delinquent_at", "subscription_grace_period_end_at",
-        "subscription_billing_currency", "subscription_billing_period", "subscription_plan_type",
-        "subscription_checked_at", "subscription_http_status", "subscription_error",
-        "extract_link_status", "extract_link_ok", "extract_link_type",
-        "extract_link_message", "extract_link_error",
-        "extract_link_long_url", "extract_link_hosted_instructions_url", "extract_link_copy_paste",
-        "extract_link_image_url_png", "extract_link_image_url_svg",
-        "extract_link_expires_at", "extract_link_job_id", "extract_link_task_id",
-        "extract_link_provider_id", "extract_link_provider_type", "extract_link_provider_name",
-        "extract_link_cdk_id", "extract_link_cdk_suffix", "extract_link_progress", "extract_link_payment_status",
-        "scan_request_provider", "scan_request_status", "scan_request_ok", "scan_request_task_id", "scan_request_message",
-        "scan_request_error", "scan_request_error_code", "scan_request_retryable",
-        "scan_request_duplicate", "scan_request_request_id", "scan_request_checked_at",
-        "plus_activation_status", "plus_activation_message", "plus_activation_updated_at",
-        "codex_status", "codex_error",
-        "codex_agent_status", "codex_agent_message",
-        "codex_agent_runtime_id", "codex_agent_sub2api_url",
-        "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
-        "totp_setup_status", "totp_setup_ok", "totp_setup_error",
-        "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
-        "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
-        "original_email", "email_source", "email_change_status", "email_change_ok",
-        "email_change_error", "email_change_new_email", "email_change_started_at", "email_change_completed_at",
-    )
-    with _LOCK:
+    with _LOCK, _connection() as conn:
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
         extra_where, extra_params = _account_filter_sql(
@@ -2497,6 +3425,9 @@ def list_account_plan_check_statuses(
             totp_filter=totp_filter,
             group_filter=group_filter,
             redemption_filter=redemption_filter,
+            at_filter=at_filter,
+            live_filter=live_filter,
+            conn=conn,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",
@@ -2508,17 +3439,21 @@ def list_account_plan_check_statuses(
             extra_params=extra_params,
             limit=limit,
             offset=offset,
+            conn=conn,
         )
-        rows = [_decorate_account(row) for row in candidates]
+        rows = [_decorate_account_status(row) for row in candidates]
         items = []
+        scan_fields = _PLAN_CHECK_SCAN_FIELDS
         for row in rows:
             item = {"id": row.get("id"), "email": row.get("email")}
-            for key in fields:
+            for key in _PLAN_CHECK_PLAIN_FIELDS:
                 value = row.get(key)
-                if key in ("id", "email"):
-                    continue
-                if (value is not None and value != "") or (key.startswith("scan_request_") and row.get("scan_request_status")):
+                if value is not None and value != "":
                     item[key] = value
+            # scan_request_* 字段即使为空也要在“发起过扫码”时返回（前端按存在性判断）。
+            if row.get("scan_request_status"):
+                for key in scan_fields:
+                    item[key] = row.get(key)
             item["totp_enabled"] = bool(str(row.get("totp_secret") or "").strip())
             plan = str(row.get("current_plan_type") or row.get("plan_type") or "").lower()
             if not any(x in plan for x in ("plus", "pro", "team", "go")):
@@ -2526,6 +3461,8 @@ def list_account_plan_check_statuses(
                     item.pop(expire_key, None)
             item["codex_agent_has_token"] = bool(str(row.get("codex_agent_token") or "").strip())
             item["has_access_token"] = bool(str(row.get("access_token") or "").strip())
+            # 轻量轮询也要带上 AT 过期标记，否则列表徽标会在轮询后被旧值覆盖。
+            item["at_expired"] = bool(row.get("at_expired"))
             items.append(item)
         # updated_at 目前只有秒级精度；一次快速查询可能在同一秒内完成
         # queued -> running -> success/failed，导致 revision 不变，前端跳过合并状态，
@@ -2599,6 +3536,8 @@ def list_accounts(
     totp_filter: str | None = None,
     group_filter: str | None = None,
     redemption_filter: str | None = None,
+    at_filter: str | None = None,
+    live_filter: str | None = None,
 ) -> list[dict]:
     # 非分页兼容接口也走同一条 SQL 分页路径，避免 limit=500 时先读取整张表。
     result = list_accounts_page(
@@ -2613,6 +3552,8 @@ def list_accounts(
         totp_filter=totp_filter,
         group_filter=group_filter,
         redemption_filter=redemption_filter,
+        at_filter=at_filter,
+        live_filter=live_filter,
     )
     return result["items"]
 
@@ -2628,8 +3569,14 @@ def find_accounts_by_emails(
     totp_filter: str | None = None,
     group_filter: str | None = None,
     redemption_filter: str | None = None,
+    at_filter: str | None = None,
+    live_filter: str | None = None,
 ) -> list[dict]:
-    """按当前账号筛选条件精确匹配邮箱，返回已装饰的账号列表。"""
+    """按当前账号筛选条件精确匹配邮箱，返回已装饰的账号列表。
+
+    命中集合就是请求里的那几个邮箱，因此直接在 SQL 里用 email_key/orig_email_key
+    索引取行，不再为了找 100 个邮箱把整张账号表读进 Python。
+    """
     targets = {
         str(email or "").strip().casefold()
         for email in (emails or [])
@@ -2637,6 +3584,38 @@ def find_accounts_by_emails(
     }
     if not targets:
         return []
+
+    if all(_is_ascii(target) for target in targets):
+        ordered = sorted(targets)
+        placeholders = ",".join("?" for _ in ordered)
+        with _LOCK, _connection() as conn:
+            extra_where, extra_params = _account_filter_sql(
+                plan_filter=plan_filter,
+                codex_filter=codex_filter,
+                totp_filter=totp_filter,
+                group_filter=group_filter,
+                redemption_filter=redemption_filter,
+                at_filter=at_filter,
+                live_filter=live_filter,
+                conn=conn,
+            )
+            # 两条 OR 分支各查一次：写成 email_key IN (...) OR orig_email_key IN (...)
+            # 时 SQLite 会放弃两个索引改走全表扫描。
+            found: dict[int, dict] = {}
+            for column, index_name in (("email_key", "idx_accounts_email_key"), ("orig_email_key", "idx_accounts_orig_email_key")):
+                clause, params = _collection_where(
+                    "accounts", archived=archived, date_from=date_from, date_to=date_to,
+                    extra_where=[*extra_where, f"{column} IN ({placeholders})"],
+                    extra_params=[*extra_params, *ordered],
+                )
+                # INDEXED BY：带 archived 条件时优化器会放弃等值索引改扫 archived 索引。
+                for row in conn.execute(
+                    f"SELECT payload FROM accounts INDEXED BY {index_name} WHERE {clause}", params
+                ):
+                    payload = json.loads(row["payload"])
+                    found[int(payload.get("id") or 0)] = payload
+            rows = [found[key] for key in sorted(found, reverse=True)]
+        return _attach_redeem_claims([_decorate_account(row) for row in rows])
 
     rows = _filtered_decorated_accounts(
         archived=archived,
@@ -2647,6 +3626,8 @@ def find_accounts_by_emails(
         totp_filter=totp_filter,
         group_filter=group_filter,
         redemption_filter=redemption_filter,
+        at_filter=at_filter,
+        live_filter=live_filter,
     )
     matched = [
         row for row in rows
@@ -2668,8 +3649,10 @@ def list_accounts_page(
     totp_filter: str | None = None,
     group_filter: str | None = None,
     redemption_filter: str | None = None,
+    at_filter: str | None = None,
+    live_filter: str | None = None,
 ) -> dict:
-    with _LOCK:
+    with _LOCK, _connection() as conn:
         limit = max(1, int(limit))
         offset = max(0, int(offset or 0))
         extra_where, extra_params = _account_filter_sql(
@@ -2678,6 +3661,9 @@ def list_accounts_page(
             totp_filter=totp_filter,
             group_filter=group_filter,
             redemption_filter=redemption_filter,
+            at_filter=at_filter,
+            live_filter=live_filter,
+            conn=conn,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",
@@ -2689,9 +3675,54 @@ def list_accounts_page(
             extra_params=extra_params,
             limit=limit,
             offset=offset,
+            conn=conn,
         )
         items = _attach_redeem_claims([_decorate_account(row) for row in candidates])
         return {"items": items, "total": total, "offset": offset, "limit": limit, "revision": f"{total}:{latest}"}
+
+
+def list_account_ids_page(
+    limit: int = 5000,
+    offset: int = 0,
+    archived: str | bool | None = False,
+    plan_filter: str | None = None,
+    codex_filter: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    totp_filter: str | None = None,
+    group_filter: str | None = None,
+    redemption_filter: str | None = None,
+    at_filter: str | None = None,
+    live_filter: str | None = None,
+) -> dict:
+    """账号「全选」用的轻量分页：只返回 ID，不解析 payload。"""
+    with _LOCK, _connection() as conn:
+        limit = max(1, int(limit))
+        offset = max(0, int(offset or 0))
+        extra_where, extra_params = _account_filter_sql(
+            plan_filter=plan_filter,
+            codex_filter=codex_filter,
+            totp_filter=totp_filter,
+            group_filter=group_filter,
+            redemption_filter=redemption_filter,
+            at_filter=at_filter,
+            live_filter=live_filter,
+            conn=conn,
+        )
+        ids, total = _query_collection_ids(
+            "accounts",
+            archived=archived,
+            q=q,
+            date_from=date_from,
+            date_to=date_to,
+            extra_where=extra_where,
+            extra_params=extra_params,
+            limit=limit,
+            offset=offset,
+            conn=conn,
+        )
+        return {"ids": ids, "total": total, "offset": offset, "limit": limit}
 
 
 def get_account(acc_id: int) -> dict | None:
@@ -2705,14 +3736,20 @@ def get_account(acc_id: int) -> dict | None:
 def get_account_by_email(email: str) -> dict | None:
     with _LOCK:
         _ensure_sqlite()
+        wanted = (email or "").lower()
         with closing(_sqlite_conn()) as conn:
-            # Preserve Python's Unicode lower() and earliest-ID behavior without
-            # loading or decoding every account's tokens and metadata.
-            conn.create_function("email_lower", 1, lambda value: (value or "").lower(), deterministic=True)
-            row = conn.execute(
-                "SELECT payload FROM accounts WHERE email_lower(email)=? ORDER BY id LIMIT 1",
-                ((email or "").lower(),),
-            ).fetchone()
+            # email_key 是 lower(trim(email)) 的生成列并有索引，ASCII 邮箱可以走索引；
+            # 非 ASCII 邮箱仍需 Python 的 Unicode lower()，回退到逐行比较（少见）。
+            if _is_ascii(wanted):
+                row = conn.execute(
+                    "SELECT payload FROM accounts WHERE email_key=? ORDER BY id LIMIT 1", (wanted,)
+                ).fetchone()
+            else:
+                conn.create_function("email_lower", 1, lambda value: (value or "").lower(), deterministic=True)
+                row = conn.execute(
+                    "SELECT payload FROM accounts WHERE email_lower(email)=? ORDER BY id LIMIT 1",
+                    (wanted,),
+                ).fetchone()
         return _decorate_account(json.loads(row["payload"])) if row else None
 
 
@@ -2853,6 +3890,8 @@ def update_account_liveness(acc_id: int, result: dict | None = None) -> bool:
             token = str(result.get("access_token") or "").strip()
             if token:
                 row["access_token"] = token
+                # 查活换了新 AT，旧的「已过期」标记必须一起刷新，否则筛选结果会失真。
+                _refresh_token_expiry(row)
             session = result.get("session") or {}
             user = session.get("user") or {}
             account = session.get("account") or {}
@@ -3169,27 +4208,45 @@ def list_account_groups(*, public_only: bool = False) -> list[dict]:
     """按账号 group_name 聚合统计：账号数、可兑换数（有登录密码、未归档、未废号）。
 
     public_only=True 时只返回管理员标记为公开展示库存的分组。
+
+    统计全部在 SQLite 里完成：分组、登录密码、查活状态都是生成列，未兑换用
+    redeem_claims 的索引判断，因此不再需要把每个账号的 payload 解析成 Python 字典
+    （旧实现在 5 万账号时要 500ms 以上，而 WebUI 每次页面加载都会调用）。
     """
     _ensure_sqlite()
     with _LOCK, closing(_sqlite_conn()) as conn:
-        rows = conn.execute("SELECT id, payload, archived FROM accounts").fetchall()
-        claimed_ids = {int(row["account_id"]) for row in conn.execute("SELECT account_id FROM redeem_claims")}
+        totals = {
+            str(row["group_key"]): int(row["n"])
+            for row in conn.execute("SELECT group_key, COUNT(*) AS n FROM accounts GROUP BY group_key")
+        }
+        # INDEXED BY 只是执行计划提示：索引不存在（迁移被中断、旧库只补了一半）时
+        # 会直接报 "no such index" 让接口 500，所以确认存在才加，缺失就退回普通查询。
+        redeemable_hint = (
+            "INDEXED BY idx_accounts_redeemable "
+            if "idx_accounts_redeemable" in _existing_indexes(conn)
+            else ""
+        )
+        redeemable = {
+            str(row["group_key"]): int(row["n"])
+            for row in conn.execute(
+                # INDEXED BY：优化器会误选 (archived) 索引并逐行回表解析 payload，
+                # 这里强制走只覆盖判定列的索引（实测 30ms -> 0.3ms）。
+                "SELECT a.group_key AS group_key, COUNT(*) AS n FROM accounts AS a "
+                f"{redeemable_hint}"
+                "WHERE a.archived=0 AND a.has_password=1 AND a.live_norm<>'deactivated' "
+                f"AND trim(a.email, {_SQL_WS_CHARS})<>'' "
+                "AND NOT EXISTS (SELECT 1 FROM redeem_claims AS rc WHERE rc.account_id=a.id) "
+                "GROUP BY a.group_key"
+            )
+        }
         meta_map = _group_meta_rows(conn)
     counters: dict[str, dict] = {}
-    for raw in rows:
-        try:
-            payload = json.loads(raw["payload"] or "{}")
-        except (TypeError, ValueError):
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        payload.setdefault("id", int(raw["id"]))
-        payload.setdefault("archived", bool(raw["archived"]))
-        group = _account_group_name(payload)
-        entry = counters.setdefault(group, {"group_name": group, "total": 0, "redeemable": 0})
-        entry["total"] += 1
-        if int(raw["id"]) not in claimed_ids and _redeem_credentials(payload):
-            entry["redeemable"] += 1
+    for group, total in totals.items():
+        counters[group] = {
+            "group_name": group or DEFAULT_ACCOUNT_GROUP,
+            "total": total,
+            "redeemable": redeemable.get(group, 0),
+        }
 
     out: list[dict] = []
     for entry in counters.values():
@@ -3989,7 +5046,8 @@ def _codex_filter_sql(
         where.append("created_at <= ?")
         params.append(value + ("T23:59:59.999999" if len(value) == 10 else ""))
     if q and str(q).strip():
-        where.append("lower(payload) LIKE ?")
+        # 同 _collection_where：关键词已小写，LIKE 自身对 ASCII 大小写不敏感。
+        where.append("payload LIKE ?")
         params.append("%" + str(q).strip().lower() + "%")
     return where, params
 
@@ -4195,10 +5253,10 @@ def codex_accounts_summary() -> dict:
         _ensure_sqlite()
         with closing(_sqlite_conn()) as conn:
             row = conn.execute(
+                # INDEXED BY：优化器会选整表扫描，逐行解析 payload 只为取 _exported_count。
                 "SELECT COUNT(*) AS total, "
-                "SUM(CASE WHEN COALESCE(CAST(json_extract(payload, '$._exported_count') AS INTEGER), 0) > 0 "
-                "THEN 1 ELSE 0 END) AS exported "
-                "FROM codex_accounts WHERE archived=0"
+                "SUM(CASE WHEN exported_count > 0 THEN 1 ELSE 0 END) AS exported "
+                "FROM codex_accounts INDEXED BY idx_codex_accounts_exported WHERE archived=0"
             ).fetchone()
         total = int(row["total"] or 0)
         exported = int(row["exported"] or 0)

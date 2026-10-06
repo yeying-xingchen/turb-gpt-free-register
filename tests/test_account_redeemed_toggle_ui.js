@@ -47,6 +47,7 @@ function harness() {
     document: {getElementById: node},
     getAccountsPlanFilter: () => '', getAccountsCodexFilter: () => '',
     getAccountsTotpFilter: () => '', getAccountsGroupFilter: () => '',
+    getAccountsAtStatusFilter: () => '', getAccountsLiveStatusFilter: () => '',
     getAccountsQuery: () => '',
     api: async url => { urls.push(url); return {items: [], total: 0}; },
     clearAccountSelection: () => { context.selectionCleared++; },

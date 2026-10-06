@@ -302,6 +302,79 @@ def tag_background(tag):
     return tag.evaluate("el => getComputedStyle(el).backgroundColor")
 
 
+def test_account_quota_columns_render_balance_and_reset_credits(browser_page):
+    from core import db
+    page, base, errors = browser_page
+    accounts = db.list_accounts(limit=10, archived="all")
+    target = accounts[0]
+    untouched = accounts[1]
+    db.update_account_quota(acc_id=target["id"], result={
+        "ok": True,
+        "checked_at": "2026-10-06T10:00:00+00:00",
+        "quota_checked_at": "2026-10-06T10:00:00+00:00",
+        "quota_balance": "12.34",
+        "quota_balance_amount": 12.34,
+        "quota_currency": "USD",
+        "quota_error": None,
+        "quota_http_status": 200,
+        "reset_credits_checked_at": "2026-10-06T10:00:00+00:00",
+        "reset_credits_available": 2,
+        "reset_credits_applicable": 1,
+        "reset_credits_expires_at": "2026-07-17T17:38:38+00:00",
+        "reset_credits_detail": [
+            {"id": "RateLimitResetCredit_private", "status": "available",
+             "expires_at": "2026-07-17T17:38:38+00:00"},
+        ],
+        "reset_credits_error": None,
+        "reset_credits_http_status": 200,
+        "usage_checked_at": "2026-10-06T10:00:00+00:00",
+        "usage_plan_type": "plus",
+        "usage_5h_percent": 22,
+        "usage_5h_window_seconds": 18000,
+        "usage_5h_reset_at": "2026-10-06T15:00:00+00:00",
+        "usage_5h_started": True,
+        "usage_week_percent": 94,
+        "usage_week_window_seconds": 604800,
+        "usage_week_reset_at": "2026-10-11T00:00:00+00:00",
+        "usage_week_started": True,
+        "usage_error": None,
+        "usage_http_status": 200,
+        "quota_has_credits": True,
+    })
+    login(page, base, "/accounts")
+
+    row = page.locator("tr").filter(has_text=target["email"]).first
+    # 额度与用量合并成一列：余额 + 5h/周两条进度条（已用百分比 + 倒计时）。
+    quota_cell = row.locator('td[data-label="额度 / 用量"]')
+    expect(quota_cell).to_contain_text("12.34 USD")
+    expect(quota_cell).to_contain_text("5h")
+    expect(quota_cell).to_contain_text("22%")
+    expect(quota_cell).to_contain_text("94%")
+    expect(quota_cell).to_contain_text("重置")
+    bars = quota_cell.get_by_role("progressbar")
+    expect(bars).to_have_count(2)
+    expect(bars.nth(0)).to_have_attribute("aria-valuenow", "22")
+    expect(bars.nth(1)).to_have_attribute("aria-valuenow", "94")
+
+    reset_cell = row.locator('td[data-label="银行重置"]')
+    expect(reset_cell).to_contain_text("2 张")
+    expect(reset_cell).to_contain_text("可应用 1 张")
+    expect(reset_cell).to_contain_text("最近到期")
+
+    # 从未查询的账号显示「未查询」，进度条不伪造数值。
+    untouched_row = page.locator("tr").filter(has_text=untouched["email"]).first
+    untouched_quota = untouched_row.locator('td[data-label="额度 / 用量"]')
+    expect(untouched_quota).to_contain_text("未查询")
+    expect(untouched_quota.get_by_role("progressbar").first).not_to_have_attribute(
+        "aria-valuenow", "0"
+    )
+    expect(untouched_row.locator('td[data-label="银行重置"]')).to_contain_text("未查询")
+
+    # 上游 credit id 不下发到浏览器，只保留状态和到期时间。
+    assert "RateLimitResetCredit_private" not in page.content()
+    assert not errors
+
+
 def test_redemption_recovers_after_lost_response(browser_page):
     from core import db
     page, base, errors = browser_page
@@ -345,4 +418,48 @@ def test_task_center_submits_manual_email_otp(browser_page, monkeypatch):
     row.get_by_role('button', name='提交验证码', exact=True).click()
     expect(page.get_by_text('验证码已提交')).to_be_visible()
     assert manual_otp.pop_manual_otp('manual-otp@example.test') == '123456'
+    assert not errors
+
+
+def test_account_select_all_filtered_and_everything(browser_page):
+    """账号页：按筛选全选覆盖整个筛选结果，全选所有账号包含已归档账号。"""
+    from core import db
+
+    page, base, errors = browser_page
+    # 501 个账号 + 1 个已归档账号：验证全选不再受 5000 上限影响，并触发自动分批提示。
+    for index in range(501):
+        db.insert_account(email=f'bulk{index}@example.test', access_token=f'bulk-at-{index}', plan_type='free')
+    archived_id = db.insert_account(email='archived@example.test', access_token='at-archived', plan_type='plus')
+    updated, _skipped = db.archive_accounts(account_ids=[archived_id], archived=True)
+    assert [row['id'] for row in updated] == [archived_id]
+
+    login(page, base, '/accounts')
+    # 列表按 ID 倒序分页，第一页最新的是最后插入的批量账号。
+    expect(page.get_by_role('button', name='bulk500@example.test', exact=True)).to_be_visible()
+    # 默认筛选是「正常账号 + 未兑换」：3 个演示账号 + 501 个批量账号，不含已归档账号。
+    expect(page.get_by_role('button', name='选择全部筛选结果（504）', exact=True)).to_be_visible()
+    expect(page.get_by_role('button', name='全选所有账号（505）', exact=True)).to_be_visible()
+
+    page.get_by_role('button', name='选择全部筛选结果（504）', exact=True).click()
+    expect(page.locator('.selection-count')).to_have_text('已选 504')
+    # 当前页 20 行（默认每页 20 条）全部勾选。
+    assert page.locator('tbody tr input[type=checkbox]:checked').count() == 20
+
+    page.get_by_role('button', name='清空', exact=True).click()
+    expect(page.locator('.selection-count')).to_have_text('已选 0')
+
+    page.get_by_role('button', name='全选所有账号（505）', exact=True).click()
+    expect(page.locator('.selection-count')).to_have_text('已选 505')
+
+    # 超过后端单次上限（查活 500）时，弹窗说明会自动分批执行且不直接报错。
+    page.locator('.account-actionbar').get_by_role('button', name='查活', exact=True).click()
+    dialog = page.get_by_role('dialog', name='查活 / 刷新 AT')
+    expect(dialog).to_contain_text('当前选择 505 个账号')
+    expect(dialog).to_contain_text('自动分 2 批执行并汇总结果')
+    expect(dialog.get_by_role('button', name='确认查活 / 刷新 AT')).to_be_enabled()
+    page.keyboard.press('Escape')
+    expect(page.locator('dialog[open]')).to_have_count(0)
+
+    # 全选所有账号后，行内复选框同样反映选中状态。
+    assert page.locator('tbody tr.is-selected').count() == 20
     assert not errors

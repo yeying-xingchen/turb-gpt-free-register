@@ -88,6 +88,10 @@ EDITABLE_FIELDS = [
         "key": "LIVE_CHECK_WORKERS", "file": "live_check.py", "type": "int", "group": "账号查活",
         "label": "查活并发数", "help": "批量查活后台线程数，默认 3，范围 1–16；保存后立即生效，也可在任务中心运行中调整",
     },
+    {
+        "key": "LIVE_CHECK_DATA_SAVER", "file": "live_check.py", "type": "bool", "group": "账号查活",
+        "label": "查活省流量", "help": "默认开启：Cloak 浏览器查活只拦图片/媒体/字体等可选资源和已确认的遥测 URL，登录页更小、渲染更快、内存更低；验证码/challenge 资源自动放行。与注册的省流量开关独立，遇到页面异常可关闭",
+    },
 
     # ---- CloakBrowser ----
     {
@@ -133,6 +137,18 @@ EDITABLE_FIELDS = [
     {
         "key": "CLOAK_KEEP_BROWSER_OPEN", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",
         "label": "保留Cloak浏览器", "help": "调试时开启，任务结束后不自动关闭；查活忽略此项，成功或失败均关闭浏览器",
+    },
+    {
+        "key": "CLOAK_MEMORY_SAVER", "file": "cloakbrowser.py", "type": "bool", "group": "CloakBrowser",
+        "label": "Cloak低内存模式", "help": "默认开启：为 Cloak 启动参数追加 V8 堆上限，挡住页面 JS 堆异常增长导致的内存膨胀；只设上限，不改变指纹、语言时区和 WebGL 参数",
+    },
+    {
+        "key": "CLOAK_JS_HEAP_MB", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
+        "label": "Cloak JS堆上限(MB)", "help": "默认 512，运行时限定 64–4096；0 表示不限制。登录/注册页面通常占用 150–350MB，正常流程不会触顶",
+    },
+    {
+        "key": "CLOAK_MAX_CONCURRENT", "file": "cloakbrowser.py", "type": "int", "group": "CloakBrowser",
+        "label": "Cloak浏览器并发上限", "help": "默认 0=按当前可用内存自动计算（每个浏览器按 700MB 估算，至少 1 个）；填写后按 1–32 生效。超出的任务在启动前排队，避免并发过高触发系统 OOM；CLOAK_KEEP_BROWSER_OPEN=True 时不受限制",
     },
 
     # ---- Browser Use Cloud ----
@@ -550,6 +566,14 @@ EDITABLE_FIELDS = [
         "label": "IP定位超时(秒)", "help": "出口 IP 地理信息接口的单次请求超时；接口失败会自动回退，不影响注册",
     },
     {
+        "key": "IP_GEO_CACHE_TTL", "file": "browser.py", "type": "float", "group": "浏览器画像",
+        "label": "IP定位缓存(秒)", "help": "默认 1800；同一个代理出口只解析一次，Cloak 再次启动时直接复用，省掉一次网络往返。0 表示关闭缓存",
+    },
+    {
+        "key": "IP_GEO_CACHE_SIZE", "file": "browser.py", "type": "int", "group": "浏览器画像",
+        "label": "IP定位缓存条数", "help": "默认 256；按出口地址缓存，超出后淘汰最早写入的条目。0 表示关闭缓存",
+    },
+    {
         "key": "BROWSER_DATA_SAVER_MODE", "file": "browser.py", "type": "bool", "group": "浏览器画像",
         "label": "本地浏览器省流量模式", "help": "仅 Roxy/Cloak 本地浏览器拦截图片和媒体等可选资源；Browser Use/Skyvern 云端浏览器不启用；默认关闭",
     },
@@ -657,6 +681,22 @@ EDITABLE_FIELDS = [
     {
         "key": "PLAN_CHECK_JITTER", "file": "proxy.py", "type": "float", "group": "代理池",
         "label": "套餐/Agent请求随机抖动(秒)", "help": "在查套餐和生成 Agent Token 的最小间隔上增加随机延迟，避免请求过于规律",
+    },
+    {
+        "key": "QUOTA_CHECK_WORKERS", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "额度/用量查询并发数", "help": "「查额度」独立队列的后台线程数（额度、5h/周用量、重置券），默认 3，范围 1–16；网络策略复用套餐查询代理；保存后立即生效，也可在任务中心运行中调整",
+    },
+    {
+        "key": "QUOTA_CHECK_QUEUE_LIMIT", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "额度/用量查询队列上限", "help": "防止异常批量操作无限堆积，建议 100-1000",
+    },
+    {
+        "key": "QUOTA_CHECK_MIN_INTERVAL", "file": "proxy.py", "type": "float", "group": "代理池",
+        "label": "额度/用量查询最小间隔(秒)", "help": "限制额度、用量与「银行重置」券查询的请求启动频率，降低 429 风险",
+    },
+    {
+        "key": "QUOTA_CHECK_JITTER", "file": "proxy.py", "type": "float", "group": "代理池",
+        "label": "额度/用量查询随机抖动(秒)", "help": "在额度查询的最小间隔上增加随机延迟，避免请求过于规律",
     },
     # ---- 提链 ----
     {

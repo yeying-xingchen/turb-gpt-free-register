@@ -111,6 +111,7 @@ def recover_startup(owner: DatabaseOwner) -> dict[str, int]:
         "registration": _recover_registration_jobs,
         "plus_activation": plus_activation_store.recover_interrupted,
         "plan_check": db.recover_interrupted_plan_checks,
+        "quota_check": db.recover_interrupted_quota_checks,
         "extract_link": db.recover_interrupted_extract_links,
         "live_check": db.recover_interrupted_live_checks,
         "codex_agent": db.recover_interrupted_codex_agents,

@@ -17,6 +17,7 @@ from core import db, task_control
 LABELS = {
     "registration": "账号注册", "codex_retry": "Codex补跑",
     "plus_activation": "开通 Plus", "live_check": "账号查活", "plan_check": "查询套餐",
+    "quota_check": "查询额度与用量",
     "extract_link": "提取支付链接", "scan_payment": "扫码支付", "totp_setup": "开启 2FA",
     "email_change": "邮箱换绑", "codex_agent": "生成 Codex Agent",
 }
@@ -52,7 +53,7 @@ _MESSAGES = {
 }
 _SUCCESS_MESSAGES = {
     "plus_activation": "Plus 套餐核验成功", "live_check": "账号查活成功，账号可用",
-    "plan_check": "套餐查询成功", "extract_link": "支付链接提取成功",
+    "plan_check": "套餐查询成功", "quota_check": "额度与用量查询成功", "extract_link": "支付链接提取成功",
     "scan_payment": "支付成功", "totp_setup": "2FA 已开启", "email_change": "邮箱换绑成功",
     "codex_agent": "Codex Agent 凭证生成成功", "codex_retry": "Codex 补跑成功",
 }
@@ -261,7 +262,8 @@ def sync_account(conn, before, account, *, backfill=False):
     for kind, prefix in PREFIXES.items():
         key = prefix + "_status"
         value, previous = account.get(key), before.get(key)
-        checked_key = {"live_check": "live_checked_at", "plan_check": "plan_checked_at"}.get(kind, prefix + "_checked_at")
+        checked_key = {"live_check": "live_checked_at", "plan_check": "plan_checked_at",
+                       "quota_check": "quota_checked_at"}.get(kind, prefix + "_checked_at")
         watched = [prefix + suffix for suffix in (
             "_status", "_run_id", "_queued_at", "_started_at", "_completed_at", "_progress", "_error", "_message",
         )] + [checked_key]

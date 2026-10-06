@@ -12,6 +12,12 @@ function functionSource(name) {
   return source.slice(match.index, source.indexOf('\n}', match.index) + 2);
 }
 
+function declarationSource(name) {
+  const match = new RegExp(`^(?:const|let|var) ${name}\\b[\\s\\S]*?;\\s*$`, 'm').exec(source);
+  assert.ok(match && match[0].length < 400, `Missing declaration ${name}`);
+  return match[0];
+}
+
 function harness() {
   const pages = [
     [{id: 1, email: 'one@example.com', has_access_token: true}, {id: 2, email: 'two@example.com', has_access_token: false}],
@@ -42,7 +48,8 @@ function harness() {
   context.refreshJobs = context.loadOutlook = context.loadCodex = () => {};
   vm.createContext(context);
   const names = ['clearAccountSelection', 'updateAccountSelectionUi', 'syncAccountsSelectAll', 'onAccountsBodyChange', 'getSelectedAccountRows', 'pagerGo', 'pagerGoTo', 'pagerSetSize', '_reloadPagedList', 'parseAccountEmailInput', 'selectAccountsByEmail', 'clearAccountEmailSelectionInput', 'copySelectedAccountLines', 'copySelectedAccountTokens', 'copySelectedAccountEmails', 'copyCurrentPageLines', 'copyCurrentPageTokens'];
-  vm.runInContext(names.map(functionSource).join('\n'), context);
+  const bulk = ['accountBatchLimit', 'chunkAccountIds', 'mergeBatchResults', 'postAccountBatches', 'accountBatchProgress', 'accountRowsCoverSelection'];
+  vm.runInContext([declarationSource('ACCOUNT_BATCH_LIMITS'), declarationSource('ACCOUNT_EMAIL_LOOKUP_LIMIT'), ...names.map(functionSource), ...bulk.map(functionSource)].join('\n'), context);
   context.renderAccounts();
   return {
     context, node, requests, copied, scopes, toasts, pages,

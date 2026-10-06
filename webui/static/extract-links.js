@@ -99,6 +99,28 @@
     }
     return data;
   }
+  // 后端单个批量接口最多 500 个账号（activate-plus / extract-link-bulk），
+  // 超过上限时按 500 分片提交并合并结果，避免整批被 400 拒绝。
+  const ACCOUNT_BULK_LIMIT = 500;
+  async function requestAccountBulk(url, body, ids, limit = ACCOUNT_BULK_LIMIT) {
+    const parsed = Math.floor(Number(limit));
+    const size = Number.isFinite(parsed) && parsed > 0 ? parsed : ACCOUNT_BULK_LIMIT;
+    if (ids.length <= size) return request(url, 'POST', {...body, account_ids: ids});
+    const merged = {};
+    const arrayKeys = new Set();
+    for (let index = 0; index < ids.length; index += size) {
+      const data = await request(url, 'POST', {...body, account_ids: ids.slice(index, index + size)});
+      for (const [key, value] of Object.entries(data)) {
+        if (Array.isArray(value)) { merged[key] = [...(merged[key] || []), ...value]; arrayKeys.add(key); }
+        else if (typeof value === 'number' && key.endsWith('_count')) merged[key] = (merged[key] || 0) + value;
+        else merged[key] = value;
+      }
+    }
+    for (const key of arrayKeys) {
+      if (`${key}_count` in merged) merged[`${key}_count`] = merged[key].length;
+    }
+    return merged;
+  }
   function modal(title) {
     if (active?.busy) { active.dialog.focus(); return null; }
     active?.dialog.close();
@@ -267,7 +289,9 @@
             option(credentials, `saved:${savedId}`, `${masked(item)}${memo.value.trim() ? ' · ' + memo.value.trim() : ''}`); credentials.value = `saved:${savedId}`; body.cdk_id = Number(savedId); delete body.cdk; raw.value = ''; raw.required = false; save.input.checked = false; rawSection.hidden = true;
           }
           const single = ids.length === 1;
-          const result = await request(single ? '/api/accounts/extract-link' : '/api/accounts/extract-link-bulk', 'POST', {...body, ...(single ? {account_id: ids[0]} : {account_ids: ids})});
+          const result = single
+            ? await request('/api/accounts/extract-link', 'POST', {...body, account_id: ids[0]})
+            : await requestAccountBulk('/api/accounts/extract-link-bulk', body, ids);
           raw.value = ''; proxy.value = ''; entryProxies.value = ''; form.hidden = true;
           const skipped = Number(result.skipped_count || 0) + Number(result.busy_count || 0) + Number(result.failed_count || 0);
           state.message(result.message || (single ? '提链任务已提交。请在账号列表查看进度。' : `已入队 ${result.started_count || 0} 个；跳过 / 失败 ${skipped} 个。`));
@@ -952,7 +976,10 @@
         syncControls();
         try {
           // Serialize once; closing this dialog never aborts the server-side batch.
-          const pending = request('/api/accounts/activate-plus', 'POST', body);
+          // 超过 500 个账号要分片提交：先深拷贝请求体，避免后面的 CDK 清理影响后续批次。
+          const pending = ids.length > ACCOUNT_BULK_LIMIT
+            ? requestAccountBulk('/api/accounts/activate-plus', JSON.parse(JSON.stringify(body)), ids)
+            : request('/api/accounts/activate-plus', 'POST', body);
           activationPayments.clear(); extraction.clear();
           for (const item of [...[].concat(body.payment), ...[].concat(body.extraction)]) {
             delete item.cdk; delete item.proxy_url; delete item.entry_proxies;

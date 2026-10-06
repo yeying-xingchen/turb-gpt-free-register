@@ -2,24 +2,34 @@
 import ExtractionConfig from "./ExtractionConfig.vue";
 import PaymentConfig from "./PaymentConfig.vue";
 import PlanInfo from "./PlanInfo.vue";
+import QuotaInfo from "./QuotaInfo.vue";
+import UsageInfo from "./UsageInfo.vue";
 import PromoDetailsModal from "./PromoDetailsModal.vue";
 import {
   accountActionLabels,
+  accountBatchLimit,
   accountDate,
   accountError,
   accountResult,
   accountResultDetails,
   accountSafeUrl,
   accountStatus,
+  chunkAccountIds,
   copyAccountText,
   downloadAccountFile,
+  mergeAccountResults,
   saveAccountFile,
   type Account,
   type AccountGroup,
 } from "~/utils/accounts";
 const props = defineProps<{
   action: string;
+  /** 已经加载过的账号行（可能只是预览，未必覆盖全部选中账号）。 */
   accounts: Account[];
+  /** 选中的全部账号 ID。 */
+  accountIds: number[];
+  /** 选中的账号总数。 */
+  accountCount: number;
   groups: AccountGroup[];
 }>();
 const emit = defineEmits<{
@@ -28,13 +38,14 @@ const emit = defineEmits<{
   submitted: [
     payload: { accountIds: number[]; jobType: string; title: string },
   ];
-  delete: [accounts: Account[]];
+  delete: [payload: { ids: number[]; rows: Account[] }];
 }>();
 const { request } = useApi();
 const toast = useToast();
 const mode = ref(props.action);
 const busy = ref(false);
 const error = ref("");
+const progress = ref("");
 const feedback = ref("");
 const details = ref<string[]>([]);
 const submitted = ref(false);
@@ -80,7 +91,16 @@ const open = computed({
     if (!value && !busy.value) emit("close");
   },
 });
-const ids = computed(() => props.accounts.map((account) => account.id));
+const ids = computed(() =>
+  props.accountIds.length
+    ? props.accountIds
+    : props.accounts.map((account) => account.id),
+);
+/** 选中总数：行缓存可能只是预览，以传入的总数为准。 */
+const total = computed(() => Math.max(Number(props.accountCount) || 0, ids.value.length));
+/** 预览列表只渲染前 200 行，避免全选后一次性生成上万条 DOM。 */
+const previewLimit = 200;
+const previewRows = computed(() => props.accounts.slice(0, previewLimit));
 const first = computed(() => props.accounts[0]);
 const isCheckout = computed(() =>
   ["extract", "activate", "pay", "pay-query"].includes(mode.value),
@@ -91,14 +111,16 @@ const needsExtraction = computed(() =>
 const needsPayment = computed(() =>
   ["activate", "pay", "pay-query"].includes(mode.value),
 );
-const actionLimit = computed(() =>
-  ["note", "group", "archive", "restore", "export"].includes(mode.value)
-    ? 5000
-    : 500,
+/** 本操作单次请求的账号上限；超过时由前端自动分批提交。 */
+const actionLimit = computed(() => accountBatchLimit(mode.value));
+const batchCount = computed(() =>
+  Math.max(1, Math.ceil(ids.value.length / actionLimit.value)),
 );
 const descriptions: Record<string, string> = {
   live: "按系统配置的查活驱动重新登录，按需完成密码、邮箱验证码或 2FA 验证；取得新 AT 后标记正常。任务在后台排队执行。",
   plan: "查询当前套餐、试用资格和订阅到期时间。未填写代理时使用服务器查套餐网络策略。",
+  quota:
+    "查询账号额度余额（remaining_balance）和 Codex「银行重置」券张数、最近到期时间。两个接口都只读，不消耗额度。",
   totp: "为账号开启 2FA，成功后将密钥保存到账号记录。已启用、缺少 AT 或正在处理的账号会跳过。",
   email:
     "从所选邮箱来源获取新邮箱并换绑。请先在系统配置中设置该来源；后台任务结束后更新账号邮箱。",
@@ -121,6 +143,7 @@ const descriptions: Record<string, string> = {
 const taskTypeByMode: Record<string, { type: string; title: string }> = {
   live: { type: "live_check", title: "查活任务日志" },
   plan: { type: "plan_check", title: "套餐查询日志" },
+  quota: { type: "quota_check", title: "额度查询日志" },
   totp: { type: "totp_setup", title: "2FA 设置日志" },
   email: { type: "email_change", title: "邮箱换绑日志" },
   agent: { type: "codex_agent", title: "Codex Agent 日志" },
@@ -133,7 +156,10 @@ const taskTypeByMode: Record<string, { type: string; title: string }> = {
   "pay-query": { type: "scan_payment", title: "扫码支付日志" },
 };
 const actionSections = [
-  { label: "账号与安全", actions: ["live", "plan", "totp", "email", "export"] },
+  {
+    label: "账号与安全",
+    actions: ["live", "plan", "quota", "totp", "email", "export"],
+  },
   {
     label: "订阅与支付",
     actions: ["activate", "extract", "extract-task", "pay", "pay-query"],
@@ -149,6 +175,14 @@ const statusRows = computed(() =>
           "套餐查询",
           first.value.plan_check_status,
           first.value.plan_check_error,
+        ],
+        [
+          "额度 / 用量 / 重置券查询",
+          first.value.quota_check_status,
+          first.value.quota_check_error ||
+            first.value.quota_error ||
+            first.value.usage_error ||
+            first.value.reset_credits_error,
         ],
         [
           "2FA 设置",
@@ -272,7 +306,8 @@ function fieldPayloads(refs: Map<number, any>, values: number[]) {
 }
 async function performExport() {
   if (exportField.value === "agent_zip") {
-    if (ids.value.length > 1000) throw new Error("单次最多下载 1000 个 Agent");
+    if (ids.value.length > accountBatchLimit("download"))
+      throw new Error("ZIP 下载单次最多 1000 个账号，请缩小选择范围后分批下载");
     await downloadAccountFile(
       "/api/accounts/codex-agent/download-bulk",
       { account_ids: ids.value },
@@ -282,8 +317,8 @@ async function performExport() {
     return;
   }
   if (exportField.value === "cpa_zip") {
-    if (ids.value.length > 1000)
-      throw new Error("单次最多下载 1000 个 CPA 凭据");
+    if (ids.value.length > accountBatchLimit("download"))
+      throw new Error("ZIP 下载单次最多 1000 个账号，请缩小选择范围后分批下载");
     const result = await request("/api/accounts/download-cpa-bulk", {
       method: "POST",
       body: { account_ids: ids.value, prepare: true },
@@ -303,19 +338,19 @@ async function performExport() {
     feedback.value = `已开始下载 CPA ZIP${result.error_count ? `，${result.error_count} 个失败详情见包内 manifest.json` : ""}`;
     return;
   }
-  let values: string[];
-  if (exportField.value === "email") {
-    values = props.accounts.map((account) => account.email);
-  } else {
+  // 邮箱、密码、AT、2FA 等字段都按需分批读取，不再依赖前端缓存的行。
+  const values: string[] = [];
+  const detailLines: string[] = [];
+  for (const chunk of chunkAccountIds(ids.value, actionLimit.value)) {
     const result = await request("/api/accounts/secret-bulk", {
       method: "POST",
-      body: { account_ids: ids.value, field: exportField.value },
+      body: { account_ids: chunk, field: exportField.value },
     });
-    values = (result.values || [])
-      .map((item: any) => item.value)
-      .filter(Boolean);
-    details.value = accountResultDetails(result);
+    for (const item of result.values || [])
+      if (item?.value) values.push(String(item.value));
+    detailLines.push(...accountResultDetails(result));
   }
+  details.value = [...new Set(detailLines)].slice(0, 50);
   if (!values.length) throw new Error("所选账号没有可导出的内容");
   const text = values.join("\n");
   if (exportMethod.value === "copy") await copyAccountText(text);
@@ -336,15 +371,13 @@ async function submit() {
   )
     return;
   busy.value = true;
-  error.value = feedback.value = "";
+  error.value = feedback.value = progress.value = "";
   details.value = [];
   let dispatched = false;
+  let batchTotal = 0;
+  let completedBatches = 0;
   try {
     if (!ids.value.length) throw new Error("请先选择账号");
-    if (ids.value.length > actionLimit.value)
-      throw new Error(
-        `本操作单次最多处理 ${actionLimit.value} 个账号，请缩小选择范围`,
-      );
     if (mode.value === "export") {
       await performExport();
       toast.success(feedback.value);
@@ -354,6 +387,7 @@ async function submit() {
     const routes: Record<string, string> = {
       live: "check-live-bulk",
       plan: "check-plan-bulk",
+      quota: "check-quota-bulk",
       totp: "totp-setup-bulk",
       email: "change-email-bulk",
       agent: "codex-agent-bulk",
@@ -377,7 +411,7 @@ async function submit() {
       body.archived = mode.value === "archive";
     if (mode.value === "email") body.source = source.value;
     if (mode.value === "agent") body.verify_task = verifyTask.value;
-    if (mode.value === "plan") {
+    if (mode.value === "plan" || mode.value === "quota") {
       body.timezone_offset_min = String(new Date().getTimezoneOffset());
       if (proxy.value.trim()) body.proxy = proxy.value.trim();
     }
@@ -434,10 +468,28 @@ async function submit() {
       }
     }
     dispatched = true;
-    const result = await request(path, { method: "POST", body });
-    if (result.ok === false)
-      throw new Error(result.error || result.message || "操作未被接受");
-    if (!live) return;
+    // 超过后端单次上限时自动分批提交，把各批响应合并成一份结果。
+    const results: any[] = [];
+    const chunks = chunkAccountIds(ids.value, actionLimit.value);
+    batchTotal = chunks.length;
+    for (const [index, chunk] of chunks.entries()) {
+      if (chunks.length > 1)
+        progress.value = `正在分批提交 ${index + 1}/${chunks.length}（每批最多 ${actionLimit.value} 个账号）…`;
+      const response = await request(path, {
+        method: "POST",
+        body:
+          mode.value === "extract-task"
+            ? body
+            : { ...body, account_ids: chunk },
+      });
+      if (response.ok === false)
+        throw new Error(response.error || response.message || "操作未被接受");
+      if (!live) return;
+      results.push(response);
+      completedBatches = index + 1;
+    }
+    progress.value = "";
+    const result = chunks.length > 1 ? mergeAccountResults(results) : results[0];
     submitted.value = !["pay-query", "extract-task"].includes(mode.value);
     feedback.value = accountResult(
       result,
@@ -476,6 +528,9 @@ async function submit() {
   } catch (cause) {
     if (live) {
       error.value = accountError(cause);
+      // 分批提交时可能有部分批次已经生效，必须把进度写清楚，避免重复执行。
+      if (dispatched && completedBatches)
+        error.value += `；已提交 ${completedBatches}/${batchTotal} 批，请刷新列表核对已生效的部分`;
       if (
         ["pay", "activate"].includes(mode.value) &&
         dispatched &&
@@ -489,6 +544,7 @@ async function submit() {
     }
   } finally {
     busy.value = false;
+    progress.value = "";
   }
 }
 async function copy(value: string) {
@@ -506,17 +562,23 @@ async function copy(value: string) {
     <div class="account-operations stack">
       <div class="scope">
         <strong>{{
-          accounts.length === 1
-            ? first?.email
-            : `已选择 ${accounts.length} 个账号（包含跨页选择）`
+          total === 1
+            ? first?.email || `账号 #${ids[0]}`
+            : `已选择 ${total} 个账号（包含跨页与全选）`
         }}</strong>
-        <details v-if="accounts.length > 1">
+        <span v-if="total > accounts.length" class="muted">
+          · 已加载 {{ accounts.length }} 个用于预览</span
+        >
+        <details v-if="total > 1">
           <summary>查看本次操作账号</summary>
           <div class="scope-list">
-            <span v-for="account in accounts" :key="account.id"
+            <span v-for="account in previewRows" :key="account.id"
               >#{{ account.id }} · {{ account.email }}</span
             >
           </div>
+          <p v-if="total > previewRows.length" class="muted">
+            仅显示前 {{ previewRows.length }} 个，本次共 {{ total }} 个账号。
+          </p>
         </details>
       </div>
       <template v-if="mode === 'overview' && first">
@@ -526,6 +588,30 @@ async function copy(value: string) {
             ><span class="muted">最近一次查套餐的真实结果</span>
           </div>
           <PlanInfo :account="first" detailed @promos="promoAccount = $event" />
+        </section>
+        <section class="plan-section stack">
+          <div class="inline plan-section-head">
+            <strong>额度、用量与银行重置</strong
+            ><span class="muted">最近一次查额度的真实结果</span>
+          </div>
+          <div class="quota-overview">
+            <div>
+              <p class="muted quota-overview-label">额度余额</p>
+              <QuotaInfo :account="first" field="balance" detailed />
+            </div>
+            <div>
+              <p class="muted quota-overview-label">银行重置券</p>
+              <QuotaInfo :account="first" field="reset" detailed />
+            </div>
+            <div>
+              <p class="muted quota-overview-label">5 小时窗口（已用）</p>
+              <UsageInfo :account="first" field="5h" detailed />
+            </div>
+            <div>
+              <p class="muted quota-overview-label">周 / 月窗口（已用）</p>
+              <UsageInfo :account="first" field="week" detailed />
+            </div>
+          </div>
         </section>
         <dl class="account-facts">
           <div>
@@ -637,7 +723,10 @@ async function copy(value: string) {
             </button>
           </div>
         </section>
-        <button class="btn btn-danger" @click="emit('delete', accounts)">
+        <button
+          class="btn btn-danger"
+          @click="emit('delete', { ids: ids, rows: accounts })"
+        >
           删除此账号
         </button>
       </template>
@@ -669,10 +758,13 @@ async function copy(value: string) {
         @submit.prevent="submit"
       >
         <p v-if="descriptions[mode]" class="muted">{{ descriptions[mode] }}</p>
-        <p v-if="accounts.length > actionLimit" class="alert alert-error">
-          本操作最多 {{ actionLimit }} 个账号，当前选择
-          {{ accounts.length }} 个。
+        <p v-if="batchCount > 1" class="muted" role="status">
+          当前选择 {{ total }} 个账号，超过后端单次上限（{{
+            actionLimit
+          }}
+          个），提交时会自动分 {{ batchCount }} 批执行并汇总结果。
         </p>
+        <p v-if="progress" class="muted" role="status">{{ progress }}</p>
         <fieldset
           class="operation-fields stack"
           :disabled="busy || (submitted && mode !== 'export')"
@@ -698,7 +790,7 @@ async function copy(value: string) {
                 :value="item.group_name"
               /></datalist
           ></label>
-          <label v-if="mode === 'plan'" class="field"
+          <label v-if="mode === 'plan' || mode === 'quota'" class="field"
             >查询代理（可选）<input
               v-model="proxy"
               class="input"
@@ -966,7 +1058,6 @@ async function copy(value: string) {
         :disabled="
           busy ||
           loadingProviders ||
-          accounts.length > actionLimit ||
           (submitted && mode !== 'export')
         "
       >
@@ -1010,6 +1101,21 @@ async function copy(value: string) {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
   margin: 0;
+}
+/* 账号详情里的额度概览：两列并排，窄屏自动折成一列。 */
+.quota-overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.quota-overview-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+@media (max-width: 800px) {
+  .quota-overview {
+    grid-template-columns: 1fr;
+  }
 }
 .plan-section {
   gap: 10px;

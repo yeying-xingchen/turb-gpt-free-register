@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from flask import Flask, Response, jsonify, make_response, render_template, request, url_for
 import pyotp
 
-from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service, live_check_service
+from core import codex_retry_service, db, plan_check_service, quota_check_service, extract_link_service, codex_agent_service, live_check_service
 from webui.auth import init_auth, register_auth_routes
 from webui.assets import init_ui_assets
 from webui.frontend import frontend_page, register_frontend
@@ -135,6 +135,22 @@ def _compact_account_for_list(row: dict) -> dict:
 
     if row.get("plan_check_status") in ("queued", "running") or row.get("plan_check_ok") is False:
         out["plan_check_ok"] = row.get("plan_check_ok")
+    if row.get("quota_check_status") in ("queued", "running") or row.get("quota_check_ok") is False:
+        out["quota_check_ok"] = row.get("quota_check_ok")
+    # 重置券明细只下发状态与到期时间：上游的 credit id 属于账号内部标识，
+    # 前端展示（悬停提示逐张列出）不需要，也不应该出现在浏览器里。
+    credits_detail = row.get("reset_credits_detail")
+    if isinstance(credits_detail, list):
+        sanitized = [
+            {"status": item.get("status"), "expires_at": item.get("expires_at")}
+            for item in credits_detail[:20]
+            if isinstance(item, dict) and (item.get("status") or item.get("expires_at"))
+        ]
+        if sanitized:
+            out["reset_credits_detail"] = sanitized
+
+    # 「AT 已过期」只暴露布尔结论，不下发 access_token；与 at_status 筛选同一判定。
+    out["at_expired"] = bool(row.get("at_expired"))
 
     # 下面字段仅在有值时返回，避免每行堆满 null/空字符串/内部状态。
     optional_keys = (
@@ -144,6 +160,24 @@ def _compact_account_for_list(row: dict) -> dict:
         # 都是非敏感字符串，不包含 Token、代理凭据或邮箱密码。
         "plan_check_trigger", "plan_checked_at", "plan_last_success_at",
         "plan_check_network_route", "plan_check_proxy_used", "plan_check_proxy_fallback_reason",
+        # 额度 / 用量 / 「银行重置」券展示补充（见 额度.har：remaining_balance、
+        # wham/rate-limit-reset-credits，以及同族的 wham/usage）；原始响应预览只在有值时返回。
+        "quota_check_status", "quota_check_trigger", "quota_check_queued_at",
+        "quota_check_started_at", "quota_check_completed_at", "quota_check_error",
+        "quota_balance", "quota_balance_amount", "quota_currency", "quota_unlimited",
+        "quota_has_credits", "quota_credits_balance", "quota_overage_limit_reached",
+        "quota_balance_fallback",
+        "quota_checked_at", "quota_error", "quota_http_status",
+        "quota_last_success_at", "quota_check_network_route", "quota_check_proxy_used",
+        "reset_credits_available", "reset_credits_applicable", "reset_credits_expires_at",
+        "reset_credits_checked_at", "reset_credits_error", "reset_credits_http_status",
+        # 5 小时/周(月) 用量窗口与限流状态：usage_week_window_seconds 为月窗口时前端显示「月」。
+        "usage_plan_type", "usage_allowed", "usage_limit_reached", "usage_limit_reached_type",
+        "usage_5h_percent", "usage_5h_window_seconds", "usage_5h_reset_at",
+        "usage_5h_reset_after_seconds", "usage_5h_started",
+        "usage_week_percent", "usage_week_window_seconds", "usage_week_reset_at",
+        "usage_week_reset_after_seconds", "usage_week_started",
+        "usage_checked_at", "usage_error", "usage_http_status",
         "billing_period", "billing_currency", "discount_amount", "discount_type",
         "discount_expires_at", "discount_promo_campaign_id",
         "is_delinquent",
@@ -222,6 +256,8 @@ def _account_secret_value(row: dict, field: str) -> str:
         elif isinstance(extra_raw, dict):
             extra = extra_raw
         return str(extra.get("registration_password") or row.get("registration_password") or "未设置")
+    if field == "email":
+        return str(row.get("email") or "")
     if field == "full_export":
         try:
             from core.db import _account_full_export_line
@@ -229,7 +265,7 @@ def _account_secret_value(row: dict, field: str) -> str:
             return str(_account_full_export_line(row) or "")
         except Exception:
             return ""
-    raise ValueError("field 仅支持 access_token/copy_line/codex_agent_token/totp_secret/totp_code/password/login_credentials/full_export")
+    raise ValueError("field 仅支持 email/access_token/copy_line/codex_agent_token/totp_secret/totp_code/password/login_credentials/full_export")
 
 
 def _compact_job_for_list(row: dict) -> dict:
@@ -329,6 +365,41 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         "api_redeem_public_stock",
     }
     _prepared_downloads: dict[str, dict] = {}
+
+    @app.errorhandler(Exception)
+    def _api_error_as_json(exc):
+        """接口异常统一返回 JSON，避免前端只看到无法解释的「服务响应异常（500）」。
+
+        Flask 默认对未捕获异常返回 HTML 错误页，``useApi`` 的 ``response.json()``
+        解析失败后只能退化成「服务响应异常（500）」，真实原因（例如数据库迁移报错）
+        既传不到前端、也不写入日志。这里把 /api/ 下的异常转成 JSON 并记录堆栈。
+        """
+        from werkzeug.exceptions import HTTPException
+
+        is_api = request.path.startswith("/api/")
+        if isinstance(exc, HTTPException):
+            code = exc.code or 500
+            if not is_api:
+                return exc
+            if code < 500:
+                return jsonify({"ok": False, "error": exc.description or exc.name}), code
+            app.logger.error("接口异常 %s %s：%s", request.method, request.path, exc)
+            detail = str(exc.description or exc.name or code)
+        else:
+            if not is_api:
+                raise exc
+            app.logger.exception("接口未处理异常：%s %s", request.method, request.path)
+            detail = f"{type(exc).__name__}: {exc}"
+            code = 500
+        # 异常细节只回给已登录的调用方，公开兑换接口不下发内部信息（日志里仍有完整堆栈）。
+        from webui.auth import request_is_authorized
+
+        try:
+            authorized = request_is_authorized()
+        except Exception:
+            authorized = False
+        suffix = f"：{detail}" if authorized else "，请查看服务端日志"
+        return jsonify({"ok": False, "error": f"服务器内部错误{suffix}"}), code
 
     init_ui_assets(app)
 
@@ -618,28 +689,92 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
     # ----------------------------------------------------------
     # 已注册账号
     # ----------------------------------------------------------
+    def _account_query_filters() -> dict:
+        """账号列表与 ID 列表共用的筛选参数解析。"""
+        date_from = str(request.args.get("date_from", default="") or "").strip() or None
+        date_to = str(request.args.get("date_to", default="") or "").strip() or None
+        return {
+            "archived": str(request.args.get("archived", default="0") or "0").lower(),
+            "plan_filter": str(request.args.get("plan", default="") or "").lower(),
+            "codex_filter": str(request.args.get("codex_status", default="") or "").strip().lower(),
+            "totp_filter": str(
+                request.args.get("totp_status")
+                or request.args.get("totp_filter")
+                or request.args.get("twofa_status")
+                or ""
+            ).strip().lower(),
+            "q": str(request.args.get("q", default="") or "").strip(),
+            "group_filter": str(request.args.get("group", default="") or "").strip(),
+            "redemption_filter": str(
+                request.args.get("redemption")
+                or request.args.get("redeem_status")
+                or request.args.get("redeemed")
+                or ""
+            ).strip().lower(),
+            "at_filter": str(
+                request.args.get("at_status")
+                or request.args.get("at")
+                or request.args.get("token_status")
+                or ""
+            ).strip().lower(),
+            "live_filter": str(
+                request.args.get("live_status")
+                or request.args.get("live")
+                or request.args.get("live_check_status")
+                or ""
+            ).strip().lower(),
+            "date_from": date_from,
+            "date_to": date_to,
+        }
+
+    @app.get("/api/accounts/ids")
+    def api_account_ids():
+        """账号「全选」用的轻量 ID 分页，不返回整行，避免大账号库下发全量 payload。
+
+        - scope=filtered（默认）：按当前筛选条件返回，等价于列表页「选择全部筛选结果」。
+        - scope=all：忽略全部筛选，包含已兑换与已归档账号，供「全选所有账号」。
+        """
+        scope = str(request.args.get("scope", default="filtered") or "filtered").strip().lower()
+        if scope not in {"filtered", "all"}:
+            return jsonify({"ok": False, "error": "scope 仅支持 filtered 或 all"}), 400
+        page = max(1, int(request.args.get("page", default=1, type=int) or 1))
+        page_size = int(request.args.get("page_size", default=5000, type=int) or 5000)
+        page_size = max(1, min(5000, page_size))
+        filters = _account_query_filters()
+        if scope == "all":
+            filters.update({
+                "archived": "all",
+                "plan_filter": "",
+                "codex_filter": "",
+                "totp_filter": "",
+                "group_filter": "",
+                "redemption_filter": "",
+                "at_filter": "",
+                "live_filter": "",
+                "q": "",
+                "date_from": None,
+                "date_to": None,
+            })
+        result = db.list_account_ids_page(
+            limit=page_size, offset=(page - 1) * page_size, **filters
+        )
+        return jsonify({**result, "ok": True, "page": page, "page_size": page_size, "scope": scope})
+
     @app.get("/api/accounts")
     def api_accounts():
         limit = request.args.get("limit", default=500, type=int)
-        archived = str(request.args.get("archived", default="0") or "0").lower()
-        plan_filter = str(request.args.get("plan", default="") or "").lower()
-        codex_filter = str(request.args.get("codex_status", default="") or "").strip().lower()
-        totp_filter = str(
-            request.args.get("totp_status")
-            or request.args.get("totp_filter")
-            or request.args.get("twofa_status")
-            or ""
-        ).strip().lower()
-        q = str(request.args.get("q", default="") or "").strip()
-        group_filter = str(request.args.get("group", default="") or "").strip()
-        redemption_filter = str(
-            request.args.get("redemption")
-            or request.args.get("redeem_status")
-            or request.args.get("redeemed")
-            or ""
-        ).strip().lower()
-        date_from = str(request.args.get("date_from", default="") or "").strip() or None
-        date_to = str(request.args.get("date_to", default="") or "").strip() or None
+        filters = _account_query_filters()
+        archived = filters["archived"]
+        plan_filter = filters["plan_filter"]
+        codex_filter = filters["codex_filter"]
+        totp_filter = filters["totp_filter"]
+        q = filters["q"]
+        group_filter = filters["group_filter"]
+        redemption_filter = filters["redemption_filter"]
+        at_filter = filters["at_filter"]
+        live_filter = filters["live_filter"]
+        date_from = filters["date_from"]
+        date_to = filters["date_to"]
         # 新分页接口：传 page/page_size 或 paged=1 时返回 {items,total,page,page_size,...}
         paged = str(request.args.get("paged", default="") or "").lower() in {"1", "true", "yes"}
         page_arg = request.args.get("page", default=None, type=int)
@@ -648,11 +783,11 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter, at_filter=at_filter, live_filter=live_filter)
             result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
-        rows = db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
+        rows = db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter, at_filter=at_filter, live_filter=live_filter)
         return jsonify([_compact_account_for_list(row) for row in rows])
 
     @app.post("/api/accounts/lookup")
@@ -693,6 +828,8 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         redemption_filter = str(
             data.get("redemption") or data.get("redeem_status") or ""
         ).strip().lower()
+        at_filter = str(data.get("at_status") or data.get("at") or "").strip().lower()
+        live_filter = str(data.get("live_status") or data.get("live") or "").strip().lower()
         date_from = str(data.get("date_from") or "").strip() or None
         date_to = str(data.get("date_to") or "").strip() or None
         rows = db.find_accounts_by_emails(
@@ -705,6 +842,8 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             totp_filter=totp_filter,
             group_filter=group_filter,
             redemption_filter=redemption_filter,
+            at_filter=at_filter,
+            live_filter=live_filter,
         )
 
         by_email = {}
@@ -765,16 +904,28 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         ).strip().lower()
         date_from = str(request.args.get("date_from", default="") or "").strip() or None
         date_to = str(request.args.get("date_to", default="") or "").strip() or None
+        at_filter = str(
+            request.args.get("at_status")
+            or request.args.get("at")
+            or request.args.get("token_status")
+            or ""
+        ).strip().lower()
+        live_filter = str(
+            request.args.get("live_status")
+            or request.args.get("live")
+            or request.args.get("live_check_status")
+            or ""
+        ).strip().lower()
         page_arg = request.args.get("page", default=None, type=int)
         page_size_arg = request.args.get("page_size", default=None, type=int)
         if page_arg is not None or page_size_arg is not None:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter, at_filter=at_filter, live_filter=live_filter)
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, group_filter=group_filter, redemption_filter=redemption_filter, at_filter=at_filter, live_filter=live_filter)
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 
@@ -1367,6 +1518,105 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         failed = []
         for acc in items:
             queued = plan_check_service.enqueue_account_plan_check(
+                account_id=int(acc.get("id")),
+                email=acc.get("email") or "",
+                access_token=acc.get("access_token") or "",
+                trigger="manual_bulk",
+                proxy=proxy,
+                timezone_offset_min=timezone_offset_min,
+            )
+            item = {"id": acc.get("id"), "email": acc.get("email"), **queued}
+            if queued.get("accepted"):
+                started.append(item)
+            elif queued.get("busy"):
+                busy.append(item)
+            else:
+                failed.append(item)
+        return jsonify({
+            "ok": True,
+            "started": started,
+            "started_count": len(started),
+            "busy": busy,
+            "busy_count": len(busy),
+            "failed": failed,
+            "failed_count": len(failed),
+            "skipped": skipped,
+            "skipped_count": len(skipped),
+        }), 202
+
+    @app.post("/api/accounts/check-quota")
+    def api_account_check_quota():
+        """把单账号额度查询加入后台队列。Body {account_id|email, proxy?, timezone_offset_min?}"""
+        data = request.get_json(silent=True) or {}
+        acc_id = data.get("account_id") or data.get("id")
+        email = (data.get("email") or "").strip()
+        acc = None
+        if acc_id is not None:
+            try:
+                acc = db.get_account(int(acc_id))
+            except Exception:
+                acc = None
+        if acc is None and email:
+            acc = db.get_account_by_email(email)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        token = (acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号没有 access_token"}), 400
+        account_id = int(acc.get("id"))
+        queued = quota_check_service.enqueue_account_quota_check(
+            account_id=account_id,
+            email=acc.get("email") or "",
+            access_token=token,
+            trigger="manual",
+            proxy=data.get("proxy") if "proxy" in data else None,
+            timezone_offset_min=str(data.get("timezone_offset_min") or "-"),
+        )
+        if queued.get("busy"):
+            return jsonify({"ok": False, **queued}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **queued}), 503
+        return jsonify({"ok": True, "started": True, **queued}), 202
+
+    @app.post("/api/accounts/check-quota-bulk")
+    def api_accounts_check_quota_bulk():
+        """批量把额度查询加入后台队列。Body {account_ids:[...], proxy?, timezone_offset_min?}"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 500:
+            return jsonify({"ok": False, "error": "单次最多查询 500 个账号"}), 400
+        # 与查套餐保持一致：未传时复用查套餐网络策略。
+        proxy = data.get("proxy") if "proxy" in data else None
+        timezone_offset_min = str(data.get("timezone_offset_min") or "-")
+
+        items = []
+        skipped = []
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except Exception:
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            acc = db.get_account(acc_id)
+            if not acc:
+                skipped.append({"id": acc_id, "reason": "账号不存在"})
+                continue
+            if not (acc.get("access_token") or "").strip():
+                skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "缺少 access_token"})
+                continue
+            items.append(acc)
+
+        started = []
+        busy = []
+        failed = []
+        for acc in items:
+            queued = quota_check_service.enqueue_account_quota_check(
                 account_id=int(acc.get("id")),
                 email=acc.get("email") or "",
                 access_token=acc.get("access_token") or "",

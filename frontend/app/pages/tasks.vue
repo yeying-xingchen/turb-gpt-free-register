@@ -122,6 +122,7 @@ const labels: Record<string, string> = {
   plus_activation: "开通 Plus",
   live_check: "账号查活",
   plan_check: "套餐查询",
+  quota_check: "额度/用量查询",
   extract_link: "提取链接",
   scan_payment: "扫码支付",
   totp_setup: "开启 2FA",

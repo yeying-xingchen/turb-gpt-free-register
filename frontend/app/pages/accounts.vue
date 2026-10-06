@@ -3,16 +3,21 @@ import ImportModal from "~/components/accounts/ImportModal.vue";
 import OperationsModal from "~/components/accounts/OperationsModal.vue";
 import GroupsModal from "~/components/accounts/GroupsModal.vue";
 import PlanInfo from "~/components/accounts/PlanInfo.vue";
+import QuotaInfo from "~/components/accounts/QuotaInfo.vue";
+import QuotaUsage from "~/components/accounts/QuotaUsage.vue";
 import PromoDetailsModal from "~/components/accounts/PromoDetailsModal.vue";
 import {
   accountActionLabels,
+  accountBatchLimit,
   accountDate,
   accountError,
   accountPlanInfo,
   accountResult,
   accountResultDetails,
   accountStatus,
+  chunkAccountIds,
   copyAccountText,
+  mergeAccountResults,
   type Account,
   type AccountGroup,
 } from "~/utils/accounts";
@@ -27,13 +32,20 @@ const loading = ref(false);
 const error = ref("");
 const groupsError = ref("");
 const groups = ref<AccountGroup[]>([]);
-const selected = ref(new Map<number, Account>());
+// 选中状态以 ID 集合为准（可以容纳整个账号库），行缓存只保存确实加载过的账号。
+const selectedIds = ref(new Set<number>());
+const selectedRows = ref(new Map<number, Account>());
+const allAccountsTotal = ref(0);
+const selectBusy = ref("");
+const selectProgress = ref("");
 const filters = reactive({
   q: "",
   archived: "0",
   plan: "",
   codex_status: "",
   totp_status: "",
+  at_status: "",
+  live_status: "",
   redemption: "unredeemed",
   group: "",
   date_from: "",
@@ -59,11 +71,13 @@ const lookupBusy = ref(false);
 const lookupError = ref("");
 const lookupMissing = ref<string[]>([]);
 const lookupSummary = ref("");
-const selectBusy = ref(false);
 const deleting = ref(false);
 const copyBusy = ref("");
 const action = ref("");
-const operationSeed = ref<Account[]>([]);
+const operationSeed = ref<{ ids: number[]; rows: Account[]; count: number } | null>(
+  null,
+);
+const operationRevision = ref(0);
 const notice = ref("");
 const noticeDetails = ref<string[]>([]);
 const operationLogOpen = ref(false);
@@ -74,24 +88,28 @@ let loadRevision = 0;
 let selectionRevision = 0;
 let mounted = true;
 let initialized = false;
+const selectedCount = computed(() => selectedIds.value.size);
+const selectedIdList = computed(() => Array.from(selectedIds.value));
+const selectedRowList = computed(() =>
+  Array.from(selectedRows.value.values()),
+);
 const allPageSelected = computed(
   () =>
     rows.value.length > 0 &&
-    rows.value.every((row) => selected.value.has(row.id)),
+    rows.value.every((row) => selectedIds.value.has(row.id)),
 );
 const somePageSelected = computed(() =>
-  rows.value.some((row) => selected.value.has(row.id)),
+  rows.value.some((row) => selectedIds.value.has(row.id)),
 );
-const selectedRows = computed(() => Array.from(selected.value.values()));
 // 只要当前没有限定「未兑换」，就说明已兑换账号正在一起显示。
 const showRedeemed = computed(
   () => applied.value.redemption !== "unredeemed",
 );
 const operationRows = computed(() =>
-  operationSeed.value.map(
+  (operationSeed.value?.rows || []).map(
     (account) =>
       rows.value.find((row) => row.id === account.id) ||
-      selected.value.get(account.id) ||
+      selectedRows.value.get(account.id) ||
       account,
   ),
 );
@@ -108,7 +126,10 @@ const pageStats = computed(() => {
   };
 });
 const batchGroups = [
-  { name: "检查与安全", values: ["live", "plan", "totp", "email"] },
+  {
+    name: "检查与安全",
+    values: ["live", "plan", "quota", "totp", "email"],
+  },
   { name: "订阅与支付", values: ["activate", "extract", "pay", "pay-query"] },
   {
     name: "Codex 与导出",
@@ -122,6 +143,7 @@ const batchGroups = [
 const batchLabels: Record<string, string> = {
   live: "查活",
   plan: "查套餐",
+  quota: "查额度",
   totp: "开 2FA",
   email: "换邮箱",
   activate: "开通 Plus",
@@ -142,6 +164,8 @@ const batchLabels: Record<string, string> = {
 const batchTitles: Record<string, string> = {
   live: "重新登录选中账号，成功且未封号则标记正常，并刷新最新 AT",
   plan: "查询选中账号的当前套餐、试用资格与到期时间",
+  quota:
+    "查询选中账号的额度余额、Codex 5 小时/周用量和「银行重置」券张数与到期时间；只读接口，不消耗额度",
   totp: "为选中账号开启 2FA，完成后写回 TOTP 密钥；已启用或正在处理的会跳过",
   email: "为选中账号从指定来源领取新邮箱并换绑",
   activate: "配置提链服务商、CDK 与支付平台后提交，后台核验真实 Plus",
@@ -181,7 +205,7 @@ async function loadAccounts(quiet = false) {
     }
     rows.value = result.items || [];
     for (const row of rows.value)
-      if (selected.value.has(row.id)) selected.value.set(row.id, row);
+      if (selectedIds.value.has(row.id)) selectedRows.value.set(row.id, row);
     lastUpdated.value = new Date().toLocaleTimeString("zh-CN", {
       hour12: false,
     });
@@ -202,11 +226,22 @@ async function loadGroups() {
     if (mounted) groupsError.value = accountError(cause);
   }
 }
+async function loadAllAccountsTotal() {
+  try {
+    const result = await request("/api/accounts/ids", {
+      query: { scope: "all", page: 1, page_size: 1 },
+    });
+    if (mounted) allAccountsTotal.value = Number(result.total || 0);
+  } catch {
+    // 总数只用于按钮提示，失败不影响账号列表使用。
+  }
+}
 async function refresh() {
-  await Promise.all([loadAccounts(), loadGroups()]);
+  await Promise.all([loadAccounts(), loadGroups(), loadAllAccountsTotal()]);
 }
 function clearSelection() {
-  selected.value = new Map();
+  selectedIds.value = new Set();
+  selectedRows.value = new Map();
   selectionRevision++;
 }
 function applyFilters() {
@@ -232,6 +267,8 @@ function resetFilters() {
     plan: "",
     codex_status: "",
     totp_status: "",
+    at_status: "",
+    live_status: "",
     redemption: "unredeemed",
     group: "",
     date_from: "",
@@ -268,48 +305,75 @@ onBeforeUnmount(() => {
   loadRevision++;
   selectionRevision++;
 });
+function selectRow(row: Account) {
+  selectedIds.value.add(row.id);
+  selectedRows.value.set(row.id, row);
+}
+function deselectRow(id: number) {
+  selectedIds.value.delete(id);
+  selectedRows.value.delete(id);
+}
 function toggleRow(row: Account) {
   selectionRevision++;
-  if (selected.value.has(row.id)) selected.value.delete(row.id);
-  else if (selected.value.size < 5000) selected.value.set(row.id, row);
-  else toast.info("最多选择 5000 个账号");
+  if (selectedIds.value.has(row.id)) deselectRow(row.id);
+  else selectRow(row);
 }
 function togglePage() {
   selectionRevision++;
-  if (allPageSelected.value)
-    rows.value.forEach((row) => selected.value.delete(row.id));
-  else
-    for (const row of rows.value) {
-      if (selected.value.size < 5000) selected.value.set(row.id, row);
-    }
+  if (allPageSelected.value) rows.value.forEach((row) => deselectRow(row.id));
+  else rows.value.forEach(selectRow);
 }
-async function selectFiltered() {
+/**
+ * 全选：scope=filtered 按当前筛选收集 ID；scope=all 忽略筛选，包含已兑换与已归档。
+ * 只按页收集 ID（每页 5000），再取第一页做行缓存，因此不受账号总数限制。
+ */
+async function selectAllAccounts(scope: "filtered" | "all") {
   if (selectBusy.value) return;
-  if (total.value > 5000) {
-    toast.info("筛选结果超过 5000 个，请先缩小筛选范围");
-    return;
-  }
-  const revision = selectionRevision;
-  const filterSnapshot = { ...applied.value };
-  selectBusy.value = true;
+  const revision = ++selectionRevision;
+  const filterSnapshot = scope === "all" ? {} : { ...applied.value };
+  selectBusy.value = scope;
+  selectProgress.value = "正在统计…";
   try {
-    const resultRows = new Map<number, Account>();
-    const count = Math.max(1, Math.ceil(total.value / 500));
-    for (let index = 1; index <= count; index++) {
-      if (!mounted || revision !== selectionRevision) return;
-      const result = await request("/api/accounts", {
-        query: { ...filterSnapshot, paged: 1, page: index, page_size: 500 },
+    const ids = new Set<number>();
+    let expected = 0;
+    for (let index = 1; ; index += 1) {
+      const result = await request("/api/accounts/ids", {
+        query: {
+          ...filterSnapshot,
+          scope,
+          page: index,
+          page_size: 5000,
+        },
       });
-      for (const row of result.items || []) resultRows.set(row.id, row);
+      if (!mounted || revision !== selectionRevision) return;
+      expected = Number(result.total || 0);
+      const pageIds = result.ids || [];
+      for (const raw of pageIds) {
+        const id = Number(raw);
+        if (Number.isInteger(id) && id > 0) ids.add(id);
+      }
+      selectProgress.value = `已选 ${ids.size}/${expected}`;
+      if (!pageIds.length || ids.size >= expected) break;
     }
-    if (mounted && revision === selectionRevision) {
-      selected.value = resultRows;
-      toast.success(`已选择筛选结果中的 ${resultRows.size} 个账号`);
-    }
+    const preview = await request("/api/accounts", {
+      query: { ...filterSnapshot, paged: 1, page: 1, page_size: 50 },
+    });
+    if (!mounted || revision !== selectionRevision) return;
+    const cache = new Map<number, Account>();
+    for (const row of preview.items || [])
+      if (ids.has(row.id)) cache.set(row.id, row);
+    selectedIds.value = ids;
+    selectedRows.value = cache;
+    toast.success(
+      scope === "all"
+        ? `已选中账号库全部 ${ids.size} 个账号（含已兑换与已归档）`
+        : `已选中筛选结果中的 ${ids.size} 个账号`,
+    );
   } catch (cause) {
     toast.error(accountError(cause));
   } finally {
-    selectBusy.value = false;
+    selectBusy.value = "";
+    selectProgress.value = "";
   }
 }
 async function lookup() {
@@ -323,25 +387,29 @@ async function lookup() {
   ];
   lookupError.value = lookupSummary.value = "";
   lookupMissing.value = [];
-  if (!emails.length || emails.length > 5000) {
-    lookupError.value = "请输入 1–5000 个邮箱";
+  if (!emails.length) {
+    lookupError.value = "请输入至少 1 个邮箱";
     return;
   }
   lookupBusy.value = true;
   const revision = selectionRevision;
   try {
     const { q, ...lookupFilters } = applied.value;
-    const result = await request("/api/accounts/lookup", {
-      method: "POST",
-      body: { emails, ...lookupFilters },
-    });
-    if (!mounted || revision !== selectionRevision) return;
-    const matches = result.matches || [];
-    for (const row of matches) {
-      if (selected.value.size < 5000) selected.value.set(row.id, row);
+    const matches: Account[] = [];
+    const missing: string[] = [];
+    // 后端单次最多查 5000 个邮箱，超过时自动分批。
+    for (let index = 0; index < emails.length; index += 5000) {
+      const result = await request("/api/accounts/lookup", {
+        method: "POST",
+        body: { emails: emails.slice(index, index + 5000), ...lookupFilters },
+      });
+      if (!mounted || revision !== selectionRevision) return;
+      matches.push(...((result.matches || []) as Account[]));
+      missing.push(...((result.not_found || []) as string[]));
     }
-    lookupMissing.value = result.not_found || [];
-    lookupSummary.value = `匹配 ${matches.length} 个，未匹配 ${lookupMissing.value.length} 个；当前共选中 ${selected.value.size} 个。`;
+    for (const row of matches) selectRow(row);
+    lookupMissing.value = missing;
+    lookupSummary.value = `匹配 ${matches.length} 个，未匹配 ${missing.length} 个；当前共选中 ${selectedCount.value} 个。`;
     toast.info(lookupSummary.value);
   } catch (cause) {
     lookupError.value = accountError(cause);
@@ -349,12 +417,18 @@ async function lookup() {
     lookupBusy.value = false;
   }
 }
-function openOperation(value: string, accounts = selectedRows.value) {
-  if (!accounts.length) {
+function openOperation(value: string, picked?: Account[]) {
+  const ids = picked ? picked.map((account) => account.id) : selectedIdList.value;
+  if (!ids.length) {
     toast.info("请先选择账号");
     return;
   }
-  operationSeed.value = [...accounts];
+  operationSeed.value = {
+    ids,
+    rows: picked ? [...picked] : selectedRowList.value,
+    count: ids.length,
+  };
+  operationRevision.value += 1;
   action.value = value;
 }
 function openPromos(account: Account) {
@@ -368,11 +442,11 @@ function redeemTitle(row: Account) {
     : "已被兑换码领取";
 }
 function runBatch(value: string) {
-  if (!selected.value.size) {
+  if (!selectedCount.value) {
     toast.info("请先选择账号");
     return;
   }
-  if (value === "delete") void deleteAccounts(selectedRows.value);
+  if (value === "delete") void deleteAccounts();
   else openOperation(value);
 }
 async function copySecret(account: Account, field: string) {
@@ -396,32 +470,43 @@ async function copySecret(account: Account, field: string) {
     copyBusy.value = "";
   }
 }
-async function deleteAccounts(accounts: Account[]) {
-  if (!accounts.length || deleting.value) return;
+/** 删除选中账号：超过后端单次上限时按 5000 个一批自动分批提交。 */
+async function deleteAccounts(picked?: { ids: number[]; rows: Account[] }) {
+  const target = picked ? picked.ids : selectedIdList.value;
+  const knownRows = picked ? picked.rows : selectedRowList.value;
+  if (!target.length || deleting.value) return;
+  const preview = knownRows
+    .slice(0, 3)
+    .map((account) => account.email)
+    .join(
+      "\n",
+    );
   if (
     !confirm(
-      `确定永久删除 ${accounts.length} 个账号的本地记录？\n\n${accounts
-        .slice(0, 3)
-        .map((account) => account.email)
-        .join(
-          "\n",
-        )}${accounts.length > 3 ? "\n…" : ""}\n\n本地保存的凭据将被删除，无法撤销；邮箱池状态不会改变。`,
+      `确定永久删除 ${target.length} 个账号的本地记录？\n\n${preview}${
+        target.length > 3 ? "\n…" : ""
+      }\n\n本地保存的凭据将被删除，无法撤销；邮箱池状态不会改变。`,
     )
   )
     return;
   deleting.value = true;
-  const target = [...accounts];
   try {
-    const result = await request("/api/accounts/delete-bulk", {
-      method: "POST",
-      body: { account_ids: target.map((account) => account.id) },
-    });
+    const results: any[] = [];
+    for (const chunk of chunkAccountIds(target, accountBatchLimit("delete"))) {
+      results.push(
+        await request("/api/accounts/delete-bulk", {
+          method: "POST",
+          body: { account_ids: chunk },
+        }),
+      );
+    }
+    const result = mergeAccountResults(results);
     const deleted = new Set<number>(
       (result.deleted || []).map((item: any) =>
         Number(typeof item === "object" ? item.id : item),
       ),
     );
-    for (const id of deleted) selected.value.delete(id);
+    for (const id of deleted) deselectRow(id);
     notice.value = accountResult(result);
     noticeDetails.value = accountResultDetails(result);
     toast.success(notice.value);
@@ -495,8 +580,8 @@ async function afterOperation() {
       </div>
       <div class="stat-card">
         <span class="stat-label">已选账号</span
-        ><strong class="stat-value">{{ selected.size }}</strong
-        ><small class="muted">支持跨页批量操作</small>
+        ><strong class="stat-value">{{ selectedCount }}</strong
+        ><small class="muted">支持跨页与全选批量操作</small>
       </div>
       <div class="stat-card">
         <span class="stat-label">本页 Plus / 可试用 / 有优惠</span
@@ -582,6 +667,25 @@ async function afterOperation() {
               <option value="disabled">未启用</option>
               <option value="pending">正在设置</option>
               <option value="failed">设置失败</option>
+            </select></label
+          >
+          <label class="field"
+            >AT 状态<select v-model="filters.at_status" class="select">
+              <option value="">全部状态</option>
+              <option value="expired">已过期</option>
+              <option value="valid">未过期</option>
+              <option value="unknown">信息不足</option>
+            </select></label
+          >
+          <label class="field"
+            >查活状态<select v-model="filters.live_status" class="select">
+              <option value="">全部状态</option>
+              <option value="failed">查活失败</option>
+              <option value="success">查活正常</option>
+              <option value="deactivated">已停用</option>
+              <option value="checking">查活中</option>
+              <option value="cancelled">已取消</option>
+              <option value="never">未查活</option>
             </select></label
           >
           <label class="field"
@@ -672,19 +776,35 @@ async function afterOperation() {
               aria-label="选择本页全部账号"
               @change="togglePage"
             />本页全选</label
-          ><span class="selection-count">已选 {{ selected.size }}</span
+          ><span class="selection-count">已选 {{ selectedCount }}</span
           ><button
             class="btn btn-sm"
-            :disabled="!selected.size"
+            :disabled="!selectedCount"
             @click="clearSelection"
           >
             清空</button
           ><button
             class="btn btn-sm"
-            :disabled="selectBusy || !total || loading"
-            @click="selectFiltered"
+            :disabled="!!selectBusy || !total || loading"
+            title="按当前筛选条件选中全部结果，不受 5000 个上限限制"
+            @click="selectAllAccounts('filtered')"
           >
-            {{ selectBusy ? "选择中…" : "选择全部筛选结果" }}</button
+            {{
+              selectBusy === "filtered"
+                ? selectProgress || "选择中…"
+                : `选择全部筛选结果（${total.toLocaleString()}）`
+            }}</button
+          ><button
+            class="btn btn-sm"
+            :disabled="!!selectBusy || !allAccountsTotal || loading"
+            title="忽略当前筛选，选中账号库里的全部账号（含已兑换与已归档）"
+            @click="selectAllAccounts('all')"
+          >
+            {{
+              selectBusy === "all"
+                ? selectProgress || "选择中…"
+                : `全选所有账号（${allAccountsTotal.toLocaleString()}）`
+            }}</button
           ><button class="btn btn-sm" @click="lookupOpen = true">
             按邮箱选中
           </button>
@@ -717,7 +837,7 @@ async function afterOperation() {
               type="button"
               class="btn btn-sm"
               :class="{ 'btn-danger': value === 'delete' }"
-              :disabled="!selected.size || (value === 'delete' && deleting)"
+              :disabled="!selectedCount || (value === 'delete' && deleting)"
               :title="batchTitles[value] || accountActionLabels[value]"
               @click="runBatch(value)"
             >
@@ -773,6 +893,8 @@ async function afterOperation() {
               <th class="check-column"><span class="sr-only">选择</span></th>
               <th>账号</th>
               <th>套餐与订阅</th>
+              <th>额度 / 用量</th>
+              <th>银行重置</th>
               <th>2FA</th>
               <th>状态</th>
               <th>分组 / 备注</th>
@@ -783,12 +905,12 @@ async function afterOperation() {
             <tr
               v-for="row in rows"
               :key="row.id"
-              :class="{ 'is-selected': selected.has(row.id) }"
+              :class="{ 'is-selected': selectedIds.has(row.id) }"
             >
               <td class="check-column">
                 <input
                   type="checkbox"
-                  :checked="selected.has(row.id)"
+                  :checked="selectedIds.has(row.id)"
                   :aria-label="`选择 ${row.email}`"
                   @change="toggleRow(row)"
                 />
@@ -839,6 +961,12 @@ async function afterOperation() {
               <td class="plan-cell" data-label="套餐与订阅">
                 <PlanInfo :account="row" @promos="openPromos" />
               </td>
+              <td class="quota-cell" data-label="额度 / 用量">
+                <QuotaUsage :account="row" />
+              </td>
+              <td class="reset-cell" data-label="银行重置">
+                <QuotaInfo :account="row" field="reset" />
+              </td>
               <td class="security-cell" data-label="2FA">
                 <div class="security-status">
                   <span :class="row.totp_enabled ? 'security-on' : 'muted'">{{
@@ -871,6 +999,13 @@ async function afterOperation() {
                   <div>
                     <span class="status-label">查活</span
                     ><UiBadge :value="row.live_check_status || 'unknown'" />
+                  </div>
+                  <div
+                    v-if="row.at_expired"
+                    title="access_token 已过期或失效，需要重新查活刷新 AT"
+                  >
+                    <span class="status-label">AT</span
+                    ><UiBadge value="expired" />
                   </div>
                   <div>
                     <span class="status-label">Codex</span
@@ -918,6 +1053,11 @@ async function afterOperation() {
                     @click="openOperation('plan', [row])"
                   >
                     查套餐</button
+                  ><button
+                    class="btn btn-sm"
+                    @click="openOperation('quota', [row])"
+                  >
+                    查额度</button
                   ><button
                     class="btn btn-sm"
                     @click="openOperation('live', [row])"
@@ -979,9 +1119,11 @@ async function afterOperation() {
     />
     <OperationsModal
       v-if="action"
-      :key="action + ':' + operationSeed.map((row) => row.id).join(',')"
+      :key="`${action}:${operationRevision}`"
       :action="action"
       :accounts="operationRows"
+      :account-ids="operationSeed?.ids || []"
+      :account-count="operationSeed?.count || 0"
       :groups="groups"
       @close="action = ''"
       @changed="afterOperation"
@@ -1189,6 +1331,7 @@ async function afterOperation() {
   max-width: 270px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   margin-top: 4px;
 }
@@ -1205,6 +1348,15 @@ async function afterOperation() {
 .plan-cell {
   min-width: 240px;
   max-width: 360px;
+}
+/* 额度/用量列：余额一行 + 5h/周两条进度条；银行重置列只放张数与到期。 */
+.quota-cell {
+  min-width: 220px;
+  max-width: 300px;
+}
+.reset-cell {
+  min-width: 120px;
+  max-width: 200px;
 }
 .security-cell {
   min-width: 104px;

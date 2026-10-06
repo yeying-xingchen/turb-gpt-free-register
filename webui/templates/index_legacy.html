@@ -548,6 +548,9 @@
           <div class="search"><input id="qAccounts" placeholder="搜索邮箱、token、来源…"></div>
           <div class="account-filter-strip btn-group">
             <span class="muted selected-hint" id="accountsSelectedHint">已选 0</span>
+            <button type="button" class="btn" id="btnSelectFilteredAccounts" title="按当前筛选条件（归档/套餐/Codex/2FA/AT/查活/分组/兑换/关键词）收集全部账号 ID 并替换当前选择；选择数量不限，超过后端单次上限时会自动分批提交">选择全部筛选结果</button>
+            <button type="button" class="btn" id="btnSelectAllAccounts" title="忽略全部筛选条件，收集账号库里的全部账号 ID 并替换当前选择，包含已兑换与已归档账号；选择数量不限，超过后端单次上限时会自动分批提交">全选所有账号</button>
+            <span class="muted" id="accountsSelectAllHint" title="「选择全部筛选结果」只选中当前筛选条件命中的账号；「全选所有账号」忽略筛选条件，包含已兑换与已归档账号。两者都会替换当前选择，选择数量不受限制，超过后端单次上限时会自动分批提交。">筛选结果 = 当前筛选条件；所有账号 = 忽略筛选且包含已兑换与已归档</span>
             <label class="inline-num" title="批量补跑 Codex 的并发线程数">线程
               <input id="codexBulkWorkers" type="number" min="1" max="16" value="3">
             </label>
@@ -594,6 +597,27 @@
                 <option value="disabled">未开启</option>
                 <option value="pending">设置中</option>
                 <option value="failed">设置失败</option>
+              </select>
+            </label>
+            <label class="inline-num" title="按 access_token 是否过期筛选账号；过期账号需要重新查活刷新 AT">
+              AT
+              <select id="atStatusFilter" style="width:auto;min-height:auto;">
+                <option value="">全部</option>
+                <option value="expired">已过期</option>
+                <option value="valid">未过期</option>
+                <option value="unknown">信息不足</option>
+              </select>
+            </label>
+            <label class="inline-num" title="按最近一次查活结果筛选账号；「未查活」表示从未查活或状态被重置">
+              查活
+              <select id="liveStatusFilter" style="width:auto;min-height:auto;">
+                <option value="">全部</option>
+                <option value="failed">失败</option>
+                <option value="success">正常</option>
+                <option value="deactivated">已废号</option>
+                <option value="checking">进行中</option>
+                <option value="cancelled">已取消</option>
+                <option value="never">未查活</option>
               </select>
             </label>
             <label class="inline-num" title="只显示指定分组的账号">
@@ -851,6 +875,112 @@ let SHOW_FREE_ACCOUNTS_ONLY = false;
 // 默认隐藏已被 CDK 领取的账号，勾选「显示已兑换」后才一起查询/展示。
 let SHOW_REDEEMED_ACCOUNTS = false;
 const ACCOUNT_SELECTED = new Set();
+// 行缓存只是当前页已知的行，可能不完整（例如「全选」后只有当前页的行）；
+// 批量操作始终使用 ACCOUNT_SELECTED 里的完整 ID 列表，不依赖这里。
+const ACCOUNT_SELECTED_ROWS = new Map();
+// 选择版本号：全选等异步流程开始时记录，用户中途改选/清空/改筛选后丢弃过期结果。
+let accountSelectionRevision = 0;
+function clearAccountSelection() {
+  accountSelectionRevision++;
+  ACCOUNT_SELECTED.clear();
+  ACCOUNT_SELECTED_ROWS.clear();
+  document.querySelectorAll('#accountsBody .account-row-check').forEach(cb => { cb.checked = false; });
+  updateAccountSelectionUi();
+}
+// ---------- 批量提交分片工具 ----------
+// 后端每个批量接口都有单次上限，选择可以任意大，超限时必须分片提交，避免整批 400。
+const ACCOUNT_BATCH_LIMITS = Object.freeze({
+  live: 500, plan: 500, totp: 500, email: 500, agent: 500, upload: 500, retry: 500, stop: 500,
+  extract: 500, activate: 500, pay: 500, 'pay-query': 500,
+  note: 5000, group: 5000, archive: 5000, restore: 5000, secret: 5000, delete: 5000,
+  download: 1000,
+});
+function accountBatchLimit(key, fallback = 500) {
+  const value = Number(ACCOUNT_BATCH_LIMITS[key]);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+}
+// 把账号 ID 切成不超过后端单次上限的批次；size 非法（缺省/0/负数）时退回默认上限。
+function chunkAccountIds(ids, size = 500) {
+  const list = Array.from(ids || []);
+  const parsed = Math.floor(Number(size));
+  const step = Number.isFinite(parsed) && parsed > 0 ? parsed : 500;
+  const chunks = [];
+  for (let i = 0; i < list.length; i += step) chunks.push(list.slice(i, i + step));
+  return chunks;
+}
+// 合并分批响应：数组字段按批次顺序拼接，数值 *_count 先求和，
+// 再按同一个 *_count 对应的合并数组长度校准；ok/error/message 等标量保留最后一批的值。
+function mergeBatchResults(results) {
+  const list = (Array.isArray(results) ? results : [results])
+    .filter(item => item && typeof item === 'object' && !Array.isArray(item));
+  if (!list.length) return {};
+  if (list.length === 1) return {...list[0]};
+  const merged = {};
+  for (const result of list) {
+    for (const [key, value] of Object.entries(result)) {
+      if (Array.isArray(value)) merged[key] = (merged[key] || []).concat(value);
+      else if (typeof value === 'number' && key.endsWith('_count')) merged[key] = (merged[key] || 0) + value;
+      else merged[key] = value;
+    }
+  }
+  for (const key of Object.keys(merged)) {
+    if (!key.endsWith('_count')) continue;
+    const arrayValue = merged[key.slice(0, -'_count'.length)];
+    if (Array.isArray(arrayValue)) merged[key] = arrayValue.length;
+  }
+  return merged;
+}
+// 顺序分片提交同一个批量接口：成功批次边发边合并，硬失败（HTTP 非 2xx / 传输错误）立即抛出，
+// 错误里带上已成功的批次结果；onProgress 每个批次最多回调一次。
+async function postAccountBatches(path, body, ids, limit, onProgress) {
+  const list = Array.from(ids || []);
+  const chunks = chunkAccountIds(list, limit == null ? 500 : limit);
+  const results = [];
+  let sent = 0;
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index];
+    let result;
+    try {
+      result = await api(path, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({...body, account_ids: chunk}),
+      });
+    } catch (err) {
+      const error = new Error(`第 ${index + 1}/${chunks.length} 批失败（已提交 ${sent}/${list.length} 个）：${err.message}`);
+      error.results = results;
+      error.completed = index;
+      error.total = chunks.length;
+      error.cause = err;
+      throw error;
+    }
+    results.push(result);
+    sent += chunk.length;
+    if (onProgress) onProgress({done: index + 1, total: chunks.length, sent, totalIds: list.length, result});
+  }
+  return mergeBatchResults(results);
+}
+// 分批提交时在按钮上显示进度（只有多批才覆盖按钮文案）。
+function accountBatchProgress(btn, prefix) {
+  return progress => {
+    if (!btn || progress.total <= 1) return;
+    btn.textContent = `${prefix} ${progress.sent}/${progress.totalIds}`;
+  };
+}
+// ACCOUNT_SELECTED_ROWS 只是行缓存，可能不完整（例如「全选」后只有当前页的行）。
+// 行数据不完整时不能用本地行预筛选，必须把完整 ID 列表交给服务端逐账号跳过。
+function accountRowsCoverSelection(ids) {
+  const list = (ids || Array.from(ACCOUNT_SELECTED)).map(Number);
+  const known = new Set(ACCOUNTS.map(row => Number(row.id)));
+  ACCOUNT_SELECTED_ROWS.forEach((_row, id) => known.add(Number(id)));
+  return list.every(id => known.has(id));
+}
+function getSelectedAccountRows() {
+  const current = new Map(ACCOUNTS.map(row => [Number(row.id), row]));
+  return Array.from(ACCOUNT_SELECTED)
+    .map(id => current.get(Number(id)) || ACCOUNT_SELECTED_ROWS.get(Number(id)))
+    .filter(Boolean);
+}
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
 let JOBS_TOTAL = 0;
@@ -1443,6 +1573,14 @@ function getAccountsGroupFilter() {
   const el = $('#groupFilter');
   return (el ? el.value : '').trim();
 }
+function getAccountsAtStatusFilter() {
+  const el = $('#atStatusFilter');
+  return (el ? el.value : '').trim();
+}
+function getAccountsLiveStatusFilter() {
+  const el = $('#liveStatusFilter');
+  return (el ? el.value : '').trim();
+}
 function getAccountsRedemptionFilter() {
   // 返回 '' 表示不限制兑换状态；默认只查询未兑换账号。
   return SHOW_REDEEMED_ACCOUNTS ? '' : 'unredeemed';
@@ -1465,11 +1603,13 @@ async function loadAccounts() {
     const plan = getAccountsPlanFilter();
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
+    const atStatus = getAccountsAtStatusFilter();
+    const liveStatus = getAccountsLiveStatusFilter();
     const group = getAccountsGroupFilter();
     const redemption = getAccountsRedemptionFilter();
     const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}`);
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&at_status=${encodeURIComponent(atStatus)}&live_status=${encodeURIComponent(liveStatus)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -1486,11 +1626,13 @@ async function pollAccountPlanStatuses() {
     const plan = getAccountsPlanFilter();
     const codex = getAccountsCodexFilter();
     const totp = getAccountsTotpFilter();
+    const atStatus = getAccountsAtStatusFilter();
+    const liveStatus = getAccountsLiveStatusFilter();
     const group = getAccountsGroupFilter();
     const redemption = getAccountsRedemptionFilter();
     const q = $('#qAccounts') ? $('#qAccounts').value.trim() : '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&at_status=${encodeURIComponent(atStatus)}&live_status=${encodeURIComponent(liveStatus)}&group=${encodeURIComponent(group)}&redemption=${encodeURIComponent(redemption)}&q=${encodeURIComponent(q)}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -1772,12 +1914,15 @@ function _liveStatusSub(r) {
   const err = r.live_check_error || '';
   const at = r.live_checked_at || '';
   const fp = r.live_check_fingerprint_text || '';
-  if (s === 'live') return `<div class="sub-cell" title="${esc([at, fp].filter(Boolean).join('\n'))}">查活: 正常${fp ? ` · ${esc(fp)}` : ''}</div>`;
-  if (s === 'queued') return `<div class="sub-cell" style="color:#e6a23c">查活: 排队</div>`;
-  if (s === 'running') return `<div class="sub-cell" style="color:#e6a23c">查活: 运行中</div>`;
-  if (s === 'deactivated') return `<div class="sub-cell" style="color:#f56c6c" title="${esc(err || at)}">查活: 已废</div>`;
-  if (s === 'failed') return `<div class="sub-cell" style="color:#e6a23c" title="${esc(err || at)}">查活: 失败</div>`;
-  return '';
+  const atExpired = r.at_expired
+    ? '<div class="sub-cell" style="color:#f56c6c" title="access_token 已过期或失效，需要重新查活刷新 AT">AT: 已过期</div>'
+    : '';
+  if (s === 'live') return `<div class="sub-cell" title="${esc([at, fp].filter(Boolean).join('\n'))}">查活: 正常${fp ? ` · ${esc(fp)}` : ''}</div>${atExpired}`;
+  if (s === 'queued') return `<div class="sub-cell" style="color:#e6a23c">查活: 排队</div>${atExpired}`;
+  if (s === 'running') return `<div class="sub-cell" style="color:#e6a23c">查活: 运行中</div>${atExpired}`;
+  if (s === 'deactivated') return `<div class="sub-cell" style="color:#f56c6c" title="${esc(err || at)}">查活: 已废</div>${atExpired}`;
+  if (s === 'failed') return `<div class="sub-cell" style="color:#e6a23c" title="${esc(err || at)}">查活: 失败</div>${atExpired}`;
+  return atExpired;
 }
 function _passwordCell(r) {
   if (!r.has_password) return '<span class="muted">-</span>';
@@ -1865,6 +2010,97 @@ function updateAccountSelectionUi(pageRows = null) {
   cbAll.checked = pageIds.length > 0 && checkedCount === pageIds.length;
   cbAll.indeterminate = checkedCount > 0 && checkedCount < pageIds.length;
   cbAll.disabled = pageIds.length === 0;
+}
+
+// ---------- 全选（当前筛选结果 / 所有账号） ----------
+// 后端 /api/accounts/ids 单页最多返回 5000 个 ID，按 total 逐页收集，选择数量本身不受限制。
+const ACCOUNT_SELECT_ALL_PAGE_SIZE = 5000;
+// 约 2000 万 ID 的安全上限，避免服务端 total 异常时死循环。
+const ACCOUNT_SELECT_ALL_MAX_PAGES = 4000;
+let accountSelectAllBusy = false;
+
+function getAccountSelectAllFilters() {
+  // 与账号列表请求保持同一份筛选快照（归档/套餐/Codex/2FA/AT/查活/分组/兑换），再补上列表关键词。
+  return {
+    archived: SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0',
+    plan: getAccountsPlanFilter(),
+    codex_status: getAccountsCodexFilter(),
+    totp_status: getAccountsTotpFilter(),
+    at_status: getAccountsAtStatusFilter(),
+    live_status: getAccountsLiveStatusFilter(),
+    group: getAccountsGroupFilter(),
+    redemption: getAccountsRedemptionFilter(),
+    q: $('#qAccounts') ? $('#qAccounts').value.trim() : '',
+  };
+}
+function setAccountSelectAllBusy(busy) {
+  accountSelectAllBusy = !!busy;
+  ['btnSelectFilteredAccounts', 'btnSelectAllAccounts'].forEach(id => {
+    const btn = $(`#${id}`);
+    if (btn) btn.disabled = !!busy;
+  });
+}
+async function collectAccountIdsByScope(scope, onProgress) {
+  // scope=filtered 用当前筛选；scope=all 不传任何筛选（含已兑换与已归档）。
+  const filters = scope === 'all' ? {} : getAccountSelectAllFilters();
+  const ids = [];
+  const seen = new Set();
+  let total = 0;
+  for (let page = 1; page <= ACCOUNT_SELECT_ALL_MAX_PAGES; page++) {
+    const params = [`scope=${encodeURIComponent(scope)}`, `page=${page}`, `page_size=${ACCOUNT_SELECT_ALL_PAGE_SIZE}`];
+    Object.entries(filters).forEach(([key, value]) => {
+      params.push(`${encodeURIComponent(key)}=${encodeURIComponent(value == null ? '' : String(value))}`);
+    });
+    const result = await api(`/api/accounts/ids?${params.join('&')}`);
+    total = Number(result.total || 0);
+    const pageIds = (result.ids || []).map(Number).filter(id => Number.isFinite(id) && id > 0);
+    pageIds.forEach(id => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      ids.push(id);
+    });
+    if (onProgress) onProgress(ids.length, total);
+    if (!pageIds.length || ids.length >= total || pageIds.length < ACCOUNT_SELECT_ALL_PAGE_SIZE) break;
+  }
+  return {ids, total};
+}
+async function selectAllAccounts(scope) {
+  const normalized = scope === 'all' ? 'all' : 'filtered';
+  if (accountSelectAllBusy) return;
+  const btn = $(normalized === 'all' ? '#btnSelectAllAccounts' : '#btnSelectFilteredAccounts');
+  const label = normalized === 'all' ? '全选所有账号' : '选择全部筛选结果';
+  // 用户中途改选/清空（都会 bump revision）时放弃本次结果。
+  const revision = accountSelectionRevision;
+  setAccountSelectAllBusy(true);
+  if (btn) btn.textContent = '选择中… 0/?';
+  try {
+    const {ids} = await collectAccountIdsByScope(normalized, (done, expected) => {
+      if (btn) btn.textContent = `选择中… ${done}/${expected > 0 ? expected : '?'}`;
+    });
+    if (revision !== accountSelectionRevision) return;
+    if (!ids.length) {
+      showToast(normalized === 'all' ? '账号库中还没有账号' : '当前筛选条件下没有账号');
+      return;
+    }
+    clearAccountSelection();
+    ids.forEach(id => ACCOUNT_SELECTED.add(id));
+    // 行缓存只保留当前页已知的行；批量操作始终使用 ACCOUNT_SELECTED 里的完整 ID 列表。
+    ACCOUNTS.forEach(row => {
+      const id = Number(row.id);
+      if (ACCOUNT_SELECTED.has(id)) ACCOUNT_SELECTED_ROWS.set(id, row);
+    });
+    accountSelectionRevision++;
+    renderAccounts();
+    updateAccountSelectionUi();
+    showToast(normalized === 'all'
+      ? `已选中账号库全部 ${ids.length} 个账号（含已兑换与已归档）`
+      : `已选中筛选结果中的 ${ids.length} 个账号`);
+  } catch (err) {
+    showToast('选择账号失败: ' + err.message);
+  } finally {
+    if (btn) btn.textContent = label;
+    setAccountSelectAllBusy(false);
+  }
 }
 
 // ---------- 补跑日志面板 ----------
@@ -2218,16 +2454,37 @@ $('#accountsBody').addEventListener('change', (e) => {
   const cb = e.target.closest('.account-row-check');
   if (!cb) return;
   const id = Number(cb.dataset.accountId);
-  if (cb.checked) ACCOUNT_SELECTED.add(id);
-  else ACCOUNT_SELECTED.delete(id);
+  if (cb.checked) {
+    ACCOUNT_SELECTED.add(id);
+    const row = ACCOUNTS.find(item => Number(item.id) === id);
+    if (row) ACCOUNT_SELECTED_ROWS.set(id, row);
+  } else {
+    ACCOUNT_SELECTED.delete(id);
+    ACCOUNT_SELECTED_ROWS.delete(id);
+  }
+  accountSelectionRevision++;
   updateAccountSelectionUi();
 });
 $('#accountsSelectAll').addEventListener('change', (e) => {
   const pageRows = ACCOUNTS;
-  if (e.target.checked) pageRows.forEach(r => ACCOUNT_SELECTED.add(Number(r.id)));
-  else pageRows.forEach(r => ACCOUNT_SELECTED.delete(Number(r.id)));
+  if (e.target.checked) {
+    pageRows.forEach(r => {
+      const id = Number(r.id);
+      ACCOUNT_SELECTED.add(id);
+      ACCOUNT_SELECTED_ROWS.set(id, r);
+    });
+  } else {
+    pageRows.forEach(r => {
+      const id = Number(r.id);
+      ACCOUNT_SELECTED.delete(id);
+      ACCOUNT_SELECTED_ROWS.delete(id);
+    });
+  }
+  accountSelectionRevision++;
   renderAccounts();
 });
+$('#btnSelectFilteredAccounts').addEventListener('click', () => selectAllAccounts('filtered'));
+$('#btnSelectAllAccounts').addEventListener('click', () => selectAllAccounts('all'));
 $('#btnDeleteSelectedAccounts').addEventListener('click', deleteSelectedAccounts);
 $('#btnArchiveSelectedAccounts').addEventListener('click', archiveSelectedAccounts);
 $('#btnCopySelectedLines').addEventListener('click', copySelectedAccountLines);
@@ -2252,14 +2509,14 @@ $('#btnStopSelectedCodex').addEventListener('click', stopSelectedCodex);
 $('#btnCheckSelectedPlans').addEventListener('click', checkSelectedPlans);
 $('#showArchivedAccounts').addEventListener('change', async (e) => {
   SHOW_ARCHIVED_ACCOUNTS = !!e.target.checked;
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
 });
 $('#showRedeemedAccounts').addEventListener('change', async (e) => {
   SHOW_REDEEMED_ACCOUNTS = !!e.target.checked;
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2272,7 +2529,7 @@ $('#showPlusAccountsOnly').addEventListener('change', async (e) => {
     $('#showPlusTrialAccountsOnly').checked = false;
     $('#showFreeAccountsOnly').checked = false;
   }
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2285,7 +2542,7 @@ $('#showPlusTrialAccountsOnly').addEventListener('change', async (e) => {
     $('#showPlusAccountsOnly').checked = false;
     $('#showFreeAccountsOnly').checked = false;
   }
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2297,7 +2554,7 @@ $('#promoTypeFilter').addEventListener('change', async () => {
   $('#showPlusTrialAccountsOnly').checked = true;
   $('#showPlusAccountsOnly').checked = false;
   $('#showFreeAccountsOnly').checked = false;
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2309,7 +2566,7 @@ $('#promoDiscountFilter').addEventListener('change', async () => {
   $('#showPlusTrialAccountsOnly').checked = true;
   $('#showPlusAccountsOnly').checked = false;
   $('#showFreeAccountsOnly').checked = false;
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2322,7 +2579,7 @@ $('#showFreeAccountsOnly').addEventListener('change', async (e) => {
     $('#showPlusAccountsOnly').checked = false;
     $('#showPlusTrialAccountsOnly').checked = false;
   }
-  ACCOUNT_SELECTED.clear();
+  clearAccountSelection();
   PAGERS.accounts.page = 1;
   await loadAccounts();
   await pollAccountPlanStatuses();
@@ -2348,11 +2605,7 @@ $('#btnRefreshAccounts').addEventListener('click', async () => {
 
 
 async function fetchAccountSecrets(ids, field) {
-  const r = await api('/api/accounts/secret-bulk', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({account_ids: ids, field}),
-  });
+  const r = await postAccountBatches('/api/accounts/secret-bulk', {field}, ids, accountBatchLimit('secret'));
   return (r.values || []).map(x => x.value).filter(Boolean);
 }
 
@@ -2433,15 +2686,19 @@ async function changeAccountEmails(ids) {
   if (!ids.length) { showToast('请先选择账号'); return; }
   const source = prompt('请输入新邮箱来源：\noutlook / generic_api / imap / cloudflare_domain / cloudflare / gptmail / mailnest / cloudmail / remail', 'outlook');
   if (!source) return;
+  const btn = $('#btnChangeSelectedEmails');
+  const old = btn ? btn.textContent : '';
   try {
-    const url = ids.length === 1 ? `/api/accounts/${ids[0]}/change-email` : '/api/accounts/change-email-bulk';
-    const body = ids.length === 1 ? {source:source.trim()} : {source:source.trim(), account_ids:ids};
-    const r = await api(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-    ACCOUNT_SELECTED.clear();
+    // 单个账号走单账号接口；批量换绑按后端单次上限分片提交。
+    const r = ids.length === 1
+      ? await api(`/api/accounts/${ids[0]}/change-email`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:source.trim()})})
+      : await postAccountBatches('/api/accounts/change-email-bulk', {source: source.trim()}, ids, accountBatchLimit('email'), accountBatchProgress(btn, '提交中…'));
+    clearAccountSelection();
     showToast(ids.length === 1 ? '邮箱换绑任务已开始' : `已开始 ${r.started_count || 0} 个，跳过 ${(r.skipped || []).length} 个`);
     loadAccounts();
     const poll = setInterval(loadAccounts, 5000); setTimeout(() => clearInterval(poll), 10 * 60 * 1000);
   } catch(e) { showToast('邮箱换绑失败: ' + e.message); }
+  finally { if (btn) btn.textContent = old; }
 }
 
 async function setupSelectedTotp() {
@@ -2455,11 +2712,7 @@ async function setupSelectedTotp() {
   btn.disabled = true;
   btn.textContent = '入队中…';
   try {
-    const r = await api('/api/accounts/totp-setup-bulk', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids}),
-    });
+    const r = await postAccountBatches('/api/accounts/totp-setup-bulk', {}, ids, accountBatchLimit('totp'), accountBatchProgress(btn, '入队中…'));
     (r.started || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
     const skippedCount = Number(r.skipped_count ?? (r.skipped || []).length) || 0;
     const busyCount = Number(r.busy_count ?? (r.busy || []).length) || 0;
@@ -2527,10 +2780,16 @@ async function downloadSelectedAccountTxt() {
 async function downloadSelectedCpa() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  // ZIP 下载每次只返回一个文件，无法分片合并，超过上限时要求缩小选择范围。
+  if (ids.length > accountBatchLimit('download', 1000)) {
+    showToast('ZIP 下载单次最多 1000 个账号，请缩小选择范围');
+    return;
+  }
+  const selectedAccounts = getSelectedAccountRows();
+  const rowsComplete = accountRowsCoverSelection(ids);
   const missingCodex = selectedAccounts.filter(a => (a.codex_status || '') !== 'success').length;
   let msg = `确定从 CPA 下载选中的 ${ids.length} 个账号的 CPA/Codex JSON 吗？\n\n会按账号邮箱匹配 CPA auth-files，成功的文件会打包成 ZIP。`;
-  if (missingCodex) msg += `\n\n其中 ${missingCodex} 个账号本地 Codex 状态不是 success，若 CPA 端没有文件会写入 manifest 错误清单。`;
+  if (rowsComplete && missingCodex) msg += `\n\n其中 ${missingCodex} 个账号本地 Codex 状态不是 success，若 CPA 端没有文件会写入 manifest 错误清单。`;
   if (!confirm(msg)) return;
   const btn = $('#btnDownloadSelectedCpa');
   const old = btn.textContent;
@@ -2622,20 +2881,22 @@ async function extractSelectedLinks() {
   }
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  const selected = getSelectedAccountRows();
+  const rowsComplete = accountRowsCoverSelection(ids);
   const eligible = selected.filter(a => (a.current_plan_type || a.plan_type || '').toString().toLowerCase() === 'free' && !!a.plus_trial_eligible);
-  if (!eligible.length) { showToast('选中账号里没有 free(可Plus试用)'); return; }
-  if (!confirm(`确定批量提链 ${eligible.length} 个 free(可Plus试用) 账号吗？\n\n非可试用账号会自动跳过。成功会按账号消耗 CDK 次数。`)) return;
+  // 行缓存不完整时不预筛选，交给服务端逐账号跳过。
+  if (rowsComplete && !eligible.length) { showToast('选中账号里没有 free(可Plus试用)'); return; }
+  const count = rowsComplete ? eligible.length : ids.length;
+  const msg = rowsComplete
+    ? `确定批量提链 ${count} 个 free(可Plus试用) 账号吗？\n\n非可试用账号会自动跳过。成功会按账号消耗 CDK 次数。`
+    : `确定批量提链选中的 ${count} 个账号吗？\n\n服务端会跳过非 free(可Plus试用) 的账号；成功会按账号消耗 CDK 次数。`;
+  if (!confirm(msg)) return;
   const btn = $('#btnExtractSelectedLinks');
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '提链中…';
   try {
-    const r = await api('/api/accounts/extract-link-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids}),
-    });
+    const r = await postAccountBatches('/api/accounts/extract-link-bulk', {}, ids, accountBatchLimit('extract'), accountBatchProgress(btn, '提链中…'));
     const skipped = (r.skipped_count || 0) + (r.busy_count || 0) + (r.failed_count || 0);
     showToast(skipped ? `已入队 ${r.started_count || 0} 个，跳过/失败 ${skipped} 个` : `已入队 ${r.started_count || 0} 个`);
     await pollAccountPlanStatuses();
@@ -2673,20 +2934,22 @@ async function generateOneCodexAgent(id, btn) {
 async function generateSelectedCodexAgents() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  const selected = getSelectedAccountRows();
+  const rowsComplete = accountRowsCoverSelection(ids);
   const eligible = selected.filter(a => a.has_access_token);
-  if (!eligible.length) { showToast('选中账号里没有可用 access_token'); return; }
-  if (!confirm(`确定批量生成 ${eligible.length} 个 Codex Agent Token 吗？\n\n缺少 access_token 的账号会自动跳过。`)) return;
+  // 行缓存不完整时不预筛选，交给服务端逐账号跳过。
+  if (rowsComplete && !eligible.length) { showToast('选中账号里没有可用 access_token'); return; }
+  const count = rowsComplete ? eligible.length : ids.length;
+  const msg = rowsComplete
+    ? `确定批量生成 ${count} 个 Codex Agent Token 吗？\n\n缺少 access_token 的账号会自动跳过。`
+    : `确定批量生成选中的 ${count} 个账号的 Codex Agent Token 吗？\n\n服务端会跳过缺少 access_token 的账号。`;
+  if (!confirm(msg)) return;
   const btn = $('#btnGenerateSelectedAgent');
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '生成中…';
   try {
-    const r = await api('/api/accounts/codex-agent-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids}),
-    });
+    const r = await postAccountBatches('/api/accounts/codex-agent-bulk', {}, ids, accountBatchLimit('agent'), accountBatchProgress(btn, '生成中…'));
     const skipped = (r.skipped_count || 0) + (r.busy_count || 0) + (r.failed_count || 0);
     showToast(skipped ? `已入队 ${r.started_count || 0} 个，跳过/失败 ${skipped} 个` : `已入队 ${r.started_count || 0} 个`);
     await pollAccountPlanStatuses();
@@ -2720,20 +2983,22 @@ async function uploadOneCodexAgentSub2(id, btn) {
 async function uploadSelectedCodexAgentSub2() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  const selected = getSelectedAccountRows();
+  const rowsComplete = accountRowsCoverSelection(ids);
   const ready = selected.filter(a => (a.codex_agent_status || '') === 'success');
-  if (!ready.length) { showToast('选中账号里没有已生成的 Agent Token'); return; }
-  if (!confirm(`确定上传选中的 ${ready.length} 个 Agent Token 到 sub2api 吗？\n\n未生成成功的账号会自动跳过。`)) return;
+  // 行缓存不完整时不预筛选，交给服务端逐账号跳过。
+  if (rowsComplete && !ready.length) { showToast('选中账号里没有已生成的 Agent Token'); return; }
+  const count = rowsComplete ? ready.length : ids.length;
+  const msg = rowsComplete
+    ? `确定上传选中的 ${count} 个 Agent Token 到 sub2api 吗？\n\n未生成成功的账号会自动跳过。`
+    : `确定上传选中的 ${count} 个账号的 Agent Token 到 sub2api 吗？\n\n服务端会跳过未生成成功的账号。`;
+  if (!confirm(msg)) return;
   const btn = $('#btnUploadSelectedAgentSub2');
   const old = btn.textContent;
   btn.disabled = true;
   btn.textContent = '上传中…';
   try {
-    const r = await api('/api/accounts/codex-agent/upload-sub2-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids}),
-    });
+    const r = await postAccountBatches('/api/accounts/codex-agent/upload-sub2-bulk', {}, ids, accountBatchLimit('upload'), accountBatchProgress(btn, '上传中…'));
     const skipped = (r.skipped_count || 0) + (r.failed_count || 0);
     showToast(skipped ? `已上传 ${r.uploaded_count || 0} 个，跳过/失败 ${skipped} 个` : `已上传 ${r.uploaded_count || 0} 个`);
     await pollAccountPlanStatuses();
@@ -2774,10 +3039,17 @@ function downloadOneCodexAgent(id) {
 function downloadSelectedCodexAgents() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const selected = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  // ZIP 打包下载每次只返回一个文件，无法分片合并。
+  if (ids.length > accountBatchLimit('download', 1000)) {
+    showToast('ZIP 下载单次最多 1000 个账号，请缩小选择范围');
+    return;
+  }
+  const selected = getSelectedAccountRows();
+  const rowsComplete = accountRowsCoverSelection(ids);
   const ready = selected.filter(a => (a.codex_agent_status || '') === 'success');
-  if (!ready.length) { showToast('选中账号里没有已生成的 Agent Token'); return; }
-  if (!confirm(`确定下载选中的 ${ready.length} 个 Codex Agent Token 吗？\n\n未生成成功的账号会自动跳过，文件会打包 ZIP。`)) return;
+  if (rowsComplete && !ready.length) { showToast('选中账号里没有已生成的 Agent Token'); return; }
+  const count = rowsComplete ? ready.length : ids.length;
+  if (!confirm(`确定下载选中的 ${count} 个 Codex Agent Token 吗？\n\n未生成成功的账号会自动跳过，文件会打包 ZIP。`)) return;
   const btn = $('#btnDownloadSelectedAgent');
   const old = btn.textContent;
   btn.disabled = true;
@@ -2819,11 +3091,7 @@ async function checkSelectedPlans() {
   const old = btn.textContent;
   btn.textContent = '查询中…';
   try {
-    const r = await api('/api/accounts/check-plan-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, workers}),
-    });
+    const r = await postAccountBatches('/api/accounts/check-plan-bulk', {workers}, ids, accountBatchLimit('plan'), accountBatchProgress(btn, '查询中…'));
     const failed = r.failed_count || 0;
     const busy = r.busy_count || 0;
     showToast(`已入队 ${r.started_count || 0} 个，查询中跳过 ${busy} 个，入队失败 ${failed} 个`);
@@ -2846,7 +3114,7 @@ async function checkSelectedLive(idsArg = null, btnArg = null) {
 
 并发线程数：${workers}`;
   if (!confirm(msg)) return;
-  const firstAcc = ACCOUNTS.find(a => Number(a.id) === Number(ids[0]));
+  const firstAcc = idsArg ? ACCOUNTS.find(a => Number(a.id) === Number(ids[0])) : getSelectedAccountRows()[0];
   const btn = btnArg || $('#btnCheckSelectedLive');
   const old = btn ? btn.textContent : '';
   if (btn) {
@@ -2854,11 +3122,7 @@ async function checkSelectedLive(idsArg = null, btnArg = null) {
     btn.textContent = '查活中…';
   }
   try {
-    const r = await api('/api/accounts/check-live-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, workers}),
-    });
+    const r = await postAccountBatches('/api/accounts/check-live-bulk', {workers}, ids, accountBatchLimit('live'), accountBatchProgress(btn, '查活中…'));
     const skipped = (r.skipped || []).length;
     showToast(`查活已入队 ${r.started_count || 0} 个，忙碌 ${r.busy_count || 0} 个，失败 ${r.failed_count || 0}${skipped ? `，跳过 ${skipped}` : ''}`);
     const firstStarted = (r.started || [])[0];
@@ -2926,11 +3190,7 @@ async function archiveSelectedAccounts() {
   btn.disabled = true;
   btn.textContent = `${action}中…`;
   try {
-    const r = await api('/api/accounts/archive-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, archived}),
-    });
+    const r = await postAccountBatches('/api/accounts/archive-bulk', {archived}, ids, accountBatchLimit(archived ? 'archive' : 'restore'), accountBatchProgress(btn, `${action}中…`));
     (r.updated || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
     const skippedCount = (r.skipped || []).length;
     showToast(skippedCount ? `已${action} ${r.updated_count || 0} 个，跳过 ${skippedCount} 个` : `已${action} ${r.updated_count || 0} 个`);
@@ -2947,13 +3207,11 @@ async function deleteSelectedAccounts() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
   if (!confirm(`确定删除选中的 ${ids.length} 个账号吗？\n\n会从本地账号列表、注册成功邮箱和 token 文件中移除。`)) return;
-  $('#btnDeleteSelectedAccounts').disabled = true;
+  const btn = $('#btnDeleteSelectedAccounts');
+  const old = btn ? btn.textContent : '';
+  if (btn) btn.disabled = true;
   try {
-    const r = await api('/api/accounts/delete-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids}),
-    });
+    const r = await postAccountBatches('/api/accounts/delete-bulk', {}, ids, accountBatchLimit('delete'), accountBatchProgress(btn, '删除中…'));
     (r.deleted || []).forEach(item => ACCOUNT_SELECTED.delete(Number(item.id)));
     const skippedCount = (r.skipped || []).length;
     showToast(skippedCount ? `已删除 ${r.deleted_count || 0} 个，跳过 ${skippedCount} 个` : `已删除 ${r.deleted_count || 0} 个`);
@@ -2961,6 +3219,8 @@ async function deleteSelectedAccounts() {
   } catch(err) {
     showToast('批量删除失败: ' + err.message);
     updateAccountSelectionUi();
+  } finally {
+    if (btn) btn.textContent = old;
   }
 }
 
@@ -2992,28 +3252,37 @@ async function noteSelectedAccounts() {
   if (note === null) return;
   if (note.length > 2000) { showToast('备注最多 2000 个字符'); return; }
   const btn = $('#btnNoteSelectedAccounts');
-  btn.disabled = true;
+  const old = btn ? btn.textContent : '';
+  if (btn) btn.disabled = true;
   try {
-    const r = await api('/api/accounts/note-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, note}),
-    });
+    const r = await postAccountBatches('/api/accounts/note-bulk', {note}, ids, accountBatchLimit('note'), accountBatchProgress(btn, '备注中…'));
     const skippedCount = (r.skipped || []).length;
     showToast(skippedCount ? `已备注 ${r.updated_count || 0} 个，跳过 ${skippedCount} 个` : `已备注 ${r.updated_count || 0} 个`);
     loadAccounts();
   } catch(err) {
     showToast('批量备注失败: ' + err.message);
     updateAccountSelectionUi();
+  } finally {
+    if (btn) btn.textContent = old;
   }
 }
 
 function groupSelectedAccounts() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
+  // group-bulk 单次上限 5000：选择更大时按批次提交，选择器拿到的是合并后的结果。
+  const request = (path, opts) => {
+    if (path !== '/api/accounts/group-bulk' || !opts || opts.method !== 'POST') return api(path, opts);
+    let body;
+    try { body = JSON.parse(opts.body || '{}'); } catch (err) { return api(path, opts); }
+    const groupIds = Array.isArray(body.account_ids) ? body.account_ids : null;
+    if (!groupIds || groupIds.length <= accountBatchLimit('group')) return api(path, opts);
+    const {account_ids: _ignored, ...rest} = body;
+    return postAccountBatches(path, rest, groupIds, accountBatchLimit('group'));
+  };
   window.AccountGroupPicker.open({
     accountIds: ids,
-    request: api,
+    request,
     onSaved(result, name) {
       ACCOUNT_GROUPS = result.groups || [];
       renderAccountGroupFilter();
@@ -3028,18 +3297,19 @@ function groupSelectedAccounts() {
 async function stopSelectedCodex() {
   const ids = Array.from(ACCOUNT_SELECTED);
   if (ids.length === 0) { showToast('请先选择账号'); return; }
-  const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  const selectedAccounts = getSelectedAccountRows();
+  const rowsComplete = accountRowsCoverSelection(ids);
   const retrying = selectedAccounts.filter(a => (a.codex_status || '') === 'retrying');
-  if (retrying.length === 0) { showToast('选中账号里没有正在补跑的 Codex'); return; }
-  if (!confirm(`确定停止选中的 ${retrying.length} 个 Codex 补跑吗？\n\n会发送停止信号，并将状态标记为“已停止”。`)) return;
+  if (rowsComplete && retrying.length === 0) { showToast('选中账号里没有正在补跑的 Codex'); return; }
+  // 行缓存不完整时提交完整 ID 列表，服务端会跳过未处于补跑中的账号。
+  const targets = rowsComplete ? retrying.map(a => Number(a.id)) : ids;
+  const count = rowsComplete ? retrying.length : ids.length;
+  if (!confirm(`确定停止选中的 ${count} 个 Codex 补跑吗？\n\n会发送停止信号，并将状态标记为“已停止”。`)) return;
   const btn = $('#btnStopSelectedCodex');
-  btn.disabled = true;
+  const old = btn ? btn.textContent : '';
+  if (btn) btn.disabled = true;
   try {
-    const r = await api('/api/codex/stop-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: retrying.map(a => a.id)}),
-    });
+    const r = await postAccountBatches('/api/codex/stop-bulk', {}, targets, accountBatchLimit('stop'), accountBatchProgress(btn, '停止中…'));
     const skippedCount = (r.skipped || []).length;
     showToast(skippedCount ? `已停止 ${r.stopped_count || 0} 个，跳过 ${skippedCount} 个` : `已停止 ${r.stopped_count || 0} 个`);
     loadAccounts();
@@ -3047,6 +3317,8 @@ async function stopSelectedCodex() {
   } catch(err) {
     showToast('停止选中补跑失败: ' + err.message);
     updateAccountSelectionUi();
+  } finally {
+    if (btn) btn.textContent = old;
   }
 }
 
@@ -3056,7 +3328,8 @@ async function retrySelectedCodex() {
   const workersEl = $('#codexBulkWorkers');
   const workers = Math.max(1, Math.min(16, Number(workersEl?.value || 1)));
   if (workersEl) workersEl.value = workers;
-  const selectedAccounts = ids.map(id => ACCOUNTS.find(a => Number(a.id) === Number(id))).filter(Boolean);
+  const selectedAccounts = getSelectedAccountRows();
+  const rowsComplete = accountRowsCoverSelection(ids);
   const retryingCount = selectedAccounts.filter(a => (a.codex_status || '') === 'retrying').length;
   const deactivatedCount = selectedAccounts.filter(a => (a.live_check_status || '') === 'deactivated').length;
   let msg = `批量补跑选中的 ${ids.length} 个账号 Codex 授权？
@@ -3064,18 +3337,15 @@ async function retrySelectedCodex() {
 并发线程数：${workers}
 
 将按账号消耗邮箱 OTP 和接码短信。`;
-  if (retryingCount || deactivatedCount) msg += `
+  if (rowsComplete && (retryingCount || deactivatedCount)) msg += `
 
 其中：补跑中 ${retryingCount} 个、已废号 ${deactivatedCount} 个会自动跳过。`;
   if (!confirm(msg)) return;
   const btn = $('#btnRetrySelectedCodex');
-  btn.disabled = true;
+  const old = btn ? btn.textContent : '';
+  if (btn) btn.disabled = true;
   try {
-    const r = await api('/api/codex/retry-bulk', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({account_ids: ids, workers}),
-    });
+    const r = await postAccountBatches('/api/codex/retry-bulk', {workers}, ids, accountBatchLimit('retry'), accountBatchProgress(btn, '补跑中…'));
     const skippedCount = (r.skipped || []).length;
     showToast(skippedCount ? `已开始 ${r.started_count || 0} 个，跳过 ${skippedCount} 个` : (r.message || '已开始批量补跑'));
     loadAccounts();
@@ -3086,13 +3356,17 @@ async function retrySelectedCodex() {
   } catch(err) {
     showToast('批量补跑失败: ' + err.message);
     updateAccountSelectionUi();
+  } finally {
+    if (btn) btn.textContent = old;
   }
 }
 
-$('#qAccounts').addEventListener('input', debounce(() => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); }, 250));
-$('#codexStatusFilter').addEventListener('change', () => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); });
-$('#totpStatusFilter').addEventListener('change', () => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); });
-$('#groupFilter').addEventListener('change', () => { ACCOUNT_SELECTED.clear(); PAGERS.accounts.page = 1; loadAccounts(); });
+$('#qAccounts').addEventListener('input', debounce(() => { clearAccountSelection(); PAGERS.accounts.page = 1; loadAccounts(); }, 250));
+$('#codexStatusFilter').addEventListener('change', () => { clearAccountSelection(); PAGERS.accounts.page = 1; loadAccounts(); });
+$('#totpStatusFilter').addEventListener('change', () => { clearAccountSelection(); PAGERS.accounts.page = 1; loadAccounts(); });
+$('#atStatusFilter').addEventListener('change', () => { clearAccountSelection(); PAGERS.accounts.page = 1; loadAccounts(); });
+$('#liveStatusFilter').addEventListener('change', () => { clearAccountSelection(); PAGERS.accounts.page = 1; loadAccounts(); });
+$('#groupFilter').addEventListener('change', () => { clearAccountSelection(); PAGERS.accounts.page = 1; loadAccounts(); });
 $('#copyAllTokens').addEventListener('click', async () => {
   const ids = ACCOUNTS.filter(r => r.has_access_token).map(r => Number(r.id));
   if (!ids.length) { showToast('当前页没有 Token'); return; }

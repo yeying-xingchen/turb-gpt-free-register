@@ -27,22 +27,68 @@ _INVALID_CODE_HINTS = (
     "code has expired", "验证码错误", "验证码无效", "验证码已过期",
 )
 
+# 在页面内一次判定所有候选元素是否可见可用；返回布尔数组，顺序与 locator 一致。
+_VISIBLE_JS = """(elements) => elements.map(el => {
+  const box = el.getBoundingClientRect();
+  const shown = !!(box.width || box.height) && getComputedStyle(el).visibility !== 'hidden';
+  return shown && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+})"""
+
+# 一次抓取登录页上所有可选按钮的可见性、文案与关键属性，替代逐元素
+# get_attribute/inner_text（原来每个候选 7 次 CDP 往返）。
+_CHOICE_SCAN_JS = """(elements) => elements.map(el => {
+  const box = el.getBoundingClientRect();
+  const shown = !!(box.width || box.height) && getComputedStyle(el).visibility !== 'hidden'
+    && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+  if (!shown) return {visible: false};
+  const pick = (name) => el.getAttribute(name) || '';
+  const text = (el.innerText || '').trim().slice(0, 200);
+  return {
+    visible: true,
+    text: text,
+    attrs: [pick('name'), pick('value'), pick('data-testid'), pick('data-dd-action-name')].join(' '),
+    details: [pick('name'), pick('value'), pick('href'), pick('formaction'),
+              pick('data-testid'), pick('data-dd-action-name'), text].join(' '),
+  };
+})"""
+
+_CHOICE_SELECTOR = "button,a,[role='button'],[role='link'],input[type='submit']"
+
+# 登录状态机轮询间隔（毫秒）：提交动作后等待跳转要快，空闲等待可以慢。
+_POLL_FAST_MS = 150
+_POLL_IDLE_MS = 400
+
 
 def _page_state(driver) -> dict:
     # 只读取状态，不把密码、验证码、Cookie 或完整回调 URL 写入日志。
+    # 这里刻意不读 document.body.innerText：innerText 会强制整页布局，在
+    # chatgpt.com 这种 React 页面上单次可达几十到上百毫秒，而登录状态机每轮
+    # 都要调用一次。需要正文时用 _page_text() 按需读取。
     return driver.page.evaluate(r"""() => {
       const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
         && getComputedStyle(el).visibility !== 'hidden' && !el.disabled;
       const has = sel => [...document.querySelectorAll(sel)].some(visible);
       const errors = [...document.querySelectorAll('[role="alert"],.react-aria-FieldError,[slot="errorMessage"],[id$="-error"]')]
         .filter(visible).map(el => el.innerText || '').filter(Boolean);
-      return {url: location.href, text: (document.body?.innerText || '').slice(0, 4000), errors,
+      return {url: location.href, errors,
         email: has('input[type="email"],input[name="email"],input[name="username"]'),
         password: has('input[type="password"],input[autocomplete="current-password"]'),
         code: has('input[autocomplete="one-time-code"],input[name="code"],input[inputmode="numeric"]'),
         invalid: has('input[aria-invalid="true"]'),
         mfa: [...document.querySelectorAll('form')].some(f => /mfa|totp|two-factor/i.test(f.action || ''))};
     }""") or {}
+
+
+def _page_text(driver) -> str:
+    """按需读取可见正文，仅用于认证错误页的废号判定。"""
+    try:
+        return str(driver.page.evaluate(
+            "() => (document.body?.innerText || '').slice(0, 4000)"
+        ) or "")
+    except Exception as exc:
+        if _during_navigation(exc):
+            return ""
+        raise
 
 
 def _step(state: dict) -> str:
@@ -106,7 +152,7 @@ class _AuthResponses:
         self.error = f"HTTP {response.status}" + (f" {code}" if code else "")
 
 
-def _check_error(state: dict, responses: _AuthResponses) -> None:
+def _check_error(state: dict, responses: _AuthResponses, driver=None) -> None:
     dead = responses.dead_code
     parsed = urlparse(str(state.get("url") or ""))
     auth_page = parsed.hostname == "auth.openai.com"
@@ -124,7 +170,14 @@ def _check_error(state: dict, responses: _AuthResponses) -> None:
         # 只读认证错误提示；邮箱、ChatGPT 聊天标题和普通正文不是账号状态证据。
         errors = " ".join(state.get("errors") or [])
         if parsed.path.rstrip("/").endswith("/error"):
-            errors += " " + str(state.get("text") or "")
+            text = state.get("text")
+            if text is None and driver is not None:
+                # 正文只在认证错误页按需读取，避免登录轮询每轮都触发布局。
+                try:
+                    text = _page_text(driver)
+                except Exception:
+                    text = ""
+            errors += " " + str(text or "")
         errors = re.sub(r"\S+@\S+", "", errors)
         dead = detect_account_unusable_text(errors)
     if dead:
@@ -170,7 +223,21 @@ def _interaction_error(exc: Exception) -> RuntimeError:
 
 
 def _visible(scope, selector: str) -> list:
+    """返回可见且可用的元素。
+
+    逐个 ``is_visible()/is_enabled()/get_attribute()`` 会产生 3N 次 CDP 往返：
+    登录页上 ``button,a,[role=button],[role=link]`` 这类宽选择器动辄上百个节点，
+    一次调用就要上千次往返（重发验证码按钮的轮询循环里尤其明显）。这里先用一次
+    ``evaluate_all`` 在页面内批量判定，只有命中的元素才创建 Locator。
+    """
     candidates = scope.locator(selector)
+    try:
+        flags = candidates.evaluate_all(_VISIBLE_JS)
+    except Exception:
+        flags = None
+    if isinstance(flags, list):
+        return [candidates.nth(index) for index, ok in enumerate(flags) if ok]
+    # 回退路径：驱动或页面不支持 evaluate_all 时，保持逐元素判定。
     return [el for el in (candidates.nth(i) for i in range(candidates.count()))
             if el.is_visible() and el.is_enabled() and el.get_attribute("aria-disabled") != "true"]
 
@@ -275,16 +342,48 @@ def _submit_email_step(driver, email: str | None = None) -> None:
         raise RuntimeError("找不到邮箱登录提交按钮")
 
 
+def _choice_patterns(resend: bool) -> tuple[str, str]:
+    text_pattern = (r"resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重发|再送信" if resend else
+                    r"(?:use|continue with|log\s?in with).{0,12}one[- ]time code|使用一次性验证码|使用一次性驗證碼|メールでコード|ワンタイムコード")
+    attr_pattern = r"resend|send_new_code" if resend else r"passwordless_login_send_otp|passwordless_send_otp"
+    return text_pattern, attr_pattern
+
+
+def _pick_choice_index(scanned: list, text_pattern: str, attr_pattern: str) -> int | None:
+    """按原语义挑选候选：优先属性命中（多个命中取最后一个），否则取第一个文案命中。"""
+    attr_hit: int | None = None
+    text_hit: int | None = None
+    for index, item in enumerate(scanned):
+        if not isinstance(item, dict) or not item.get("visible"):
+            continue
+        if _registration_target(str(item.get("details") or "")):
+            continue
+        if re.search(attr_pattern, str(item.get("attrs") or ""), re.I):
+            attr_hit = index
+        elif text_hit is None and re.search(text_pattern, str(item.get("text") or ""), re.I):
+            text_hit = index
+    return attr_hit if attr_hit is not None else text_hit
+
+
 def _click_auth_choice(driver, *, resend: bool) -> bool:
     state = _page_state(driver)
     if _step(state) != ("email_otp" if resend else "password"):
         return False
-    candidates = _visible(driver.page, "button,a,[role='button'],[role='link'],input[type='submit']")
-    text_pattern = (r"resend|send\s+(?:a\s+)?new\s+code|send\s+again|重新发送|重发|再送信" if resend else
-                    r"(?:use|continue with|log\s?in with).{0,12}one[- ]time code|使用一次性验证码|使用一次性驗證碼|メールでコード|ワンタイムコード")
-    attr_pattern = r"resend|send_new_code" if resend else r"passwordless_login_send_otp|passwordless_send_otp"
+    text_pattern, attr_pattern = _choice_patterns(resend)
+    candidates = driver.page.locator(_CHOICE_SELECTOR)
+    try:
+        scanned = candidates.evaluate_all(_CHOICE_SCAN_JS)
+    except Exception:
+        scanned = None
+    if isinstance(scanned, list):
+        picked = _pick_choice_index(scanned, text_pattern, attr_pattern)
+        if picked is None:
+            return False
+        _pin(driver, candidates.nth(picked)).click(timeout=3000)
+        return True
+    # 回退路径：保持原逐元素实现，兼容不支持 evaluate_all 的驱动。
     choices = []
-    for button in candidates:
+    for button in _visible(driver.page, _CHOICE_SELECTOR):
         details = _button_details(button)
         if _registration_target(details):
             continue
@@ -378,7 +477,7 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
                 raise
             driver.page.wait_for_timeout(500)
             continue
-        _check_error(state, responses)
+        _check_error(state, responses, driver)
         step = _step(state)
         if step != last_step:
             logger.info("[Cloak查活] 登录阶段：%s", step)
@@ -464,20 +563,56 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
             step_deadline = time.monotonic() + timeout
         if time.monotonic() >= step_deadline:
             raise RuntimeError(f"Cloak 登录 timeout：停留在 {step} 阶段，未取得 Session/AT")
-        driver.page.wait_for_timeout(500)
+        # 刚提交过表单时页面正在跳转，缩短轮询尽快进入下一阶段；空闲等待（等验证码/
+        # 等跳转）时拉长间隔，减少 CDP 与页面求值次数。_page_state 已不再触发布局，
+        # 所以 150ms 的轮询成本很低。
+        driver.page.wait_for_timeout(_POLL_FAST_MS if submitted else _POLL_IDLE_MS)
     raise RuntimeError("Cloak 登录 timeout：未取得 Session/AT")
+
+
+def _install_live_check_data_saver(driver) -> None:
+    """查活页面的省流量拦截：只拦可选资源，页面更小、渲染更快、内存更低。
+
+    与注册共用同一套规则（``BROWSER_DATA_SAVER_BLOCKED_*``），但由
+    ``LIVE_CHECK_DATA_SAVER`` 独立开关，不受 ``BROWSER_DATA_SAVER_MODE`` 影响；
+    验证码/challenge 相关 URL 由拦截器自动放行。
+    """
+    try:
+        from config import live_check as live_cfg
+        if not bool(getattr(live_cfg, "LIVE_CHECK_DATA_SAVER", True)):
+            return
+        from core.browser_data_saver import (
+            BrowserDataSaver, configured_resource_types, configured_url_patterns,
+        )
+        saver = BrowserDataSaver(label="Cloak查活")
+        if not saver.enabled:
+            saver.enabled = True
+            saver.resource_types = configured_resource_types()
+            saver.url_patterns = configured_url_patterns()
+        saver.install_playwright(driver.context)
+    except Exception:
+        # 拦截器只是优化项，装不上就按完整页面继续查活。
+        logger.warning("[Cloak查活] 安装省流量拦截失败，继续完整加载页面", exc_info=True)
 
 
 def login_with_cloak(email: str, proxy: str | None = None, *, email_source: str | None = None) -> tuple[dict, dict]:
     """生命周期归当前工作线程；队列的每次换出口都会创建新浏览器。"""
     driver = None
+    started_at = time.monotonic()
     try:
         driver, opened = build_cloak_driver(proxy=proxy, isolated=True, force_proxy=True)
         driver._registration_log_prefix = "[Cloak查活]"
+        launched_at = time.monotonic()
+        logger.info("[Cloak查活] 浏览器就绪，耗时 %.2fs", launched_at - started_at)
+        _install_live_check_data_saver(driver)
         responses = _AuthResponses()
         driver.context.on("response", responses)
         logger.info("[Cloak查活] 已创建独立浏览器，开始重新登录：%s", email)
         session_info = _login(driver, email, email_source=email_source, responses=responses)
+        logger.info(
+            "[Cloak查活] 重新登录完成：登录耗时 %.2fs，浏览器启动+登录共 %.2fs",
+            time.monotonic() - launched_at, time.monotonic() - started_at,
+        )
         # 独立环境应有明确的账号身份，禁止把其它账号的浏览器状态写回。
         returned_email = str((session_info.get("user") or {}).get("email") or "").strip()
         if returned_email.casefold() != email.casefold():
