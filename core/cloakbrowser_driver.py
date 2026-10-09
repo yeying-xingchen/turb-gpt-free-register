@@ -271,8 +271,10 @@ class _BrowserGate:
             return None
         return max(1, min(_MAX_AUTO_CONCURRENCY, int(available // _BROWSER_MEMORY_MB)))
 
-    def acquire(self, *, timeout: float = _GATE_WAIT_SECONDS) -> bool:
-        """占用一个浏览器额度；返回 False 表示等超时后放行。
+    def acquire(self, *, timeout: float = _GATE_WAIT_SECONDS, fail_open: bool = True) -> bool:
+        """占用一个浏览器额度；兼容模式等超时后放行并返回 False。
+
+        fail_open=False 时超时抛出 TimeoutError，不占额度、不启动浏览器。
 
         同一线程内可重入：已经持有额度的线程再次启动浏览器时不再排队，
         避免注册→授权这类同线程嵌套流程互相等待。等待期间在条件锁外检查
@@ -294,7 +296,9 @@ class _BrowserGate:
                     return True
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    # 额度长时间拿不到（例如某个浏览器卡死）时放行，保证队列能继续。
+                    if not fail_open:
+                        raise TimeoutError("等待 Cloak 浏览器并发额度超时，未启动浏览器")
+                    # 兼容注册流程：长时间拿不到额度时允许继续。
                     self._in_use += 1
                     self._local.depth = 1
                     return False
@@ -401,9 +405,11 @@ class CloakSeleniumDriver:
         except Exception:
             pass
         relay, self._proxy_relay = self._proxy_relay, None
-        if relay is not None:
-            relay.close()
-        self._release_gate_slot()
+        try:
+            if relay is not None:
+                relay.close()
+        finally:
+            self._release_gate_slot()
 
     def _release_gate_slot(self) -> None:
         """归还浏览器并发额度；重复调用安全。"""
@@ -722,7 +728,8 @@ def build_cloak_driver(
     browser = context = proxy_relay = None
     proxy_pool_target = ""
     gate_slot = False
-    keep_open = bool(getattr(_cfg, "CLOAK_KEEP_BROWSER_OPEN", False))
+    # 独立查活始终退出浏览器，不受注册调试保留开关影响。
+    keep_open = not isolated and bool(getattr(_cfg, "CLOAK_KEEP_BROWSER_OPEN", False))
     if keep_open:
         # 调试保留浏览器时不会调用 quit()，不占用额度，避免把额度泄漏光。
         logger.debug("[Cloak] CLOAK_KEEP_BROWSER_OPEN=True，本次启动不占用浏览器并发额度")
@@ -786,8 +793,9 @@ def build_cloak_driver(
 
         if not keep_open:
             # 只在真正要拉起浏览器前排队，出口地理查询/代理中继可以在等待期间并行完成。
-            # 无论是否在额度内拿到，acquire 都占用了一个计数，退出时必须由 quit() 归还。
-            acquired = _BROWSER_GATE.acquire()
+            # 独立查活超时即失败；注册保持旧的超时放行行为。
+            # acquire 返回时均占用了计数，退出时必须由 quit() 归还。
+            acquired = _BROWSER_GATE.acquire(fail_open=False) if isolated else _BROWSER_GATE.acquire()
             gate_slot = True
             if not acquired:
                 logger.warning(

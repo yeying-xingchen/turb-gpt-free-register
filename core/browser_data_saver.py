@@ -132,8 +132,10 @@ def _infer_resource_type(url: str) -> str:
 class BrowserDataSaver:
     """给一个浏览器会话安装可选资源拦截器。"""
 
-    def __init__(self, *, label: str = "Browser"):
+    def __init__(self, *, label: str = "Browser", track_blocked_requests: bool = True):
         self.label = str(label or "Browser")
+        # 无流量统计消费者的短生命周期会话只需要计数，无须保留请求标识。
+        self.track_blocked_requests = bool(track_blocked_requests)
         self.enabled = bool(getattr(_cfg, "BROWSER_DATA_SAVER_MODE", False))
         self.resource_types = configured_resource_types() if self.enabled else []
         self.url_patterns = configured_url_patterns() if self.enabled else []
@@ -188,7 +190,7 @@ class BrowserDataSaver:
             self.blocked_by_type[normalized or "other"] += 1
             if url_pattern:
                 self.blocked_by_url_pattern[str(url_pattern)] += 1
-            if request is not None:
+            if request is not None and self.track_blocked_requests:
                 self._blocked_playwright_requests.add(id(request))
 
     def was_playwright_blocked(self, request: Any) -> bool:

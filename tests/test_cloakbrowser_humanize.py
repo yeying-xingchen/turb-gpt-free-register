@@ -79,7 +79,8 @@ def _serve(route) -> None:
     route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
 
 
-def test_cloak_liveness_survives_humanized_locators(monkeypatch):
+@pytest.mark.parametrize("session_failure", [None, 503, "network"])
+def test_cloak_liveness_survives_humanized_locators(monkeypatch, session_failure):
     from cloakbrowser.human import patch_browser
     from cloakbrowser.human.config import resolve_config
     from core import cloakbrowser_liveness as cloak
@@ -96,9 +97,23 @@ def test_cloak_liveness_survives_humanized_locators(monkeypatch):
             pytest.skip(f"Chromium 不可用：{type(exc).__name__}")
         # 与生产一致：humanize 在 new_context 之前打补丁。
         patch_browser(browser, resolve_config("default", None))
-        context = browser.new_context()
-        context.route("**/*", _serve)
+        context = browser.new_context(service_workers="block")
         page = context.new_page()
+        session_requests = []
+
+        def serve(route):
+            if urlparse(route.request.url).path == "/api/auth/session":
+                session_requests.append(route.request.url)
+                if len(session_requests) == 1 and session_failure is not None:
+                    if session_failure == "network":
+                        route.abort("failed")
+                    else:
+                        route.fulfill(status=session_failure, content_type="application/json", body="{}")
+                    return
+            _serve(route)
+
+        # Page 路由优先于查活安装的 context 省流量路由，所有请求始终本地响应。
+        page.route("**/*", serve)
         page.set_default_timeout(15000)
         cloak_driver = CloakSeleniumDriver(browser=browser, context=context, page=page)
         cloak_driver.set_page_load_timeout(30)
@@ -115,3 +130,4 @@ def test_cloak_liveness_survives_humanized_locators(monkeypatch):
 
     assert session["accessToken"] == "AT-humanize"
     assert details["driver"] == "cloak"
+    assert len(session_requests) == (1 if session_failure is None else 2)

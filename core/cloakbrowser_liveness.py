@@ -54,9 +54,30 @@ _CHOICE_SCAN_JS = """(elements) => elements.map(el => {
 
 _CHOICE_SELECTOR = "button,a,[role='button'],[role='link'],input[type='submit']"
 
-# 登录状态机轮询间隔（毫秒）：提交动作后等待跳转要快，空闲等待可以慢。
+# 提交后短暂快速检查；页面长期不变时逐步降频，避免整个超时窗口持续忙轮询。
 _POLL_FAST_MS = 150
 _POLL_IDLE_MS = 400
+_POLL_MAX_MS = 1000
+
+
+class _PollCadence:
+    def __init__(self):
+        self._state = None
+        self._submitted = False
+        self._changed_at = 0.0
+
+    def delay(self, state: dict, submitted: bool) -> int:
+        now = time.monotonic()
+        if state != self._state or submitted != self._submitted:
+            self._state = dict(state)
+            self._submitted = submitted
+            self._changed_at = now
+        quiet = now - self._changed_at
+        if submitted and quiet < 1.0:
+            return _POLL_FAST_MS
+        if quiet < 3.0:
+            return _POLL_IDLE_MS
+        return _POLL_MAX_MS
 
 
 def _page_state(driver) -> dict:
@@ -184,21 +205,54 @@ def _check_error(state: dict, responses: _AuthResponses, driver=None) -> None:
         raise AccountUnusableError(f"账号已废（{dead}）", error_code=dead)
 
 
+class _SessionReadTransient(ConnectionError):
+    def __init__(self, message: str, retry_after: float = 0.0):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def _read_session(driver) -> dict | None:
     try:
         result = driver.page.evaluate("""async () => {
           if (location.hostname !== 'chatgpt.com') return null;
-          const response = await fetch('/api/auth/session', {
-            credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(10000)
-          });
-          if (!response.ok) throw new Error('Session HTTP ' + response.status);
-          return await response.json();
+          let response;
+          try {
+            response = await fetch('/api/auth/session', {
+              credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(10000)
+            });
+          } catch (error) {
+            return {failure: /Timeout|Abort/.test(error.name) ? 'timeout' : 'network'};
+          }
+          let data = null;
+          try { data = await response.json(); } catch (_) {}
+          return {status: response.status, data,
+                  retryAfter: response.headers.get('retry-after')};
         }""")
     except Exception as exc:
         if _during_navigation(exc):
             return None
         raise
-    return result if isinstance(result, dict) and result.get("accessToken") else None
+    if not isinstance(result, dict):
+        return None
+    failure = result.get("failure")
+    if failure in {"timeout", "network"}:
+        raise _SessionReadTransient("Session timeout" if failure == "timeout" else "Session network error")
+    status = int(result.get("status") or 0)
+    data = result.get("data")
+    if status >= 400:
+        dead = detect_account_unusable_response_body(json.dumps(data))
+        if dead:
+            raise AccountUnusableError(f"账号已废（{dead}）", error_code=dead)
+        if status in {408, 425, 429} or 500 <= status < 600:
+            try:
+                retry_after = min(30.0, max(0.0, float(result.get("retryAfter") or 0)))
+            except (TypeError, ValueError, OverflowError):
+                retry_after = 0.0
+            raise _SessionReadTransient(f"Session HTTP {status}", max(2.0 if status == 429 else 0.0, retry_after))
+        raise _BrowserAuthError(status, "session_read_failed")
+    if status and data is None:
+        raise _SessionReadTransient("Session invalid JSON response")
+    return data if isinstance(data, dict) and data.get("accessToken") else None
 
 
 def _during_navigation(exc: Exception) -> bool:
@@ -482,6 +536,8 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
     used_totp_codes: set[str] = set()
     next_session_read = 0.0
     session_retry_delay = 0.5
+    session_failures = 0
+    cadence = _PollCadence()
     while time.monotonic() < deadline:
         try:
             state = _page_state(driver)
@@ -523,14 +579,26 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
         elif submitted and (state.get("errors") or state.get("invalid")):
             raise RuntimeError("登录凭据验证失败，请检查账号密码或验证码")
 
+        if time.monotonic() >= min(step_deadline, deadline):
+            raise RuntimeError(f"Cloak 登录 timeout：停留在 {step} 阶段，未取得 Session/AT")
+
         if step == "session":
             if time.monotonic() >= next_session_read:
-                session_info = _read_session(driver)
+                retry_after = 0.0
+                try:
+                    session_info = _read_session(driver)
+                except _SessionReadTransient as exc:
+                    session_failures += 1
+                    if session_failures >= 3:
+                        raise
+                    retry_after = exc.retry_after
+                    session_info = None
+                    logger.info("[Cloak查活] Session 暂未可用，保留当前登录态重试（%s/3）：%s", session_failures, exc)
                 if session_info:
                     return session_info
                 # 页面状态仍持续轮询，但空 Session 不随每轮 DOM 扫描重复请求。
                 # 从请求完成时计时，慢请求也不会在返回后立即再次发出。
-                next_session_read = time.monotonic() + session_retry_delay
+                next_session_read = time.monotonic() + max(session_retry_delay, retry_after)
                 session_retry_delay = min(2.0, session_retry_delay * 2)
         elif not submitted and step == "email":
             email_submits += 1
@@ -583,14 +651,16 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
             step_deadline = time.monotonic() + timeout
         if time.monotonic() >= step_deadline:
             raise RuntimeError(f"Cloak 登录 timeout：停留在 {step} 阶段，未取得 Session/AT")
-        # 刚提交过表单时页面正在跳转，缩短轮询尽快进入下一阶段；空闲等待（等验证码/
-        # 等跳转）时拉长间隔，减少 CDP 与页面求值次数。_page_state 已不再触发布局，
-        # 所以 150ms 的轮询成本很低。
-        driver.page.wait_for_timeout(_POLL_FAST_MS if submitted else _POLL_IDLE_MS)
+        delay_ms = cadence.delay(state, submitted)
+        wake_at = min(step_deadline, deadline)
+        if step == "session":
+            wake_at = min(wake_at, next_session_read)
+        delay_ms = min(delay_ms, max(0.0, (wake_at - time.monotonic()) * 1000))
+        driver.page.wait_for_timeout(delay_ms)
     raise RuntimeError("Cloak 登录 timeout：未取得 Session/AT")
 
 
-def _install_live_check_data_saver(driver) -> None:
+def _install_live_check_data_saver(driver):
     """查活页面的省流量拦截：只拦可选资源，页面更小、渲染更快、内存更低。
 
     与注册共用同一套规则（``BROWSER_DATA_SAVER_BLOCKED_*``），但由
@@ -604,12 +674,13 @@ def _install_live_check_data_saver(driver) -> None:
         from core.browser_data_saver import (
             BrowserDataSaver, configured_resource_types, configured_url_patterns,
         )
-        saver = BrowserDataSaver(label="Cloak查活")
+        saver = BrowserDataSaver(label="Cloak查活", track_blocked_requests=False)
         if not saver.enabled:
             saver.enabled = True
             saver.resource_types = configured_resource_types()
             saver.url_patterns = configured_url_patterns()
         saver.install_playwright(driver.context)
+        return saver
     except Exception:
         # 拦截器只是优化项，装不上就按完整页面继续查活。
         logger.warning("[Cloak查活] 安装省流量拦截失败，继续完整加载页面", exc_info=True)
@@ -617,14 +688,14 @@ def _install_live_check_data_saver(driver) -> None:
 
 def login_with_cloak(email: str, proxy: str | None = None, *, email_source: str | None = None) -> tuple[dict, dict]:
     """生命周期归当前工作线程；队列的每次换出口都会创建新浏览器。"""
-    driver = None
+    driver = saver = None
     started_at = time.monotonic()
     try:
         driver, opened = build_cloak_driver(proxy=proxy, isolated=True, force_proxy=True)
         driver._registration_log_prefix = "[Cloak查活]"
         launched_at = time.monotonic()
         logger.info("[Cloak查活] 浏览器就绪，耗时 %.2fs", launched_at - started_at)
-        _install_live_check_data_saver(driver)
+        saver = _install_live_check_data_saver(driver)
         responses = _AuthResponses()
         driver.context.on("response", responses)
         logger.info("[Cloak查活] 已创建独立浏览器，开始重新登录：%s", email)
@@ -651,6 +722,11 @@ def login_with_cloak(email: str, proxy: str | None = None, *, email_source: str 
             ),
         }
     finally:
+        if saver is not None:
+            try:
+                saver.stop()
+            except Exception:
+                logger.warning("[Cloak查活] 省流量拦截器清理失败，继续关闭浏览器")
         if driver is not None:
             # 后台批量任务不受注册调试保留开关影响，防止浏览器资源持续累积。
             try:
