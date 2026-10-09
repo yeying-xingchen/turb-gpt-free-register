@@ -25,6 +25,7 @@ EXPLICIT_EMPTY_STRING_ENV_KEYS = {"GENERIC_API_PROXY"}
 # 统一管理：env key -> 说明（.env.example 用）
 SECRET_ENV_KEYS: dict[str, str] = {
     "WEBUI_AUTH_CODE": "WebUI 登录授权码",
+    "PUBLIC_UPLOAD_KEY": "公共账号上传页面 Key",
     "WEBUI_SESSION_SECRET": "WebUI Session Cookie 签名密钥",
     "BROWSER_USE_API_KEY": "Browser Use Cloud API Key",
     "SKYVERN_API_KEY": "Skyvern API Key",

@@ -303,6 +303,51 @@ def test_non_error_page_never_reads_body_text(monkeypatch):
 # 密码/重发按钮选择：一次扫描 + 本地判定
 # --------------------------------------------------------------------------
 
+def test_submit_form_scans_once_and_skips_non_login_buttons(monkeypatch):
+    form = Mock()
+    form.get_attribute.return_value = "/log-in/password"
+    candidates = form.locator.return_value
+    elements = [Mock() for _ in range(5)]
+    candidates.nth.side_effect = elements.__getitem__
+    candidates.evaluate_all.return_value = [
+        {"visible": False, "details": "Continue"},
+        {"visible": True, "details": "Create account"},
+        {"visible": True, "details": "passwordless_login_send_otp"},
+        {"visible": True, "details": "Resend code"},
+        {"visible": True, "details": "Continue"},
+    ]
+    pinned = Mock()
+    pin = Mock(return_value=pinned)
+    monkeypatch.setattr(cloak, "_pin", pin)
+    monkeypatch.setattr(cloak, "_page_state", Mock(return_value={
+        "url": "https://auth.openai.com/log-in/password", "password": True,
+    }))
+    details = Mock(side_effect=AssertionError("unexpected per-button CDP reads"))
+    monkeypatch.setattr(cloak, "_button_details", details)
+
+    assert cloak._submit_auth_form(SimpleNamespace(page=Mock()), [], form=form)
+    candidates.evaluate_all.assert_called_once()
+    assert pin.call_args.args[1] == candidates.nth(4)
+    pinned.click.assert_called_once_with(timeout=3000)
+    details.assert_not_called()
+
+
+def test_submit_form_scan_falls_back_when_unsupported(monkeypatch):
+    form = Mock()
+    form.get_attribute.return_value = "/log-in/password"
+    form.locator.return_value.evaluate_all.side_effect = RuntimeError("unsupported")
+    button = Mock()
+    monkeypatch.setattr(cloak, "_visible", Mock(return_value=[button]))
+    monkeypatch.setattr(cloak, "_button_details", Mock(return_value="Continue"))
+    monkeypatch.setattr(cloak, "_pin", Mock(return_value=button))
+    monkeypatch.setattr(cloak, "_page_state", Mock(return_value={
+        "url": "https://auth.openai.com/log-in/password", "password": True,
+    }))
+
+    assert cloak._submit_auth_form(SimpleNamespace(page=Mock()), [], form=form)
+    button.click.assert_called_once_with(timeout=3000)
+
+
 def test_pick_choice_prefers_last_attribute_hit():
     scanned = [
         {"visible": True, "text": "Use a one-time code", "attrs": "", "details": "sign up"},

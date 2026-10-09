@@ -10,6 +10,7 @@
   <script defer src="{{ ui_asset_url('account-group-picker.js') }}"></script>
   <script defer src="{{ ui_asset_url('console.js') }}"></script>
   <script defer src="{{ ui_asset_url('extract-links.js') }}"></script>
+  <script defer src="{{ ui_asset_url('update-notice.js') }}"></script>
 </head>
 <body>
 <aside class="app-sidebar" aria-label="主导航">
@@ -99,6 +100,12 @@
         <path d="M3 6h18M3 12h18M3 18h18"/>
       </svg>
       <span>历史版顶部导航</span>
+    </a>
+    <a href="#" data-update-notice="flex" style="display:none;color:#b45309" title="发现新版本" onclick="activateTab('config'); return false;">
+      <svg class="sidebar-footer-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>
+      </svg>
+      <span data-update-notice-text>发现新版本</span>
     </a>
     <form class="sidebar-logout" method="post" action="/logout">
       <button type="submit">
@@ -496,7 +503,7 @@
               <th class="col-note">备注</th>
               <th class="col-small">2FA</th>
               <th class="col-status">Codex</th>
-              <th class="col-time">创建时间</th>
+              <th class="col-time">注册时间</th>
               <th class="col-actions" title="仅作用于所在行账号">本行操作</th>
             </tr>
           </thead>
@@ -821,7 +828,7 @@
     <div class="outlook-import-head">
       <div class="outlook-import-head-main">
         <h3 id="accountImportTitleV2">导入已有账号</h3>
-        <p>每行一个账号，格式：邮箱---密码---2FA 密钥---AT。也兼容四个短横线分隔；导入时会通过 AT 获取最新用户名，查询失败仍保留账号并提示原因。</p>
+        <p>每行一个账号，格式：邮箱---密码---2FA 密钥（可追加 ---AT）。分隔符支持 --、---、----；不带 AT 的新账号导入后自动查活并获取 AT，带 AT 时查询最新用户名。</p>
       </div>
       <button type="button" class="outlook-import-close" id="btnCloseAccountImportV2" aria-label="关闭">×</button>
     </div>
@@ -830,7 +837,7 @@
       <div class="banner warn">密码、2FA 密钥和 AT 都是敏感信息，请确认粘贴内容来自你自己的账号。系统会按邮箱去重，已存在账号会跳过。</div>
       <label class="outlook-import-field">
         <span>账号内容</span>
-        <textarea id="accountImportTextV2" placeholder="user@example.com---ChatGPTPassword---JBSWY3DPEHPK3PXP---eyJhbGciOi...&#10;每行：邮箱---密码---2FA---AT"></textarea>
+        <textarea id="accountImportTextV2" placeholder="user@example.com---ChatGPTPassword---JBSWY3DPEHPK3PXP---eyJhbGciOi...&#10;每行：邮箱---密码---2FA（AT 可省略）"></textarea>
         <span class="outlook-import-hint">支持空行和以 # 开头的注释行；单次最多导入 5000 行。</span>
       </label>
     </div>

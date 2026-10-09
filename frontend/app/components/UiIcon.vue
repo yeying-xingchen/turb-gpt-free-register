@@ -26,6 +26,7 @@ const paths: Record<string, string> = {
   arrow: "M5 12h14 M13 6l6 6-6 6",
   alert:
     "M12 9v4 M12 17h.01 M10 3L2 18a2 2 0 0 0 2 3h16a2 2 0 0 0 2-3L14 3a2 2 0 0 0-4 0",
+  info: "M12 10v7 M12 7h.01 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0",
   shield: "M12 2l9 4v6c0 5-9 10-9 10S3 17 3 12V6z M8 12l3 3 5-6",
   more: "M5 12h.01 M12 12h.01 M19 12h.01",
 };

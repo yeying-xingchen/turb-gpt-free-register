@@ -40,6 +40,7 @@ from core.account_export import (
     fetch_session,
     setup_2fa,
     save_account_data,
+    registration_timestamp,
     create_batch_archive_dir,
 )
 from core.email_provider import acquire_email, wait_for_otp
@@ -500,6 +501,7 @@ def run_registration(
 
             # 步骤13: 拉 /api/auth/session 提取 accessToken
             session_info, access_token = _finalize_registration_session(session, continue_url, email)
+            registered_at = registration_timestamp()
             if getattr(_protocol_cfg, "CHATGPT_AUTH_BOOTSTRAP_ENABLED", True):
                 from core.chatgpt_bootstrap import authenticated_bootstrap
                 authenticated_bootstrap(
@@ -560,6 +562,7 @@ def run_registration(
             email_source=resolve_email_source(email),
             proxy_used=session.proxy or None,
             batch_dir=batch_dir,
+            registered_at=registered_at,
             extra={
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),

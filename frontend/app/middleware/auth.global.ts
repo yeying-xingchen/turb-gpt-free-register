@@ -1,5 +1,5 @@
 export default defineNuxtRouteMiddleware(async (to) => {
-  if (["/login", "/redeem"].includes(to.path)) return;
+  if (["/login", "/redeem", "/upload"].includes(to.path.replace(/\/$/, ""))) return;
   const authenticated = useState<boolean>("authenticated", () => false);
   if (authenticated.value) return;
   try {

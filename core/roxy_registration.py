@@ -12,7 +12,7 @@ from typing import Callable
 
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data, post_register_dwell
+from core.account_export import save_account_data, post_register_dwell, registration_timestamp
 from core.browser_data_saver import BrowserDataSaver
 from core.browser_traffic import SeleniumTrafficTracker
 from core.roxy_asset_cache import RoxyLocalAssetCache
@@ -566,7 +566,6 @@ def _click_email_entry_option(driver) -> bool:
       .map(el => ({el, attrs: attrText(el), hasLogo: !!el.querySelector('img,svg,use')}))
       .filter(x => good.test(x.attrs) && !bad.test(x.attrs) && !x.hasLogo);
     if (candidates.length !== 1) return null;
-    candidates[0].el.scrollIntoView({block:'center'});
     return candidates[0].el;
     """)
     if target:
@@ -674,7 +673,6 @@ def _submit_nearest_form_for_active_input(driver) -> bool:
       return {ok:false, reason:'ambiguous_submit', buttons: safe.slice(0,3).map(x => ({idx:x.idx, distance:x.distance, score:x.score, primary:x.isPrimarySubmit, attrs:x.attrs.slice(0,160), type:x.type}))};
     }
     const target = safe[0].el;
-    target.scrollIntoView({block:'center'});
     window.__roxy_email_submit_debug = {at: Date.now(), targetAttrs: safe[0].attrs.slice(0,240), buttonCount: rawButtons.length, primary:safe[0].isPrimarySubmit};
     return {ok:true, reason:safe[0].isPrimarySubmit ? 'primary_submit' : 'safe_submit', target, targetAttrs:safe[0].attrs.slice(0,160), primary:safe[0].isPrimarySubmit};
     """) or {}
@@ -1767,7 +1765,6 @@ def _click_passwordless_signup_if_present(driver) -> dict:
         };
         const btn = candidates.find(isPasswordlessOtp);
         if (!btn) return {ok:false, reason:'missing_passwordless_button'};
-        btn.scrollIntoView({block:'center'});
         return {
           ok:true,
           reason:'passwordless_send_otp_target',
@@ -1814,7 +1811,6 @@ def _click_continue_with_password_if_present(driver) -> dict:
         };
         const btn = candidates.find(isPasswordCreate);
         if (!btn) return {ok:false, reason:'missing_continue_with_password'};
-        btn.scrollIntoView({block:'center'});
         return {
           ok:true,
           reason:'continue_with_password_target',
@@ -1920,7 +1916,6 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
           .filter(x => x.below)
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
-        buttons[0].el.scrollIntoView({block:'center'});
         return {ok:true, reason:'password_targets', input, button: buttons[0].el};
         """) or {}
         if not result.get('ok'):
@@ -1963,7 +1958,6 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         }).sort((a,b) => b.score - a.score || a.idx - b.idx);
         const target = scored[0]?.el;
         if (!target) return {ok:false, reason:'missing_enabled_submit'};
-        target.scrollIntoView({block:'center'});
         return {
           ok:true,
           reason:'enabled_submit_target',
@@ -2498,6 +2492,7 @@ def run_roxy_registration(
         session_info = _fetch_chatgpt_session(driver, timeout=120)
         _traffic_checkpoint()
         access_token = session_info["accessToken"]
+        registered_at = registration_timestamp()
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
         # 已拿到 accessToken 后不再需要 ChatGPT 应用壳；Codex 复用当前窗口时保留完整页面。
@@ -2567,6 +2562,7 @@ def run_roxy_registration(
             email_source=resolve_email_source(email),
             proxy_used=((opened.raw or {}).get("proxy_pool_target") if opened else None) or proxy or None,
             batch_dir=batch_dir,
+            registered_at=registered_at,
             extra={
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),

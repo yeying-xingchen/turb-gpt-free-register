@@ -2081,7 +2081,7 @@ function renderAccounts() {
       <td class="col-note" data-label="备注" title="${esc(r.note || '')}">${r.note ? esc(short(r.note, 80)) : '<span class="acc-v2-muted">-</span>'}</td>
       <td class="col-small" data-label="2FA">${_totpCellV2(r)}</td>
       <td class="col-status" data-label="Codex">${_codexCellV2(r)}</td>
-      <td class="col-time" data-label="创建时间" title="${esc(r.created_at || '-')}">${esc(r.created_at || '-')}</td>
+      <td class="col-time" data-label="注册时间" title="${esc(r.registered_at || r.created_at || '-')}">${esc(r.registered_at || r.created_at || '-')}</td>
       <td class="col-actions" data-label="本行操作">
         <div class="acc-v2-actions">
           <button type="button" class="danger" data-account-delete="${esc(r.id)}" data-email="${esc(r.email)}" title="仅删除本行账号">删除</button>
@@ -4278,7 +4278,7 @@ async function doImportExistingAccounts() {
   const text = textEl ? textEl.value : '';
   if (!text.trim()) { showToast('请粘贴已有账号内容'); return; }
   if (submitBtn) submitBtn.disabled = true;
-  if (resultEl) resultEl.innerHTML = '<div class="banner info">正在导入并通过 AT 获取用户名，请稍候…</div>';
+  if (resultEl) resultEl.innerHTML = '<div class="banner info">正在导入，缺少 AT 的新账号将自动查活，请稍候…</div>';
   try {
     const r = await api('/api/accounts/import', {
       method: 'POST',
@@ -4286,9 +4286,9 @@ async function doImportExistingAccounts() {
       body: JSON.stringify({text}),
     });
     const details = r.details || [];
-    const nameWarnings = r.user_name_warnings || [];
-    const msg = `导入完成：解析 ${r.parsed || 0} 行，新增 ${r.inserted || 0} 个，跳过 ${r.skipped || 0} 个；已获取用户名 ${r.user_names_fetched || 0} 个${nameWarnings.length ? `，用户名获取失败 ${nameWarnings.length} 个` : ''}`;
-    if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>${renderAccountImportDetails(details)}${renderAccountImportDetails(nameWarnings, '条用户名获取失败信息未展开。')}`;
+    const nameWarnings = [...(r.user_name_warnings || []), ...(r.live_check_warnings || [])];
+    const msg = `导入完成：解析 ${r.parsed || 0} 行，新增 ${r.inserted || 0} 个，跳过 ${r.skipped || 0} 个；自动查活已入队 ${r.live_checks_queued || 0} 个；已获取用户名 ${r.user_names_fetched || 0} 个${nameWarnings.length ? `，提示 ${nameWarnings.length} 条` : ''}`;
+    if (resultEl) resultEl.innerHTML = `<div class="banner info">${esc(msg)}</div>${renderAccountImportDetails(details)}${renderAccountImportDetails(nameWarnings, '条提示未展开。')}`;
     if (textEl) textEl.value = '';
     clearAccountSelection();
     PAGERS.accounts.page = 1;

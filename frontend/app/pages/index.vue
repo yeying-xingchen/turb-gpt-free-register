@@ -12,12 +12,16 @@ import type {
 useHead({ title: "注册与概览" });
 const { request } = useApi();
 const toast = useToast();
-const jobs = ref<OperationRow[]>([]);
+const jobs = shallowRef<OperationRow[]>([]);
 const summary = ref<OperationRow>({});
 const counts = ref<OperationRow>({});
 const config = ref<OperationRow>({});
 const configError = ref("");
+const configLoaded = ref(false);
+const configLoading = ref(false);
 const summaryError = ref("");
+const summaryLoading = ref(false);
+const submitError = ref("");
 const error = ref("");
 const loading = ref(true);
 const busy = ref(false);
@@ -43,15 +47,23 @@ const otpOpen = computed({
   },
 });
 const manual = computed(() => config.value.USE_EMAIL_SERVICE === false);
-const validForm = computed(
-  () =>
-    Number.isInteger(count.value) &&
-    count.value >= 1 &&
-    count.value <= (manual.value ? 1 : 200) &&
-    Number.isInteger(workers.value) &&
-    workers.value >= 1 &&
-    workers.value <= 16,
+const validWorkers = computed(
+  () => Number.isInteger(workers.value) && workers.value >= 1 && workers.value <= 16,
 );
+function registrationIssue(quantity: number, concurrency: number) {
+  if (configLoading.value) return "正在读取注册配置，请稍候";
+  if (!configLoaded.value || configError.value)
+    return "注册配置未加载，请先重试加载当前配置";
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > (manual.value ? 1 : 200))
+    return manual.value ? "手动验证码模式每次只能提交 1 个任务" : "注册数量需为 1–200 的整数";
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
+    return "并发线程需为 1–16 的整数";
+  if (manual.value && !String(config.value.REGISTER_EMAIL || "").trim())
+    return "请先到配置设置填写手动注册邮箱";
+  return "";
+}
+const formIssue = computed(() => registrationIssue(count.value, workers.value));
+const validForm = computed(() => !formIssue.value);
 function bytes(value: unknown) {
   const count = Math.max(0, Number(value) || 0);
   return count < 1024
@@ -72,13 +84,29 @@ const selectedJobs = computed(() =>
   jobs.value.filter((job) => selected.value.includes(job.id)),
 );
 let jobRevision = 0;
+let disposed = false;
+let jobController: AbortController | undefined;
+let summaryController: AbortController | undefined;
+let configController: AbortController | undefined;
+function cancelRefresh() {
+  jobRevision++;
+  jobController?.abort();
+  summaryController?.abort();
+  loading.value = false;
+  summaryLoading.value = false;
+}
 async function loadJobs() {
+  if (disposed) return;
   const revision = ++jobRevision;
+  jobController?.abort();
+  const controller = new AbortController();
+  jobController = controller;
   loading.value = true;
   try {
     const result = checkResult(
       await request("/api/jobs", {
         query: { paged: 1, page: page.value, page_size: pageSize.value },
+        signal: controller.signal,
       }),
     );
     if (revision !== jobRevision) return;
@@ -99,16 +127,32 @@ async function loadJobs() {
   }
 }
 async function loadSummary() {
+  if (disposed) return;
+  summaryController?.abort();
+  const controller = new AbortController();
+  summaryController = controller;
+  summaryLoading.value = true;
   try {
-    summary.value = checkResult(await request("/api/summary"));
+    const result = checkResult(await request("/api/summary", { signal: controller.signal }));
+    if (controller.signal.aborted) return;
+    summary.value = result;
     summaryError.value = "";
   } catch (cause) {
-    summaryError.value = errorMessage(cause);
+    if (!controller.signal.aborted) summaryError.value = errorMessage(cause);
+  } finally {
+    if (summaryController === controller) summaryLoading.value = false;
   }
 }
 async function loadConfig() {
+  if (disposed || configLoading.value) return;
+  const controller = new AbortController();
+  configController = controller;
+  configLoading.value = true;
   try {
-    const fields = await request<OperationRow[]>("/api/config");
+    const fields = await request<OperationRow[]>("/api/config", { signal: controller.signal });
+    if (controller.signal.aborted) return;
+    if (!Array.isArray(fields) || !fields.some((field) => field.key === "USE_EMAIL_SERVICE" && typeof field.value === "boolean"))
+      throw new Error("注册配置响应不完整，请重新加载");
     const allowed = [
       "EMAIL_SOURCE",
       "USE_EMAIL_SERVICE",
@@ -131,20 +175,28 @@ async function loadConfig() {
         ]),
     );
     configError.value = "";
-    if (manual.value) count.value = 1;
+    configLoaded.value = true;
   } catch (cause) {
-    configError.value = errorMessage(cause);
+    if (!controller.signal.aborted) configError.value = errorMessage(cause);
+  } finally {
+    configLoading.value = false;
   }
 }
 async function refresh() {
   await Promise.allSettled([loadJobs(), loadSummary()]);
 }
 usePolling(() => {
-  if (auto.value && !busy.value) return refresh();
+  if (auto.value && !busy.value && !loading.value && !summaryLoading.value)
+    return refresh();
 });
-onMounted(loadConfig);
+onMounted(() => {
+  void loadConfig();
+  void refresh();
+});
 onBeforeUnmount(() => {
-  jobRevision++;
+  disposed = true;
+  cancelRefresh();
+  configController?.abort();
 });
 watch(page, () => {
   selected.value = [];
@@ -154,6 +206,9 @@ watch(pageSize, () => {
   selected.value = [];
   if (page.value !== 1) page.value = 1;
   else void loadJobs();
+});
+watch([count, workers, config], () => {
+  submitError.value = "";
 });
 function toggleAll() {
   selected.value = allSelected.value
@@ -172,6 +227,7 @@ function openOtp(job: OperationRow) {
 async function perform(path: string, body: OperationRow, message: string) {
   if (busy.value) return;
   busy.value = true;
+  cancelRefresh();
   try {
     const result = checkResult(await request(path, { method: "POST", body }));
     toast.success(resultMessage(result, message));
@@ -183,6 +239,8 @@ async function perform(path: string, body: OperationRow, message: string) {
   }
 }
 function jobAction(job: OperationRow, action: string) {
+  if (busy.value || confirmation.value || (action === "retry" && !validWorkers.value)) return;
+  const concurrency = workers.value;
   const labels: Record<string, string> = {
     pause: "暂停",
     resume: "恢复",
@@ -195,7 +253,7 @@ function jobAction(job: OperationRow, action: string) {
   const run = () =>
     perform(
       `/api/jobs/${job.id}/${action}`,
-      action === "retry" ? { workers: workers.value } : {},
+      action === "retry" ? { workers: concurrency } : {},
       `已${label}`,
     );
   if (["pause", "resume"].includes(action)) {
@@ -218,6 +276,8 @@ function jobAction(job: OperationRow, action: string) {
   };
 }
 function bulkAction(action: "retry" | "delete") {
+  if (busy.value || confirmation.value || (action === "retry" && !validWorkers.value)) return;
+  const concurrency = workers.value;
   const ids = selectedJobs.value
     .filter((job) => (action === "retry" ? job.retryable : deletable(job)))
     .map((job) => job.id);
@@ -234,13 +294,14 @@ function bulkAction(action: "retry" | "delete") {
         `/api/jobs/${action}-bulk`,
         {
           job_ids: ids,
-          ...(action === "retry" ? { workers: workers.value } : {}),
+          ...(action === "retry" ? { workers: concurrency } : {}),
         },
         action === "retry" ? "已提交重试" : "已删除",
       ),
   };
 }
 function cancelPending() {
+  if (busy.value || confirmation.value) return;
   confirmation.value = {
     title: "取消全部排队注册任务",
     description: `将取消 ${counts.value.pending || 0} 个排队注册任务，包含排队的 Codex 补跑任务。`,
@@ -248,23 +309,35 @@ function cancelPending() {
   };
 }
 async function createJobs() {
-  if (!validForm.value || busy.value) return;
+  if (busy.value || confirmation.value) return;
+  if (!validForm.value) {
+    submitError.value = formIssue.value;
+    return;
+  }
+  const payload = { count: count.value, workers: workers.value };
   const run = async () => {
-    const result = await perform(
-      "/api/jobs",
-      { count: count.value, workers: workers.value },
-      "注册任务已提交",
-    );
-    if (result)
-      notice.value =
-        result.warning ||
-        `已提交 ${result.submitted} 个任务，本次并发 ${result.workers}。`;
-    if (page.value !== 1) page.value = 1;
+    if (busy.value) return;
+    submitError.value = "";
+    notice.value = "";
+    try {
+      const issue = registrationIssue(payload.count, payload.workers);
+      if (issue) throw new Error(issue);
+      const result = await perform("/api/jobs", payload, "注册任务已提交");
+      if (!result) return;
+      notice.value = [
+        `已提交 ${result.submitted} 个任务，本次并发 ${result.workers}。`,
+        result.warning,
+      ].filter(Boolean).join(" ");
+      if (page.value !== 1) page.value = 1;
+    } catch (cause) {
+      submitError.value = errorMessage(cause);
+      throw cause;
+    }
   };
   if (counts.value.active > 0)
     confirmation.value = {
       title: "继续添加注册任务",
-      description: `已有 ${counts.value.active} 个任务执行或排队。本次将再添加 ${count.value} 个任务。`,
+      description: `已有 ${counts.value.active} 个任务执行或排队。本次将再添加 ${payload.count} 个任务，并发 ${payload.workers}。`,
       label: "添加任务",
       run,
     };
@@ -317,7 +390,7 @@ async function submitOtp() {
     </header>
     <div v-if="summaryError" class="alert alert-error" role="alert">
       概览加载失败：{{ summaryError }}
-      <button class="btn btn-sm" @click="loadSummary">重试</button>
+      <button class="btn btn-sm" :disabled="busy || summaryLoading" @click="loadSummary">重试</button>
     </div>
     <section class="stat-grid" aria-label="工作区统计">
       <div class="stat-card">
@@ -367,7 +440,7 @@ async function submitOtp() {
                 :max="manual ? 1 : 200"
                 step="1"
                 required
-                :disabled="busy"
+                :disabled="busy || !!confirmation || !configLoaded || configLoading"
               /><small class="muted">{{
                 manual ? "手动验证码模式每次 1 个" : "单次 1–200 个账号"
               }}</small></label
@@ -381,7 +454,7 @@ async function submitOtp() {
                 max="16"
                 step="1"
                 required
-                :disabled="busy"
+                :disabled="busy || !!confirmation || !configLoaded || configLoading"
               /><small class="muted">1–16 个线程同时处理</small></label
             >
           </div>
@@ -389,11 +462,13 @@ async function submitOtp() {
             当前使用手动验证码，任务开始后请通过「验证码」按钮提交邮箱收到的 6
             位验证码。
           </div>
+          <div v-if="formIssue" class="alert" role="status">{{ formIssue }}</div>
+          <div v-if="submitError" class="alert alert-error" role="alert">{{ submitError }}</div>
           <div v-if="notice" class="alert" role="status">{{ notice }}</div>
           <button
             class="btn btn-primary start-button"
             type="submit"
-            :disabled="busy || !validForm"
+            :disabled="busy || !!confirmation || !validForm"
           >
             {{ busy ? "正在处理…" : "开始注册" }}
             <span aria-hidden="true">→</span>
@@ -408,7 +483,7 @@ async function submitOtp() {
         <div class="card-body">
           <div v-if="configError" class="alert alert-error" role="alert">
             {{ configError }}
-            <button class="btn btn-sm" @click="loadConfig">重试</button>
+            <button class="btn btn-sm" :disabled="configLoading" @click="loadConfig">{{ configLoading ? "加载中…" : "重试" }}</button>
           </div>
           <dl v-else class="config-list">
             <div>
@@ -470,8 +545,8 @@ async function submitOtp() {
         <div class="inline">
           <label class="inline refresh-label"
             ><input v-model="auto" type="checkbox" />每 5 秒刷新</label
-          ><button class="btn btn-sm" :disabled="loading" @click="refresh">
-            {{ loading ? "刷新中…" : "刷新" }}
+          ><button class="btn btn-sm" :disabled="busy || loading || summaryLoading" @click="refresh">
+            {{ loading || summaryLoading ? "刷新中…" : "刷新" }}
           </button>
         </div>
       </div>

@@ -21,6 +21,9 @@
 * {
   box-sizing: border-box;
 }
+html {
+  scroll-behavior: smooth;
+}
 body {
   margin: 0;
 }
@@ -92,6 +95,22 @@ input[type="number"] {
 }
 ::selection {
   background: #c5ebdf;
+}
+.skip-link {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 200;
+  padding: 9px 13px;
+  border-radius: 6px;
+  background: #1a293b;
+  color: #fff;
+  font-size: 12px;
+  transform: translateY(-180%);
+  transition: transform 0.15s;
+}
+.skip-link:focus {
+  transform: translateY(0);
 }
 .app-shell {
   min-height: 100vh;
@@ -184,6 +203,28 @@ input[type="number"] {
 .sidebar-bottom {
   margin-top: auto;
   padding-top: 36px;
+}
+.update-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 14px;
+  padding: 9px 10px;
+  border: 1px solid #f0e0c0;
+  border-radius: 6px;
+  background: #fff8e9;
+  color: #b28735;
+  font-size: 11px;
+  font-weight: 600;
+}
+.update-pill:hover {
+  background: #fdf1d9;
+}
+.update-pill small {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.85;
 }
 .frontend-switcher {
   margin: 0 0 20px;
@@ -366,7 +407,13 @@ input[type="number"] {
   white-space: nowrap;
   transition:
     background 0.15s,
-    border-color 0.15s;
+    border-color 0.15s,
+    color 0.15s,
+    box-shadow 0.15s,
+    transform 0.08s;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 .btn:hover:not(:disabled) {
   background: #f7f9fa;
@@ -399,11 +446,14 @@ input[type="number"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
   padding: 6px;
   border: 0;
   background: transparent;
   color: #84909f;
   border-radius: 5px;
+  transition: background 0.15s, color 0.15s;
 }
 .icon-btn:hover {
   background: #edf3f4;
@@ -594,6 +644,10 @@ input[type="number"] {
   max-width: 350px;
   overflow-wrap: anywhere;
 }
+.table-wrap[aria-busy="true"] {
+  opacity: 0.72;
+  transition: opacity 0.15s;
+}
 .badge {
   display: inline-flex;
   align-items: center;
@@ -665,6 +719,14 @@ input[type="number"] {
 }
 .pagination .muted {
   font-size: 11px;
+}
+.pagination-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  color: #98a4b0;
+  user-select: none;
 }
 .pagination-pages {
   display: flex;
@@ -784,12 +846,18 @@ input[type="number"] {
 .toast-error {
   border-left-color: var(--danger);
 }
+.toast-info {
+  border-left-color: #5885d3;
+}
 .toast > svg {
   flex-shrink: 0;
   color: var(--accent);
 }
 .toast-error > svg {
   color: var(--danger);
+}
+.toast-info > svg {
+  color: #5885d3;
 }
 .toast .icon-btn {
   margin-left: auto;

@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from config import browser_use as _cfg
 from config import twofa as _twofa_cfg
-from core.account_export import save_account_data, _post_register_dwell_seconds
+from core.account_export import save_account_data, registration_timestamp, _post_register_dwell_seconds
 from core.browser_use_client import BrowserUseClient
 from core.email_provider import acquire_email_after_input, resolve_email_source, wait_for_otp
 from core.humanize import delay as human_delay
@@ -2812,6 +2812,7 @@ def run_browser_use_registration(
             if not access_token:
                 raise RuntimeError("注册流程结束但未拿到 accessToken")
             create_acknowledged = True
+            registered_at = registration_timestamp()
             logger.info("[BrowserUse] 已拿到 accessToken：%s", email)
 
             if _twofa_cfg.ENABLE_2FA:
@@ -2865,6 +2866,7 @@ def run_browser_use_registration(
                 email_source=resolve_email_source(email),
                 proxy_used=proxy or f"{provider_prefix}:{session_info_open.proxy_country_code or 'default'}",
                 batch_dir=batch_dir,
+                registered_at=registered_at,
                 extra={
                     "user": session_info.get("user"),
                     "account": session_info.get("account"),

@@ -8,6 +8,8 @@ export interface Account {
   /** 是否已被兑换码领取（数据来自 redeem_claims）。 */
   redeemed?: boolean;
   redeemed_at?: string;
+  /** 注册流程确认拿到有效会话的时间；旧账号由后端用 created_at 兼容回填。 */
+  registered_at?: string;
   /** access_token 是否已过期/失效（后端按 token_expired、token_expires_at 或 JWT exp 判定）。 */
   at_expired?: boolean;
   [key: string]: any;

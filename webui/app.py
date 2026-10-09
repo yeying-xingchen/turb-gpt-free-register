@@ -12,6 +12,7 @@ Flask 本地控制台。
 """
 import logging
 import json
+import hmac
 import threading
 import time
 import uuid
@@ -32,6 +33,7 @@ from webui.extract_routes import register_extract_routes
 from webui.payment_provider_routes import register_payment_provider_routes
 from webui.scan_routes import register_scan_routes
 from webui.task_routes import register_task_routes
+from webui.update_routes import register_update_routes
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +126,7 @@ def _compact_account_for_list(row: dict) -> dict:
 
     # 这些是列表固定列直接展示字段。
     for key in (
-        "user_name", "email_source", "original_email", "note", "group_name", "archived", "created_at",
+        "user_name", "email_source", "original_email", "note", "group_name", "archived", "created_at", "registered_at",
         "plan_type", "current_plan_type", "plus_trial_eligible",
         "eligible_promo_campaigns", "plus_trial_discount_percentage",
         "plan_check_status", "codex_status", "codex_agent_status",
@@ -363,6 +365,8 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         "api_redeem",
         "public_redeem_download",
         "api_redeem_public_stock",
+        "public_upload_page",
+        "api_public_accounts_import",
     }
     _prepared_downloads: dict[str, dict] = {}
 
@@ -465,6 +469,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
     register_scan_routes(app)
     register_payment_provider_routes(app)
     register_task_routes(app)
+    register_update_routes(app)
     register_frontend(app)
 
     # ----------------------------------------------------------
@@ -486,6 +491,57 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
     @app.get("/redeem", endpoint="public_redeem_page")
     def public_redeem_page():
         return frontend_page()
+
+    @app.post("/api/public/accounts/import", endpoint="api_public_accounts_import")
+    def api_public_accounts_import():
+        """公开导入账号；必须提供服务端配置的 PUBLIC_UPLOAD_KEY。"""
+        from config.env_loader import env_str
+
+        configured_key = env_str("PUBLIC_UPLOAD_KEY", "")
+        supplied_key = request.headers.get("X-Upload-Key", "")
+        if not configured_key:
+            return jsonify({"ok": False, "error": "公共上传功能尚未配置 Key"}), 503
+        if not hmac.compare_digest(supplied_key.strip().encode("utf-8"), configured_key.encode("utf-8")):
+            return jsonify({"ok": False, "error": "Key 无效"}), 401
+
+        request.max_content_length = 11 * 1024 * 1024
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求内容必须是 JSON 对象"}), 400
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return jsonify({"ok": False, "error": "请先粘贴已有账号内容"}), 400
+        if len(text.encode("utf-8")) > 10 * 1024 * 1024:
+            return jsonify({"ok": False, "error": "单次导入内容不能超过 10 MiB"}), 400
+
+        records, parse_errors = parse_existing_account_text(text, max_lines=5000)
+        if not records:
+            return jsonify({
+                "ok": False,
+                "error": "未解析到有效账号行，请使用：邮箱--密码--2FA[--AT]（AT 可省略，分隔符可用 --、--- 或 ----）",
+                "parsed": 0,
+                "inserted": 0,
+                "skipped": len(parse_errors),
+                "errors": parse_errors,
+            }), 400
+
+        inserted, skipped_details, name_details = import_existing_accounts(records)
+        live_checks = _queue_import_live_checks(records, skipped_details)
+        name_warnings = [
+            {"email": item["email"], "reason": "账号已导入，用户名获取失败：" + item["error"]}
+            for item in name_details if not item["ok"]
+        ]
+        return jsonify({
+            "ok": True,
+            "parsed": len(records),
+            "inserted": inserted,
+            "skipped": len(parse_errors) + len(skipped_details),
+            "errors": parse_errors,
+            "skipped_details": skipped_details,
+            "user_names_fetched": sum(1 for item in name_details if item["ok"]),
+            "user_name_warnings": name_warnings,
+            **live_checks,
+        })
 
     @app.post("/api/redeem", endpoint="api_redeem")
     def api_redeem():
@@ -930,9 +986,31 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         return jsonify(snapshot)
 
 
+    def _queue_import_live_checks(records, skipped_details):
+        skipped = {str(item.get("email") or "").strip().casefold() for item in skipped_details}
+        queued = 0
+        warnings = []
+        for record in records:
+            email = record["email"]
+            if record.get("access_token") or email.casefold() in skipped:
+                continue
+            try:
+                account = db.get_account_by_email(email)
+                result = live_check_service.enqueue_account_live_check(
+                    account_id=account["id"], email=email, trigger="import",
+                ) if account else {}
+                if result.get("accepted"):
+                    queued += 1
+                    continue
+                reason = "查活队列已满，请稍后手动查活" if result.get("queue_full") else "自动查活未入队，请在账号列表手动查活"
+            except Exception:
+                reason = "自动查活入队失败，请在账号列表手动查活"
+            warnings.append({"email": email, "reason": "账号已导入，" + reason})
+        return {"live_checks_queued": queued, "live_check_warnings": warnings}
+
     @app.post("/api/accounts/import")
     def api_accounts_import():
-        """导入已有账号：邮箱--密码--2FA--AT（分隔符可用 --、--- 或 ----），每行一个账号。"""
+        """导入已有账号：邮箱--密码--2FA[--AT]（AT 可省略，分隔符可用 --、--- 或 ----），每行一个账号。"""
         data = request.get_json(silent=True) or {}
         text = data.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -944,7 +1022,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         if not records:
             return jsonify({
                 "ok": False,
-                "error": "未解析到有效账号行，请使用：邮箱--密码--2FA--AT（分隔符可用 --、--- 或 ----）",
+                "error": "未解析到有效账号行，请使用：邮箱--密码--2FA[--AT]（AT 可省略，分隔符可用 --、--- 或 ----）",
                 "parsed": 0,
                 "inserted": 0,
                 "skipped": len(parse_errors),
@@ -952,6 +1030,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             }), 400
 
         inserted, skipped_details, name_details = import_existing_accounts(records)
+        live_checks = _queue_import_live_checks(records, skipped_details)
         details = parse_errors + skipped_details
         name_warnings = [
             {"email": item["email"], "reason": "账号已导入，用户名获取失败：" + item["error"]}
@@ -967,6 +1046,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             "details": details,
             "user_names_fetched": sum(1 for item in name_details if item["ok"]),
             "user_name_warnings": name_warnings,
+            **live_checks,
         })
 
     @app.get("/api/accounts/<int:acc_id>/secret")
@@ -3697,6 +3777,9 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             # 并发数改动要立刻作用到正在排队/运行的批次，而不是等下次提交。
             from webui.task_routes import _apply_runtime_settings
             _apply_runtime_settings()
+            # 更新检查的开关/间隔改动要立刻重新排期，而不是等下次进程重启。
+            from core import update_checker
+            update_checker.notify_config_changed()
         except Exception as exc:
             reload_ok = False
             reload_err = f"{type(exc).__name__}: {exc}"

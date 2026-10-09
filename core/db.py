@@ -188,6 +188,9 @@ _ACCOUNT_FILTER_INDEXES: tuple[tuple[str, str], ...] = (
     ("idx_accounts_archived_totp", "(archived, totp_flag, id DESC, updated_at)"),
     ("idx_accounts_archived_group", "(archived, group_key, id DESC, updated_at)"),
     ("idx_accounts_archived_at", "(archived, at_state_exp, id DESC, updated_at)"),
+    # 注册成功时间独立于 created_at：后者是本地账号行首次落库时间，可能晚于
+    # 远端注册完成（例如注册后还要跑 2FA/Codex）。
+    ("idx_accounts_archived_registered", "(archived, registered_at, updated_at)"),
     # 按入库时间筛选：equality(archived) + range(created_at) + 覆盖 updated_at，
     # 否则 COUNT/MAX 要为每一行回表取 payload/updated_at（5 万行约 85ms）。
     ("idx_accounts_archived_created", "(archived, created_at, updated_at)"),
@@ -433,6 +436,39 @@ def _ensure_query_indexes(conn: sqlite3.Connection) -> None:
             conn.execute(f"ANALYZE {table}")
 
 
+def _ensure_account_registration_schema(conn: sqlite3.Connection) -> None:
+    """为账号补齐注册完成时间，并兼容已有数据库/旧 payload。
+
+    旧版本只有 ``created_at``，它表示账号首次写入本地存储的时间。历史记录
+    没有可恢复的远端注册时间，因此用 ``created_at`` 作为一次性兼容回填；新
+    注册流程会在拿到有效登录会话后显式写入 ``registered_at``。
+    """
+    columns = {str(row[1]).lower() for row in conn.execute("PRAGMA table_info(accounts)")}
+    if "registered_at" not in columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN registered_at TEXT NOT NULL DEFAULT ''")
+
+    # 先读取旧 payload 中可能已经存在的字段，再退回表级 created_at。
+    conn.execute(
+        """UPDATE accounts
+           SET registered_at = COALESCE(
+               NULLIF(trim(registered_at), ''),
+               CASE WHEN json_valid(payload)
+                    THEN NULLIF(trim(CAST(json_extract(payload, '$.registered_at') AS TEXT)), '')
+                    ELSE NULL END,
+               NULLIF(trim(created_at), ''),
+               ''
+           )
+         WHERE trim(COALESCE(registered_at, '')) = ''"""
+    )
+    # 让从 payload 读取的旧/外部账号也能在后续保存时保留该字段。
+    conn.execute(
+        """UPDATE accounts
+           SET payload = json_set(payload, '$.registered_at', registered_at)
+         WHERE registered_at <> '' AND json_valid(payload)
+           AND COALESCE(CAST(json_extract(payload, '$.registered_at') AS TEXT), '') <> registered_at"""
+    )
+
+
 def _repair_email_pool_sources(conn: sqlite3.Connection) -> None:
     """一次性修复历史 email_pool 行的空 source（三条 UPDATE 都要全表扫描）。
 
@@ -642,6 +678,7 @@ def _ensure_sqlite() -> None:
                 status TEXT NOT NULL DEFAULT '',
                 archived INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT '',
+                registered_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT '',
                 payload TEXT NOT NULL,
                 PRIMARY KEY (id)
@@ -741,6 +778,7 @@ def _ensure_sqlite() -> None:
                 UNIQUE(provider_id, cdk)
             );
         """)
+        _ensure_account_registration_schema(conn)
         for table in {"accounts", "email_pool", "registration_jobs"}:
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_status ON {table}(status, id DESC)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_archived ON {table}(archived, id DESC)")
@@ -829,15 +867,30 @@ def _ensure_sqlite() -> None:
                     if table == "email_pool":
                         next_email_id += 1
                     row["id"] = rid
+                    if table == "accounts":
+                        row["registered_at"] = str(row.get("registered_at") or row.get("created_at") or "")
                     conn.execute(
-                        f"INSERT OR REPLACE INTO {table}(id,email,source,status,archived,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?,?)" if table == "email_pool" else
-                        f"INSERT OR REPLACE INTO {table}(id,email,status,archived,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?)",
-                        ((rid, str(row.get("email") or ""), _EMAIL_SOURCES[collection], str(row.get("status") or ""),
-                          int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
-                          str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False)) if table == "email_pool" else
-                         (rid, str(row.get("email") or ""), str(row.get("status") or ""),
-                          int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
-                          str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False))),
+                        (
+                            f"INSERT OR REPLACE INTO {table}(id,email,source,status,archived,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?,?)"
+                            if table == "email_pool" else
+                            f"INSERT OR REPLACE INTO {table}(id,email,status,archived,created_at,registered_at,updated_at,payload) VALUES(?,?,?,?,?,?,?,?)"
+                            if table == "accounts" else
+                            f"INSERT OR REPLACE INTO {table}(id,email,status,archived,created_at,updated_at,payload) VALUES(?,?,?,?,?,?,?)"
+                        ),
+                        (
+                            (rid, str(row.get("email") or ""), _EMAIL_SOURCES[collection], str(row.get("status") or ""),
+                             int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
+                             str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False))
+                            if table == "email_pool" else
+                            (rid, str(row.get("email") or ""), str(row.get("status") or ""),
+                             int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
+                             str(row.get("registered_at") or ""), str(row.get("updated_at") or ""),
+                             json.dumps(row, ensure_ascii=False))
+                            if table == "accounts" else
+                            (rid, str(row.get("email") or ""), str(row.get("status") or ""),
+                             int(bool(row.get("archived"))), str(row.get("created_at") or row.get("imported_at") or ""),
+                             str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False))
+                        ),
                     )
         # 兼容早期 SQLite 版本的保存逻辑：旧版本写入 email_pool 时漏掉了 source 列，
         # 导致通用 API 邮箱在“全部邮箱池”里没有类型、按来源筛选也查不到。
@@ -933,6 +986,7 @@ def _save_collection(collection: str, rows: list[dict]) -> None:
                 row = dict(raw)
                 row["id"] = int(row.get("id") or pos)
                 row["group_name"] = _account_group_name(row)
+                row["registered_at"] = _account_registered_at(row)
                 row["copy_line"] = _account_line(row)
                 retained.add(row["id"])
                 previous = existing.get(row["id"])
@@ -1019,6 +1073,7 @@ def _write_collection_row(conn: sqlite3.Connection, collection: str, row: dict, 
     row["id"] = int(row["id"])
     if collection == "accounts":
         row["group_name"] = _account_group_name(row)
+        row["registered_at"] = _account_registered_at(row)
         row["copy_line"] = _account_line(row)
     elif collection == "generic_api":
         row["code_url"] = _normalize_generic_api_code_url(row.get("code_url"))
@@ -1030,6 +1085,9 @@ def _write_collection_row(conn: sqlite3.Connection, collection: str, row: dict, 
               int(bool(row.get("archived"))),
               str(row.get("created_at") or (row.get("imported_at") if table == "email_pool" else "") or ""),
               str(row.get("updated_at") or ""), json.dumps(row, ensure_ascii=False)]
+    if collection == "accounts":
+        columns.insert(4, "registered_at")
+        values.insert(4, str(row.get("registered_at") or ""))
     if table == "email_pool":
         columns.append("source")
         values.append(_EMAIL_SOURCES[collection])
@@ -1070,10 +1128,12 @@ def _collection_where(collection: str, *, status: str | None = None, archived: s
         where.append("payload LIKE ?"); params.append("%" + str(q).strip().lower() + "%")
     if date_from:
         value = str(date_from)
-        where.append("created_at >= ?"); params.append(value + ("T00:00:00" if len(value) == 10 else ""))
+        date_column = "registered_at" if collection == "accounts" else "created_at"
+        where.append(f"{date_column} >= ?"); params.append(value + ("T00:00:00" if len(value) == 10 else ""))
     if date_to:
         value = str(date_to)
-        where.append("created_at <= ?"); params.append(value + ("T23:59:59.999999" if len(value) == 10 else ""))
+        date_column = "registered_at" if collection == "accounts" else "created_at"
+        where.append(f"{date_column} <= ?"); params.append(value + ("T23:59:59.999999" if len(value) == 10 else ""))
     if extra_where:
         where.extend(extra_where)
         params.extend(extra_params or [])
@@ -1722,6 +1782,11 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
+def _account_registered_at(row: dict) -> str:
+    """返回账号注册时间；旧记录退回本地首次落库时间。"""
+    return str(row.get("registered_at") or row.get("created_at") or "").strip()
+
+
 def _account_group_name(row: dict) -> str:
     value = str(row.get("group_name") or "").strip()
     return value or DEFAULT_ACCOUNT_GROUP
@@ -1779,6 +1844,7 @@ def _decorate_account(row: dict) -> dict:
     out = dict(row)
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
+    out["registered_at"] = _account_registered_at(out)
     out["group_name"] = _account_group_name(out)
     _apply_plan_check_staleness(out)
     _apply_quota_check_staleness(out)
@@ -2464,6 +2530,7 @@ def insert_account(
     device_id: str | None = None,
     proxy_used: str | None = None,
     email_source: str | None = None,
+    registered_at: str | None = None,
     extra: dict | None = None,
     codex_status: str | None = None,   # success / failed / skipped / missing
     codex_error: str | None = None,    # 失败原因（仅 codex_status=failed 时有意义）
@@ -2475,13 +2542,16 @@ def insert_account(
         existing = _find_by_email(accounts, email)
         outlook_row = _find_by_email(outlook_rows, email)
         extra_json = json.dumps(extra, ensure_ascii=False) if extra else None
+        requested_registered_at = str(registered_at or "").strip()
 
         if existing is None:
             row_id = _next_id(accounts)
+            created_at = _now()
             row = {
                 "id": row_id,
                 "email": email,
-                "created_at": _now(),
+                "created_at": created_at,
+                "registered_at": requested_registered_at or created_at,
                 "group_name": DEFAULT_ACCOUNT_GROUP,
             }
             accounts.append(row)
@@ -2489,6 +2559,14 @@ def insert_account(
             row = existing
             row_id = int(row["id"])
             row.setdefault("group_name", DEFAULT_ACCOUNT_GROUP)
+            # 已有账号的注册时间不可因刷新 Token/补跑 Codex 被覆盖；老记录缺少
+            # 新字段时优先沿用 created_at，只有两者都没有才使用当前时间兜底。
+            if not str(row.get("registered_at") or "").strip():
+                row["registered_at"] = (
+                    requested_registered_at
+                    or str(row.get("created_at") or "").strip()
+                    or _now()
+                )
 
         row.update({
             "access_token": access_token,
@@ -3381,16 +3459,23 @@ def _filtered_decorated_accounts(
             r for r in decorated
             if (int(r.get("id") or 0) in claims) is redeemed_filter
         ]
-    # 按创建时间筛选（date_from/date_to 为 ISO 字符串或 YYYY-MM-DD）
+    # 按注册完成时间筛选（date_from/date_to 为 ISO 字符串或 YYYY-MM-DD）。
     if date_from or date_to:
         d_from = _parse_iso_dt(date_from)
         d_to = _parse_iso_dt(date_to, end_of_day=True)
+        # date_from/date_to 是本地日期；外部导入的带时区值先转换到本地再比较。
+        if d_from is not None and d_from.tzinfo is not None:
+            d_from = d_from.astimezone().replace(tzinfo=None)
+        if d_to is not None and d_to.tzinfo is not None:
+            d_to = d_to.astimezone().replace(tzinfo=None)
         if d_from or d_to:
             filtered = []
             for r in decorated:
-                ct = _parse_iso_dt(str(r.get("created_at") or ""))
+                ct = _parse_iso_dt(str(_account_registered_at(r) or ""))
                 if ct is None:
                     continue
+                if ct.tzinfo is not None:
+                    ct = ct.astimezone().replace(tzinfo=None)
                 if d_from and ct < d_from:
                     continue
                 if d_to and ct > d_to:
@@ -4525,8 +4610,8 @@ def import_existing_accounts(records: list[dict]) -> tuple[int, list[dict]]:
             email_key = email.casefold()
             public_item = {"email": email} if email else {}
 
-            if not email or not password or not totp_secret or not access_token:
-                skipped.append({**public_item, "reason": "邮箱、密码、2FA 和 AT 都不能为空"})
+            if not email or not password or not totp_secret:
+                skipped.append({**public_item, "reason": "邮箱、密码和 2FA 都不能为空"})
                 continue
             if email_key in seen_emails:
                 skipped.append({"email": email, "reason": "本次内容中邮箱重复"})

@@ -45,6 +45,11 @@ EDITABLE_FIELDS = [
         "label": "Session 签名密钥", "help": "可选，保存在 .env（WEBUI_SESSION_SECRET）；不填则从固定授权码派生，修改授权码会使已有登录失效",
         "storage": "env", "secret": True,
     },
+    {
+        "key": "PUBLIC_UPLOAD_KEY", "file": "codex.py", "type": "str", "group": "WebUI 授权",
+        "label": "公共上传 Key", "help": "公共页面 /upload 的独立上传 Key；保存后生效，留空关闭上传；不授予后台访问权限",
+        "storage": "env", "secret": True,
+    },
     # ---- 功能开关 ----
     {
         "key": "ENABLE_CODEX_AUTO", "file": "codex.py", "type": "bool", "group": "功能开关",
@@ -913,6 +918,37 @@ EDITABLE_FIELDS = [
     {
         "key": "L_PHONE_PREFIX", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "L 号码前缀", "help": "L 返回号码不含国家码时填写，例如美国 10 位本地号填 1；留空则不补",
+    },
+
+    # ---- 更新检查 ----
+    {
+        "key": "UPDATE_CHECK_ENABLED", "file": "update.py", "type": "bool", "group": "更新检查",
+        "label": "自动检查更新", "help": "WebUI 启动后按下面的间隔在后台比对 GitHub 上的最新提交，发现更新时在侧边栏和系统配置页提示；只检查，不会自动改写本地代码",
+    },
+    {
+        "key": "UPDATE_CHECK_INTERVAL_HOURS", "file": "update.py", "type": "float", "group": "更新检查",
+        "label": "检查间隔(小时)", "help": "默认 6 小时，运行时限定 0.1–720；保存后立即按新间隔重新排期",
+    },
+    {
+        "key": "UPDATE_CHECK_REMOTE", "file": "update.py", "type": "str", "group": "更新检查",
+        "label": "git 远程名", "help": "检查与一键更新使用的远程，默认 origin；改用上游仓库可填 upstream",
+    },
+    {
+        "key": "UPDATE_CHECK_BRANCH", "file": "update.py", "type": "str", "group": "更新检查",
+        "label": "更新分支", "help": "留空自动跟随当前分支（通常是 main）；填写后只与该分支比对，一键更新也要求当前分支一致",
+    },
+    {
+        "key": "UPDATE_CHECK_REPO", "file": "update.py", "type": "str", "group": "更新检查",
+        "label": "GitHub 仓库", "help": "owner/repo 或仓库链接；留空时从上面的 remote 地址自动识别。私有仓库需要填写 GitHub Token",
+    },
+    {
+        "key": "UPDATE_CHECK_GITHUB_TOKEN", "file": "update.py", "type": "str", "group": "更新检查",
+        "label": "GitHub Token", "help": "选填，保存在 .env；匿名接口每小时 60 次，配置后 5000 次/小时并可访问私有仓库",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "UPDATE_CHECK_PROXY", "file": "update.py", "type": "str", "group": "更新检查",
+        "label": "GitHub 访问代理", "help": "例如 http://127.0.0.1:7890；留空直连。仅作用于更新检查的 API 请求",
     },
 ]
 

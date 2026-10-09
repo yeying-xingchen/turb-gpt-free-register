@@ -72,8 +72,8 @@ async function submit() {
   <UiModal v-model:open="open" title="导入已有账号">
     <form id="accounts-import" class="stack" @submit.prevent="submit">
       <p class="muted">
-        每行一个账号，格式：邮箱--密码--2FA--AT；分隔符可用 --、--- 或 ----。
-        四个字段均不能为空。最多
+        每行一个账号，格式：邮箱--密码--2FA 或 邮箱--密码--2FA--AT；分隔符可用 --、--- 或 ----。
+        邮箱、密码和 2FA 必填；不带 AT 的新账号导入后自动查活，成功后补齐 AT。最多
         5000 行 / 10 MiB。
       </p>
       <label class="field"
@@ -94,7 +94,7 @@ async function submit() {
           :disabled="busy"
           spellcheck="false"
           autocomplete="off"
-          placeholder="user@example.com--password--2FA_SECRET--access_token"
+          placeholder="user@example.com--password--2FA_SECRET"
         />
       </label>
       <small class="muted"
@@ -109,6 +109,8 @@ async function submit() {
         <p v-if="result.user_names_fetched != null" class="muted">
           已获取 {{ result.user_names_fetched }} 个用户名。
         </p>
+        <p v-if="result.live_checks_queued != null" class="muted">已加入自动查活队列 {{ result.live_checks_queued }} 个，可在任务中心查看进度。</p>
+        <ul v-if="result.live_check_warnings?.length"><li v-for="item in result.live_check_warnings" :key="item.email">{{ item.email }}：{{ item.reason }}</li></ul>
         <ul v-if="accountResultDetails(result).length">
           <li
             v-for="(detail, index) in accountResultDetails(result)"

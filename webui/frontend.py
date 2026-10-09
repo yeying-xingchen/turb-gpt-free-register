@@ -5,6 +5,7 @@ from flask import Response, abort, current_app, send_from_directory
 
 _DEFAULT_DIST = Path(__file__).resolve().parents[1] / "frontend" / ".output" / "public"
 _ADMIN_PAGES = ("accounts", "tasks", "mailboxes", "codex", "redemptions", "settings", "providers")
+_PUBLIC_PAGES = ("upload",)
 
 
 def frontend_dir() -> Path:
@@ -48,3 +49,7 @@ def register_frontend(app):
 
     for page in _ADMIN_PAGES:
         app.add_url_rule(f"/{page}", endpoint=f"nuxt_{page}", view_func=frontend_page, strict_slashes=False)
+    for page in _PUBLIC_PAGES:
+        endpoint = f"public_{page}_page"
+        app.config["AUTH_PUBLIC_ENDPOINTS"].add(endpoint)
+        app.add_url_rule(f"/{page}", endpoint=endpoint, view_func=frontend_page, strict_slashes=False)

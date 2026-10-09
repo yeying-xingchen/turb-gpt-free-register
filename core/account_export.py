@@ -219,6 +219,9 @@ def post_register_dwell(
         return
     logger.info("[%s] 注册成功后随机停留 %.1fs：%s", label, seconds, email)
     time.sleep(seconds)
+    # 停留之后还有「汇总流量 → 关闭浏览器 → 账号落库」几步。这里补一条结束日志，
+    # 否则一旦后续步骤卡住，日志会停在停留那一行，看不出真正卡在哪一步。
+    logger.info("[%s] 停留结束，继续汇总流量并保存账号：%s", label, email)
 
 
 def _account_material_line(email: str, row: dict | None = None) -> str:
@@ -667,6 +670,11 @@ def setup_2fa(
     return secret
 
 
+def registration_timestamp() -> str:
+    """返回注册成功确认时刻，格式与账号时间字段保持一致。"""
+    return datetime.now().isoformat(timespec="seconds")
+
+
 def save_account_data(
     email: str,
     access_token: str,
@@ -676,6 +684,7 @@ def save_account_data(
     email_source: str | None = None,
     proxy_used: str | None = None,
     batch_dir: Path | None = None,
+    registered_at: str | None = None,
     auto_plan_check: bool | None = None,
 ) -> int:
     """
@@ -724,6 +733,7 @@ def save_account_data(
         expires_at=extra.get("expires"),
         proxy_used=proxy_used,
         email_source=email_source,
+        registered_at=registered_at,
         extra=extra,
         codex_status=codex_status,
         codex_error=codex_error,

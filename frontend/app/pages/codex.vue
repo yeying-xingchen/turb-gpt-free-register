@@ -14,7 +14,7 @@ useHead({ title: "Codex 授权" });
 const { request } = useApi();
 const toast = useToast();
 const view = ref<"accounts" | "credentials">("accounts");
-const rows = ref<OperationRow[]>([]);
+const rows = shallowRef<OperationRow[]>([]);
 const summary = ref<OperationRow>({});
 const summaryError = ref("");
 const selected = ref<string[]>([]);

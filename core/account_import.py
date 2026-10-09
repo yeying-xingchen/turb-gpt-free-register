@@ -16,7 +16,7 @@ _FIELD_SEPARATOR_RE = re.compile(r"-{2,}")
 
 
 def parse_existing_account_text(text: str, *, max_lines: int = 5000) -> tuple[list[dict], list[dict]]:
-    """解析 ``邮箱--密码--2FA--AT``，返回 (有效记录, 无效行详情)。
+    """解析 ``邮箱--密码--2FA[--AT]``，返回 (有效记录, 无效行详情)。
 
     分隔符兼容 ``--``、``---``、``----`` 三种样式；只按前三个分隔符切分，
     因此 AT 中的普通短横线不会影响解析。错误详情只返回行号和原因，避免把
@@ -36,16 +36,17 @@ def parse_existing_account_text(text: str, *, max_lines: int = 5000) -> tuple[li
             break
 
         parts = [part.strip() for part in _FIELD_SEPARATOR_RE.split(line, maxsplit=3)]
-        if len(parts) != 4:
+        if len(parts) not in (3, 4):
             errors.append({
                 "line": line_number,
-                "reason": "格式错误，需要邮箱、密码、2FA、AT 四段（分隔符可用 --、--- 或 ----）",
+                "reason": "格式错误，需要邮箱、密码、2FA，可选 AT（分隔符可用 --、--- 或 ----）",
             })
             continue
 
-        email, password, totp_secret, access_token = parts
-        if not email or not password or not totp_secret or not access_token:
-            errors.append({"line": line_number, "reason": "邮箱、密码、2FA 和 AT 都不能为空"})
+        email, password, totp_secret = parts[:3]
+        access_token = parts[3] if len(parts) == 4 else ""
+        if not email or not password or not totp_secret:
+            errors.append({"line": line_number, "reason": "邮箱、密码和 2FA 都不能为空"})
             continue
         if not _EMAIL_RE.fullmatch(email):
             errors.append({"line": line_number, "reason": "邮箱格式无效"})
@@ -149,9 +150,14 @@ def import_existing_accounts(records: list[dict]) -> tuple[int, list[dict], list
     name_details = []
     # 网络查询在 DB 导入锁外执行，单条查询失败仍允许导入账户。
     with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
-        futures = [executor.submit(fetch_account_user_name, record["access_token"], email=record["email"])
-                   for record in candidates]
+        futures = [
+            executor.submit(fetch_account_user_name, record["access_token"], email=record["email"])
+            if record.get("access_token") else None
+            for record in candidates
+        ]
         for record, future in zip(candidates, futures):
+            if future is None:
+                continue
             try:
                 result = future.result()
             except Exception:

@@ -172,14 +172,6 @@ def _is_retryable_authorize_error(exc: Exception) -> bool:
     )
 
 
-def _exception_http_status(exc: Exception) -> int:
-    """尽量从 curl/requests 风格异常中读取 HTTP 状态码。"""
-    try:
-        return int(getattr(getattr(exc, "response", None), "status_code", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _reset_retryable_circuit(session: BrowserSession) -> None:
     """仅清除本地熔断，保留当前 Session 的 Cookie Jar 和完整身份上下文。"""
     reset = getattr(session, "reset_circuit_breaker", None)
@@ -266,7 +258,9 @@ def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
     GET auth.openai.com/api/accounts/authorize?...
 
     这个请求会产生一系列重定向，建立 auth.openai.com 的 session cookies。
-    遇到临时性网络错误（代理抽风 / TLS 握手失败 等）会自动重试。
+    遇到临时性网络错误、边缘 403/429 或 5xx（代理抽风 / TLS 握手失败等）
+    会保留当前 BrowserSession，在清理本地熔断后有限重试。403 可能同时刷新
+    Cloudflare Cookie；达到配置的最大次数仍失败时才把异常交给上层。
 
     Args:
         session: 浏览器会话
@@ -287,28 +281,20 @@ def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
             return final_url
         except Exception as exc:
             last_exc = exc
-            # authorize 的 403 是边缘风控对当前出口/会话的明确拒绝，不是瞬时网络
-            # 故障。同 URL、同 state、同出口连续重放既不会改善结果，还会扩大
-            # 当前会话的异常请求特征；立即停止并交由上层回收邮箱。
-            if _exception_http_status(exc) == 403:
-                logger.warning(
-                    "[步骤4] authorize 被 HTTP 403 拒绝，停止当前会话，不重复重放 OAuth state"
-                )
-                raise
             if not _is_retryable_authorize_error(exc):
                 # 非临时性错误（比如 4xx 业务错误）直接抛出，不重试
                 raise
             if attempt >= max_attempts:
                 break
-            # 首次 403 常会同时刷新 __cf_bm；保留同一个 BrowserSession/Cookie
-            # Jar，只清掉本地熔断后重试，不能重建会话丢掉该 Cookie。
+            # authorize 的 403 可能在响应中刷新 __cf_bm；保留同一个
+            # BrowserSession/Cookie Jar，只清掉本地熔断后再发起有限重试。
             _reset_retryable_circuit(session)
             backoff = retry_delay * (2 ** (attempt - 1))
             logger.warning(
                 f"[步骤4] authorize 临时失败 ({type(exc).__name__}: {str(exc)[:120]})，"
                 f"保留当前 session/deviceId/CF Cookie，{backoff:.1f}s 后重试..."
             )
-            time.sleep(backoff)
+            _interruptible_sleep(backoff)
 
     # 三次都失败：抛出最后一次异常
     raise last_exc if last_exc else RuntimeError("步骤4 重试耗尽但无异常记录")

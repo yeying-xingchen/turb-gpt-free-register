@@ -133,6 +133,14 @@ def _set_job_progress(job_id: int, progress: int, stage: str, message: str = "")
     )
 
 
+def report_current_job_progress(progress: int, stage: str, message: str = "") -> None:
+    """供注册驱动报告当前阶段；CLI 没有任务上下文时只执行取消检查。"""
+    check_stop_requested()
+    job_id = getattr(_THREAD_CTX, "job_id", None)
+    if job_id:
+        _set_job_progress(job_id, progress, stage, message)
+
+
 def _random_display_name() -> str:
     """生成符合 OpenAI 限制的英文字母显示名。"""
     from core.name_samples import random_display_name

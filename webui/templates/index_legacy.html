@@ -460,6 +460,7 @@
         <button type="button" data-extract-manage title="管理提链服务商、支付平台、启停状态及各自的 CDK">管理服务商 / CDK</button>
          <a href="/" title="切换到 Nuxt 新前端">Nuxt 新前端</a>
          <a href="/?ui=modern" title="切换到旧版侧边栏 UI">旧版侧边栏</a>
+         <button type="button" data-update-notice="inline-flex" style="display:none;color:#fde68a" title="发现新版本" onclick="activateTab('config'); return false;">发现新版本</button>
         <form method="post" action="/logout"><button type="submit">退出</button></form>
       </div>
     </div>
@@ -670,7 +671,7 @@
           <colgroup><col class="col-check"><col class="col-id"><col class="col-email"><col class="col-source"><col class="col-token"><col class="col-password"><col class="col-plan"><col class="col-note"><col class="col-small"><col class="col-status"><col class="col-time"><col class="col-actions"></colgroup>
           <thead><tr>
             <th><input type="checkbox" id="accountsSelectAll" title="全选/取消全选当前页账号"></th>
-            <th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>密码</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>创建时间</th><th>操作</th>
+            <th>ID</th><th>邮箱</th><th>来源</th><th>Token</th><th>密码</th><th>套餐</th><th>备注</th><th>2FA</th><th>Codex</th><th>注册时间</th><th>操作</th>
           </tr></thead>
           <tbody id="accountsBody"></tbody>
         </table>
@@ -4338,6 +4339,7 @@ setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAc
 <script src="{{ ui_asset_url('account-group-picker.js') }}"></script>
 <link rel="stylesheet" href="{{ ui_asset_url('extract-links.css') }}">
 <script src="{{ ui_asset_url('extract-links.js') }}"></script>
+<script src="{{ ui_asset_url('update-notice.js') }}"></script>
 {% include 'promo_details.html' %}
 </body>
 </html>

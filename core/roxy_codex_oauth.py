@@ -34,6 +34,7 @@ from core.roxy_registration import (
     _is_email_verification_page,
     _is_login_password_page,
     _click_passwordless_signup_if_present,
+    _EmailFlowAdvanced,
 )
 
 _base_logger = logging.getLogger(__name__)
@@ -348,7 +349,6 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
           .filter(x => x.below)
           .sort((a,b) => a.dist - b.dist || a.idx - b.idx);
         if (!buttons.length) return {ok:false, reason:'missing_submit'};
-        buttons[0].el.scrollIntoView({block:'center'});
         return {ok:true, reason:'password_targets', input, button: buttons[0].el};
         """) or {}
         if not result.get("ok"):
@@ -373,6 +373,23 @@ def _fill_login_password_if_present(driver, email: str, timeout: int = 18) -> st
     return None
 
 
+def _handle_login_password_route(driver, email: str, timeout: int) -> str | None:
+    """处理当前登录密码页；返回 next_step / email_otp / None。"""
+    result = _fill_login_password_if_present(driver, email, timeout=timeout)
+    if result == "next_step":
+        if _is_mfa_challenge_page(driver):
+            _fill_mfa_challenge_if_present(driver, email, timeout=15)
+        logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
+        return result
+    if result == "email_otp":
+        logger.info("[Codex][Browser] 密码登录后仍进入邮箱 OTP 页面")
+        return result
+    passwordless = _maybe_click_passwordless_after_email(driver, email, timeout=timeout)
+    if passwordless is None:
+        logger.info("[Codex][Browser] 登录密码页未完成密码/一次性验证码处理，继续观察当前页面")
+    return result
+
+
 def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None:
     otp_after_ts = time.time()
     logger.info("[Codex][Browser] 打开授权地址")
@@ -385,24 +402,54 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
     # 可能已经处于账号选择/授权页；如果有邮箱输入框则完整登录。
     # 非日本出口时按钮文案/顺序会变，不能按可见文字点“继续”，否则可能误点 Google。
     try:
-        _type_email_address(driver, email, timeout=12)
-        logger.info("[Codex][Browser] 已填写邮箱：%s", email)
-        human_delay("form")
-        _submit_email_step(driver)
-        logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
-        pw_result = _fill_login_password_if_present(driver, email, timeout=18)
-        if pw_result == "next_step":
-            if _is_mfa_challenge_page(driver):
-                _fill_mfa_challenge_if_present(driver, email, timeout=15)
-            logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
-            return
-        if pw_result == "email_otp":
-            logger.info("[Codex][Browser] 密码登录后仍进入邮箱 OTP 页面")
+        # CPA/sub2 授权有时会直接把已注册账号带到登录密码页，不能先等待邮箱输入框。
+        if _is_login_password_page(driver):
+            pw_result = _handle_login_password_route(driver, email, timeout=18)
+            if pw_result == "next_step":
+                return
         else:
-            _maybe_click_passwordless_after_email(driver, email, timeout=18)
+            _type_email_address(driver, email, timeout=12)
+            logger.info("[Codex][Browser] 已填写邮箱：%s", email)
+            human_delay("form")
+            _submit_email_step(driver)
+            logger.info("[Codex][Browser] 已提交邮箱，等待邮箱 OTP 页面")
+            pw_result = _fill_login_password_if_present(driver, email, timeout=18)
+            if pw_result == "next_step":
+                if _is_mfa_challenge_page(driver):
+                    _fill_mfa_challenge_if_present(driver, email, timeout=15)
+                logger.info("[Codex][Browser] 账号已用密码完成登录，直接进入后续步骤")
+                return
+            if pw_result == "email_otp":
+                logger.info("[Codex][Browser] 密码登录后仍进入邮箱 OTP 页面")
+            else:
+                _maybe_click_passwordless_after_email(driver, email, timeout=18)
+    except _EmailFlowAdvanced as exc:
+        if exc.state == "logged_in":
+            logger.info("[Codex][Browser] 邮箱步骤期间已检测到登录态，进入后续授权步骤")
+            return
+        if exc.state == "login_password":
+            pw_result = _handle_login_password_route(driver, email, timeout=18)
+            if pw_result == "next_step":
+                return
+        elif exc.state == "otp":
+            logger.info("[Codex][Browser] 邮箱步骤期间已进入 OTP 页面，继续轮询验证码")
+        else:
+            raise
     except Exception as exc:
-        logger.info("[Codex][Browser] 未检测到邮箱输入框，可能已登录或进入下一步：%s", str(exc)[:120])
-        return
+        # 只有页面确实已经进入后续认证页时才继续；其余异常必须抛出，
+        # 否则错误会被伪装成“未检测到邮箱输入框”，最终只表现为 callback 超时。
+        if _is_login_password_page(driver):
+            pw_result = _handle_login_password_route(driver, email, timeout=18)
+            if pw_result == "next_step":
+                return
+        elif _is_email_verification_page(driver):
+            logger.info("[Codex][Browser] 页面已进入邮箱 OTP，继续轮询验证码")
+        elif _is_mfa_challenge_page(driver):
+            _fill_mfa_challenge_if_present(driver, email, timeout=15)
+            return
+        else:
+            logger.warning("[Codex][Browser] 邮箱步骤交互失败：%s: %s", type(exc).__name__, str(exc)[:240])
+            raise
 
     # 提交邮箱后不再执行任何全局“继续/授权/分支”兜底点击；后续只等待验证码页。
     # 避免页面已进入 OAuth consent 时误点授权按钮。

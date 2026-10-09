@@ -107,6 +107,13 @@ def main() -> None:
         raise SystemExit(2) from exc
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
     logger.info(f"WebUI 已启动：{url}")
+
+    # 后台按配置间隔检查 GitHub 更新；只检查并提示，不会自动改写本地代码。
+    try:
+        from core.update_checker import start_scheduler
+        start_scheduler()
+    except Exception:
+        logger.exception("启动 GitHub 更新检查线程失败，可稍后在系统配置页手动检查")
     if is_generated_code():
         from webui.auth import expected_auth_code
         logger.warning("未配置 WEBUI_AUTH_CODE/AUTH_CODE，已生成本次临时授权码：%s", expected_auth_code())

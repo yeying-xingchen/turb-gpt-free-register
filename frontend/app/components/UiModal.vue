@@ -3,17 +3,43 @@ const props = defineProps<{ open: boolean; title: string }>();
 const emit = defineEmits<{ "update:open": [open: boolean] }>();
 const titleId = useId();
 const dialog = ref<HTMLDialogElement>();
+let restoreFocus: HTMLElement | null = null;
+let previousOverflow = "";
 const close = () => emit("update:open", false);
+function focusFirstControl() {
+  const target = dialog.value?.querySelector<HTMLElement>(
+    "[autofocus], button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])",
+  );
+  target?.focus();
+}
+function restorePageFocus() {
+  if (typeof document !== "undefined") document.body.style.overflow = previousOverflow;
+  if (restoreFocus?.isConnected) restoreFocus.focus();
+  restoreFocus = null;
+}
 watch(
   () => props.open,
   async (open) => {
     await nextTick();
-    if (open && !dialog.value?.open) dialog.value?.showModal();
-    else if (!open && dialog.value?.open) dialog.value?.close();
+    if (!dialog.value || typeof document === "undefined") return;
+    if (open) {
+      restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      previousOverflow = document.body.style.overflow;
+      if (!dialog.value.open) dialog.value.showModal();
+      document.body.style.overflow = "hidden";
+      await nextTick();
+      focusFirstControl();
+    } else {
+      if (dialog.value.open) dialog.value.close();
+      restorePageFocus();
+    }
   },
   { immediate: true },
 );
-onBeforeUnmount(() => dialog.value?.close());
+onBeforeUnmount(() => {
+  if (dialog.value?.open) dialog.value.close();
+  restorePageFocus();
+});
 </script>
 <template>
   <Teleport to="body"

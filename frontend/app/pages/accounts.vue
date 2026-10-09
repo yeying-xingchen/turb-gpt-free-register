@@ -24,7 +24,7 @@ import {
 
 const { request } = useApi();
 const toast = useToast();
-const rows = ref<Account[]>([]);
+const rows = shallowRef<Account[]>([]);
 const total = ref(0);
 const page = ref(1);
 const pageSize = ref(20);
@@ -105,14 +105,15 @@ const somePageSelected = computed(() =>
 const showRedeemed = computed(
   () => applied.value.redemption !== "unredeemed",
 );
-const operationRows = computed(() =>
-  (operationSeed.value?.rows || []).map(
+const operationRows = computed(() => {
+  const currentRows = new Map(rows.value.map((row) => [row.id, row]));
+  return (operationSeed.value?.rows || []).map(
     (account) =>
-      rows.value.find((row) => row.id === account.id) ||
+      currentRows.get(account.id) ||
       selectedRows.value.get(account.id) ||
       account,
-  ),
-);
+  );
+});
 const pageStats = computed(() => {
   const infos = rows.value.map((row) => accountPlanInfo(row));
   return {
@@ -934,7 +935,7 @@ async function afterOperation() {
                   原邮箱：{{ row.original_email }}
                 </div>
                 <div class="muted account-meta">
-                  {{ accountDate(row.created_at) }}
+                  注册时间：{{ accountDate(row.registered_at || row.created_at) }}
                 </div>
                 <div class="inline secret-actions">
                   <button

@@ -322,8 +322,19 @@ def _submit_auth_form(driver, selectors: list[str], *, form=None, expected_url: 
         action = form.get_attribute("action") or ""
         if _registration_target(action):
             return False
-        for button in _visible(form, "button[type='submit'],input[type='submit'],button:not([type])"):
-            details = _button_details(button)
+        selector = "button[type='submit'],input[type='submit'],button:not([type])"
+        candidates = form.locator(selector)
+        try:
+            scanned = candidates.evaluate_all(_CHOICE_SCAN_JS)
+        except Exception:
+            scanned = None
+        if isinstance(scanned, list):
+            buttons = ((candidates.nth(i), str(item.get("details") or ""))
+                       for i, item in enumerate(scanned)
+                       if isinstance(item, dict) and item.get("visible"))
+        else:
+            buttons = ((button, _button_details(button)) for button in _visible(form, selector))
+        for button, details in buttons:
             if _registration_target(details) or re.search(r"resend|passwordless|重新发送|重发", details, re.I):
                 continue
             _pin(driver, button).click(timeout=3000)
@@ -469,6 +480,8 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
     email_attempts = mfa_attempts = email_submits = 0
     used_email_codes: set[str] = set()
     used_totp_codes: set[str] = set()
+    next_session_read = 0.0
+    session_retry_delay = 0.5
     while time.monotonic() < deadline:
         try:
             state = _page_state(driver)
@@ -482,6 +495,8 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
         if step != last_step:
             logger.info("[Cloak查活] 登录阶段：%s", step)
             last_step = step
+            # 重新进入 Session 阶段意味着登录态可能已变化，立即尝试读取。
+            next_session_read, session_retry_delay = 0.0, 0.5
         if step not in {"waiting", "unknown"} and step != active_step:
             active_step, submitted = step, False
             step_deadline = time.monotonic() + timeout
@@ -509,9 +524,14 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
             raise RuntimeError("登录凭据验证失败，请检查账号密码或验证码")
 
         if step == "session":
-            session_info = _read_session(driver)
-            if session_info:
-                return session_info
+            if time.monotonic() >= next_session_read:
+                session_info = _read_session(driver)
+                if session_info:
+                    return session_info
+                # 页面状态仍持续轮询，但空 Session 不随每轮 DOM 扫描重复请求。
+                # 从请求完成时计时，慢请求也不会在返回后立即再次发出。
+                next_session_read = time.monotonic() + session_retry_delay
+                session_retry_delay = min(2.0, session_retry_delay * 2)
         elif not submitted and step == "email":
             email_submits += 1
             if email_submits > 3:

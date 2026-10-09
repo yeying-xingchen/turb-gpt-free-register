@@ -282,3 +282,24 @@ def test_cancelled_startup_closes_resources(runtime):
     runtime.context.close.assert_called_once_with()
     runtime.browser.close.assert_called_once_with()
     runtime.relay.close.assert_called_once_with()
+
+
+def test_execute_script_with_element_argument_uses_evaluate_not_handle():
+    class ElementHandle:
+        def evaluate(self, expression, arg=None):
+            return {"ok": True, "script": arg["script"]}
+
+        def evaluate_handle(self, expression, arg=None):
+            raise AssertionError("element arguments must not use evaluate_handle")
+
+    page = Mock()
+    driver = cloak.CloakSeleniumDriver(browser=None, context=None, page=page)
+    element = cloak.CloakElement(page, handle=ElementHandle())
+
+    result = driver.execute_script(
+        "arguments[0].scrollIntoView({block:'center'});",
+        element,
+    )
+
+    assert result["ok"] is True
+    assert "scrollIntoView" in result["script"]

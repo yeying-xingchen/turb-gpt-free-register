@@ -22,6 +22,15 @@ _MAX_AUTO_CONCURRENCY = 32
 _GATE_WAIT_SECONDS = 180.0
 
 
+def _check_registration_stop() -> None:
+    """在浏览器额度等待期间响应注册任务暂停/取消。"""
+    try:
+        from core.registration_service import check_stop_requested
+    except ImportError:
+        return
+    check_stop_requested()
+
+
 @dataclass
 class CloakOpenResult:
     profile_id: str = "cloakbrowser"
@@ -73,17 +82,61 @@ class CloakElement:
         else:
             self.handle.click(timeout=10000)
 
+    def _focused(self) -> bool:
+        try:
+            return bool(self._eval("el => document.activeElement === el"))
+        except Exception:
+            return False
+
+    def _focus(self) -> None:
+        # 只有当前元素未获得焦点时才点击；反复 click 会改变插入光标位置，
+        # 也会破坏 Control+A 后保留的选区。
+        if not self._focused():
+            self.click()
+
+    def _keyboard_type(self, text: str) -> None:
+        target = self.locator if self.locator is not None else self.handle
+        type_text = getattr(target, "type", None)
+        if callable(type_text):
+            # Locator/ElementHandle.type 会把键盘事件发给当前元素，
+            # 不会像 fill 一样替换已有值，也不会把异常转移到全局焦点元素。
+            type_text(text, delay=35)
+            return
+        keyboard = getattr(self.page, "keyboard", None)
+        if keyboard is not None:
+            keyboard.type(text, delay=35)
+            return
+        press_sequentially = getattr(target, "press_sequentially", None)
+        if callable(press_sequentially):
+            press_sequentially(text, delay=35)
+            return
+        raise RuntimeError("Cloak 输入元素不支持键盘输入")
+
+    def _keyboard_press(self, key: str) -> None:
+        keyboard = getattr(self.page, "keyboard", None)
+        if keyboard is None:
+            target = self.locator if self.locator is not None else self.handle
+            press = getattr(target, "press", None)
+            if callable(press):
+                press(key, timeout=10000)
+                return
+            raise RuntimeError("Cloak 输入元素不支持按键操作")
+        keyboard.press(key)
+
     def clear(self) -> None:
         try:
             if self.locator is not None:
                 self.locator.fill("", timeout=10000)
             else:
                 self.handle.fill("", timeout=10000)
+            return
         except Exception:
-            # 部分非 input 元素不支持 fill，回退键盘清空。
-            self.click()
-            self.page.keyboard.press("Meta+A")
-            self.page.keyboard.press("Backspace")
+            # 非 input 元素或部分受控输入框不支持 fill，回退键盘清空。
+            self._focus()
+            import sys
+            modifier = "Meta" if sys.platform == "darwin" else "Control"
+            self._keyboard_press(f"{modifier}+a")
+            self._keyboard_press("Backspace")
 
     @property
     def tag_name(self) -> str:
@@ -93,27 +146,64 @@ class CloakElement:
             return ""
 
     def send_keys(self, *values: str) -> None:
-        # 兼容 Selenium: el.send_keys(Keys.COMMAND, 'a')。
-        text = "".join(str(v or "") for v in values)
-        lower = text.lower()
-        try:
-            self.click()
-        except Exception:
-            pass
-        if "\ue03d" in text or "\ue009" in text or "command" in lower or "control" in lower:
-            # Selenium Keys.CONTROL/COMMAND 编码可能传入私有区字符；这里按全选处理。
-            try:
-                self.page.keyboard.press("Meta+A")
-            except Exception:
-                self.page.keyboard.press("Control+A")
+        """发送 Selenium 风格按键，同时保留输入框已有内容和光标状态。
+
+        Playwright 的 ``fill`` 是替换语义，而上层注册流程会按字符多次调用
+        ``send_keys``。这里使用真实键盘事件追加文本，避免邮箱最终只剩最后一
+        个字符；快捷键只识别 Selenium 私有码，不把普通的 ``control`` 文本
+        误判成 Control 键。
+        """
+        if not values:
             return
-        try:
-            if self.locator is not None:
-                self.locator.fill(text, timeout=10000)
-            else:
-                self.handle.fill(text, timeout=10000)
-        except Exception:
-            self.page.keyboard.type(text, delay=35)
+        self._focus()
+        special = {
+            "\ue003": "Backspace", "\ue004": "Tab", "\ue005": "Clear",
+            "\ue006": "Enter", "\ue007": "Enter", "\ue00c": "Escape",
+            "\ue00d": "Space", "\ue00e": "PageUp", "\ue00f": "PageDown",
+            "\ue010": "End", "\ue011": "Home", "\ue012": "ArrowLeft",
+            "\ue013": "ArrowUp", "\ue014": "ArrowRight", "\ue015": "ArrowDown",
+            "\ue016": "Insert", "\ue017": "Delete",
+        }
+        modifiers = {
+            "\ue008": "Shift", "\ue009": "Control", "\ue00a": "Alt",
+            "\ue03d": "Meta",
+        }
+        null_key = "\ue000"
+        pending_modifier: str | None = None
+        text_buffer: list[str] = []
+
+        def flush_text() -> None:
+            if text_buffer:
+                self._keyboard_type("".join(text_buffer))
+                text_buffer.clear()
+
+        for raw in values:
+            value = "" if raw is None else str(raw)
+            for char in value:
+                if char == null_key:
+                    pending_modifier = None
+                    continue
+                if char in modifiers:
+                    flush_text()
+                    pending_modifier = modifiers[char]
+                    continue
+                if char in special:
+                    flush_text()
+                    key = special[char]
+                    if pending_modifier:
+                        self._keyboard_press(f"{pending_modifier}+{key}")
+                    else:
+                        self._keyboard_press(key)
+                    continue
+                if pending_modifier:
+                    flush_text()
+                    self._keyboard_press(f"{pending_modifier}+{char}")
+                else:
+                    text_buffer.append(char)
+        flush_text()
+        # Selenium 的修饰键默认只作用于本次 send_keys 调用；下一次调用
+        # 必须重新声明，避免前一次 Shift/Control 泄漏到普通邮箱文本。
+        pending_modifier = None
 
     def get_attribute(self, name: str) -> str | None:
         try:
@@ -182,19 +272,21 @@ class _BrowserGate:
         return max(1, min(_MAX_AUTO_CONCURRENCY, int(available // _BROWSER_MEMORY_MB)))
 
     def acquire(self, *, timeout: float = _GATE_WAIT_SECONDS) -> bool:
-        """占用一个浏览器额度；返回 False 表示等超时后放行（调用方已告警）。
+        """占用一个浏览器额度；返回 False 表示等超时后放行。
 
         同一线程内可重入：已经持有额度的线程再次启动浏览器时不再排队，
-        避免注册→授权这类同线程嵌套流程互相等待。
+        避免注册→授权这类同线程嵌套流程互相等待。等待期间在条件锁外检查
+        当前注册任务的暂停/取消状态，取消时不会启动新的浏览器。
         """
+        _check_registration_stop()
         depth = getattr(self._local, "depth", 0)
         if depth > 0:
             self._local.depth = depth + 1
             return True
         deadline = time.monotonic() + max(0.0, float(timeout))
         logged = False
-        with self._cond:
-            while True:
+        while True:
+            with self._cond:
                 limit = self.limit()
                 if limit is None or self._in_use < limit:
                     self._in_use += 1
@@ -212,7 +304,9 @@ class _BrowserGate:
                         "[Cloak] 等待浏览器并发额度：运行中=%s 上限=%s 可用内存=%sMB",
                         self._in_use, limit, int(_available_memory_mb() or 0),
                     )
-                self._cond.wait(min(2.0, remaining))
+                self._cond.wait(min(0.5, remaining))
+            # 不持有条件锁检查暂停；暂停期间可以等待恢复而不阻塞其他浏览器释放额度。
+            _check_registration_stop()
 
     def release(self) -> None:
         depth = getattr(self._local, "depth", 0)
@@ -433,9 +527,12 @@ class CloakSeleniumDriver:
           return fn(...args);
         }"""
         if first_el is not None:
-            handle = first_el._eval_handle(element_wrapper, {"script": script, "args": serial_args})
-        else:
-            handle = self.page.evaluate_handle(wrapper, {"script": script, "args": serial_args})
+            # 这些调用把元素仅作为脚本输入，普通 Selenium execute_script 语义下
+            # 返回值通常是标量/普通对象。走 evaluate 可以避免 Cloak humanize 在
+            # evaluate_handle 隔离世界里把元素参数包装成非 DOM 对象，进而触发
+            # `el.scrollIntoView is not a function`。
+            return first_el._eval(element_wrapper, {"script": script, "args": serial_args})
+        handle = self.page.evaluate_handle(wrapper, {"script": script, "args": serial_args})
         return self._unwrap_js_result(self.page, handle)
 
 
@@ -690,8 +787,9 @@ def build_cloak_driver(
         if not keep_open:
             # 只在真正要拉起浏览器前排队，出口地理查询/代理中继可以在等待期间并行完成。
             # 无论是否在额度内拿到，acquire 都占用了一个计数，退出时必须由 quit() 归还。
+            acquired = _BROWSER_GATE.acquire()
             gate_slot = True
-            if not _BROWSER_GATE.acquire():
+            if not acquired:
                 logger.warning(
                     "[Cloak] 等待浏览器并发额度超时，仍继续启动；如频繁出现请调低并发或检查残留浏览器进程"
                 )

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 const route = useRoute();
 const open = ref(false);
+let previousBodyOverflow = "";
 const links = [
   { to: "/", label: "工作台", icon: "grid", caption: "注册与概览" },
   { to: "/accounts", label: "账号管理", icon: "users", caption: "账号与订阅" },
@@ -41,7 +42,41 @@ watch(
     open.value = false;
   },
 );
+watch(
+  open,
+  (isOpen, wasOpen) => {
+    if (typeof document === "undefined") return;
+    if (isOpen) {
+      previousBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+    } else if (wasOpen) {
+      document.body.style.overflow = previousBodyOverflow;
+    }
+  },
+);
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape" && open.value) open.value = false;
+}
+onMounted(() => window.addEventListener("keydown", handleKeydown));
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleKeydown);
+  if (typeof document !== "undefined" && open.value)
+    document.body.style.overflow = previousBodyOverflow;
+});
 const loggingOut = ref(false);
+const {
+  status: updateStatus,
+  updateAvailable,
+  refresh: refreshUpdate,
+} = useUpdateStatus();
+// 只读后台缓存结论，开销很低；真正的网络检查由服务端按配置间隔执行。
+usePolling(() => refreshUpdate(), 600000);
+const updateLabel = computed(() => {
+  const behind = updateStatus.value.behind;
+  return typeof behind === "number" && behind > 0
+    ? `${behind} 个新提交`
+    : "有新版本可用";
+});
 async function logout() {
   loggingOut.value = true;
   try {
@@ -57,13 +92,19 @@ async function logout() {
 </script>
 <template>
   <div class="app-shell">
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
     <button
       v-if="open"
       class="sidebar-scrim"
       aria-label="关闭导航"
       @click="open = false"
     />
-    <aside class="sidebar" :class="{ 'is-open': open }">
+    <aside
+      id="primary-navigation"
+      class="sidebar"
+      :class="{ 'is-open': open }"
+      aria-label="主导航"
+    >
       <NuxtLink to="/" class="brand"
         ><img src="/brand.svg" alt="" width="34" height="34" /><span
           >Registrator<small>CONTROL CENTER</small></span
@@ -83,11 +124,17 @@ async function logout() {
           :to="link.to"
           class="nav-link"
           :class="{ active: route.path === link.to }"
+          :aria-current="route.path === link.to ? 'page' : undefined"
           ><UiIcon :name="link.icon" /><span>{{ link.label }}</span
           ><span v-if="route.path === link.to" class="nav-active-dot"
         /></NuxtLink>
       </nav>
       <div class="sidebar-bottom">
+        <NuxtLink v-if="updateAvailable" to="/settings" class="update-pill">
+          <UiIcon name="download" :size="14" />
+          <span>发现新版本</span>
+          <small>{{ updateLabel }}</small>
+        </NuxtLink>
         <div class="frontend-switcher" aria-label="切换前端">
           <div class="frontend-switcher-title">切换前端</div>
           <a
@@ -126,6 +173,8 @@ async function logout() {
           <button
             class="icon-btn mobile-menu"
             aria-label="打开导航"
+             :aria-expanded="open"
+             aria-controls="primary-navigation"
             @click="open = true"
           >
             <UiIcon name="menu" /></button
@@ -136,7 +185,7 @@ async function logout() {
         </div>
         <span class="topbar-status"><span class="status-dot" />管理控制台</span>
       </header>
-      <main id="main-content" class="main-content"><slot /></main>
+      <main id="main-content" class="main-content" tabindex="-1"><slot /></main>
       <footer class="workspace-footer">
         <span>Registrator</span><span>让每一步管理都井然有序</span>
       </footer>

@@ -70,6 +70,29 @@ class _FailedRequest(_Request):
         raise AssertionError("Request.response() must not be called for requestfailed")
 
 
+class _PendingRequest(_Request):
+    """仍在飞行中的请求：任何等待应答的同步调用都会阻塞注册线程。"""
+
+    resource_type = "fetch"
+    url = "https://chatgpt.com/backend-api/conversation"
+    headers = {"accept": "text/event-stream"}
+    post_data = None
+
+    def __init__(self):
+        self.sizes_called = 0
+        self.response_called = 0
+
+    def sizes(self):
+        # Playwright 的 sizes() 会等 response() 再等响应体结束；未完成请求上就是
+        # 无限等待（浏览器还开着，页面关闭也解除不了），所以 stop() 绝不能调用。
+        self.sizes_called += 1
+        raise AssertionError("Request.sizes() must not be called for an unfinished request")
+
+    def response(self):
+        self.response_called += 1
+        raise AssertionError("Request.response() must not be called for an unfinished request")
+
+
 class _WebSocket(_Emitter):
     pass
 
@@ -434,6 +457,48 @@ class BrowserTrafficTests(unittest.TestCase):
         self.assertEqual(result["http_download_bytes"], 0)
         self.assertGreater(result["http_upload_bytes"], 0)
         self.assertEqual(result["detail_recorded_count"], 1)
+
+    def test_playwright_stop_does_not_block_on_unfinished_requests(self):
+        """停止统计时页面还开着：未完成请求只能非阻塞记账，否则注册线程永久卡死。"""
+        for detail_log in (False, True):
+            with self.subTest(detail_log=detail_log):
+                context = _Emitter()
+                context.pages = []
+                with patch("core.browser_traffic._browser_cfg.BROWSER_TRAFFIC_DETAIL_LOG", detail_log):
+                    tracker = PlaywrightTrafficTracker(context, label="pending")
+                    request = _PendingRequest()
+                    # 只有 request 事件，没有 requestfinished/requestfailed。
+                    context.emit("request", request)
+                    result = tracker.stop()
+
+                self.assertEqual(request.sizes_called, 0)
+                self.assertEqual(request.response_called, 0)
+                self.assertEqual(result["request_count"], 1)
+                self.assertEqual(result["completed_request_count"], 0)
+                self.assertEqual(result["failed_request_count"], 0)
+                self.assertEqual(result["unfinished_request_count"], 1)
+                self.assertEqual(result["unknown_size_request_count"], 1)
+                self.assertEqual(result["http_download_bytes"], 0)
+                self.assertGreater(result["http_upload_bytes"], 0)
+
+    def test_playwright_stop_still_counts_finished_requests_next_to_pending_ones(self):
+        context = _Emitter()
+        context.pages = []
+        tracker = PlaywrightTrafficTracker(context, label="mixed")
+        finished, pending = _Request(), _PendingRequest()
+        context.emit("request", finished)
+        context.emit("requestfinished", finished)
+        context.emit("request", pending)
+        result = tracker.stop()
+
+        self.assertEqual(pending.sizes_called, 0)
+        self.assertEqual(pending.response_called, 0)
+        self.assertEqual(result["request_count"], 2)
+        self.assertEqual(result["completed_request_count"], 1)
+        self.assertEqual(result["unfinished_request_count"], 1)
+        # 已结束请求仍走 sizes() 精确记账（下载 20+8）；未完成请求只估算上传。
+        self.assertEqual(result["http_download_bytes"], 28)
+        self.assertGreater(result["http_upload_bytes"], 12)
 
     def test_selenium_logs_status_cache_failure_and_unfinished_details(self):
         entries = [

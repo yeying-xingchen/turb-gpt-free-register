@@ -638,7 +638,7 @@ async function copy(value: string) {
           </div>
           <div>
             <dt>注册时间</dt>
-            <dd>{{ accountDate(first.created_at) }}</dd>
+            <dd>{{ accountDate(first.registered_at || first.created_at) }}</dd>
           </div>
           <div v-if="first.original_email">
             <dt>原邮箱</dt>

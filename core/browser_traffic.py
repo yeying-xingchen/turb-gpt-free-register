@@ -912,6 +912,11 @@ class PlaywrightTrafficTracker(_TrafficAccumulator):
 
     @staticmethod
     def _request_size_values(request: Any) -> dict[str, int | None] | None:
+        """读取精确的请求/响应字节，**只能用于已经结束的请求**。
+
+        Playwright 的 ``Request.sizes()`` 内部先等应答、再等响应体收完，对仍在
+        飞行中的请求会一直阻塞；未完成请求请改用 ``_request_fallback_upload`` 估算。
+        """
         try:
             sizes = request.sizes()
         except Exception:
@@ -1105,6 +1110,17 @@ class PlaywrightTrafficTracker(_TrafficAccumulator):
             )
 
     def _record_unfinished_playwright_requests(self) -> int:
+        """给 stop() 时仍在飞行中的请求记账，全程只读非阻塞字段。
+
+        这里**绝不能**调用 ``Request.sizes()`` 或 ``Request.response()``：Playwright
+        的 ``sizes()`` 会先等服务端返回应答、再等响应体收完（``internalSizes()``），
+        ``response()`` 同样是等待应答；对未结束的请求就是无限等待。停止统计时浏览器
+        和页面都还开着，页面关闭这条解除等待的路径也不会触发，注册线程会永久卡在
+        「注册成功后随机停留」之后（任务一直显示运行中，账号也不落库）。
+
+        因此未完成请求只做非阻塞估算：上传按请求头/请求体估算，下载字节保持未知
+        （不伪造精确值），由 ``unfinished_request_count`` 暴露口径差异。
+        """
         unfinished = 0
         for key, request in list(self._requests.items()):
             with self._lock:
@@ -1126,24 +1142,18 @@ class PlaywrightTrafficTracker(_TrafficAccumulator):
                 )
                 continue
 
-            values = self._request_size_values(request) or {}
-            if values:
-                upload = (values.get("requestBodySize") or 0) + (values.get("requestHeadersSize") or 0)
-                download = (values.get("responseBodySize") or 0) + (values.get("responseHeadersSize") or 0)
-                include_response = True
-            else:
-                upload = self._request_fallback_upload(request)
-                download = 0
-                include_response = False
+            upload = self._request_fallback_upload(request)
+            self._add_http(upload, 0)
+            with self._lock:
+                self.unknown_size_request_count += 1
             self._record_playwright_detail(
                 request,
                 request_id=key,
                 upload_bytes=upload,
-                download_bytes=download,
-                response_body_bytes=values.get("responseBodySize") or 0,
-                response_header_bytes=values.get("responseHeadersSize") or 0,
+                download_bytes=0,
                 unfinished=True,
-                include_response=include_response,
+                # 请求未结束：读响应状态同样会等待应答，必须跳过。
+                include_response=False,
             )
             unfinished += 1
         return unfinished

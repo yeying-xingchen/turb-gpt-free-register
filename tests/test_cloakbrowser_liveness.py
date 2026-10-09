@@ -1,6 +1,6 @@
 """Cloak 查活的离线流程回归：不得访问真实账号或邮件服务。"""
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -122,6 +122,40 @@ def test_waits_for_navigation_without_resubmitting_password(browser, monkeypatch
     assert liveness.check_account_liveness(EMAIL)["ok"]
     cloak._type_any.assert_called_once()
     cloak._submit_auth_form.assert_called_once()
+
+
+@pytest.mark.parametrize("leave_session", [False, True])
+def test_empty_session_backoff_keeps_polling_and_resets_on_navigation(browser, monkeypatch, leave_session):
+    clock = [0.0]
+    driver, _ = browser
+    monkeypatch.setattr(cloak.time, "monotonic", lambda: clock[0])
+    driver.page.wait_for_timeout.side_effect = lambda ms: clock.__setitem__(
+        0, clock[0] + (0.1 if leave_session else ms / 1000),
+    )
+    request_times = []
+
+    def read_session(_driver):
+        request_times.append(clock[0])
+        # 模拟一个耗时请求，退避必须从请求完成而非开始时计算。
+        clock[0] += 0.3
+        return SESSION if len(request_times) == (2 if leave_session else 5) else None
+
+    monkeypatch.setattr(cloak, "_read_session", read_session)
+    snapshots = [page("session"), {"url": "https://chatgpt.com/api/auth/callback/openai"}, page("session")]
+    reads = Mock(return_value=page("session"))
+    if leave_session:
+        reads.side_effect = snapshots
+    monkeypatch.setattr(cloak, "_page_state", reads)
+
+    assert cloak._login(driver, EMAIL, email_source=None, responses=cloak._AuthResponses()) == SESSION
+    if leave_session:
+        # 中间经过 callback 后立即读取，不沿用上一次空 Session 的退避。
+        assert request_times[1] == pytest.approx(0.5)
+    else:
+        intervals = [b - a - 0.3 for a, b in zip(request_times, request_times[1:])]
+        for actual, minimum in zip(intervals, [0.5, 1.0, 2.0, 2.0]):
+            assert minimum - 1e-9 <= actual <= minimum + 0.4 + 1e-9
+        assert reads.call_count > len(request_times)
 
 
 def test_invalid_email_code_resends_and_uses_fresh_code(browser, monkeypatch):
