@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
+import base64
+import uuid
+from urllib.parse import urlparse
 import math
 import random
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from contextlib import contextmanager
+
+from core.manual_verification import bind_callbacks
 
 from core import db, task_control
 from core.account_liveness import _failure_result, check_account_liveness, log_path
@@ -35,6 +41,9 @@ _QUEUE_LIMIT = 500
 _EXECUTOR = task_control.register_pool(KIND, _WORKERS, max_workers=_MAX_WORKERS)
 _QUEUE_SLOTS = threading.BoundedSemaphore(_QUEUE_LIMIT)
 _RUNNING: set[int] = set()
+_WAITING: dict[int, dict] = {}
+_FOCUS_REQUESTS: set[int] = set()
+_REMOTE_VERIFICATIONS: dict[int, dict] = {}
 _LOCK = threading.Lock()
 _NETWORK_RETRY_HINTS = (
     "403", "408", "425", "429", "500", "502", "503", "504", "proxy", "socks",
@@ -96,11 +105,158 @@ def _live_retry_settings(proxy_cfg) -> tuple[int, float]:
     return max(1, min(5, attempts)), max(0.0, min(60.0, delay))
 
 
+@contextmanager
+def _manual_wait(account_id: int, email: str):
+    from core import task_center_store
+    handle = task_control.control(KIND, account_id)
+    with _EXECUTOR.park_current():
+        with _LOCK:
+            _WAITING[account_id] = {"account_id": account_id, "email": email,
+                                    "waiting_since": datetime.now().isoformat(timespec="seconds")}
+            _REMOTE_VERIFICATIONS[account_id] = {
+                "session": uuid.uuid4().hex, "counter": 0, "frame": None,
+                "commands": [], "requested_at": None, "captured_at": None,
+            }
+        owned_pause = handle.pause()
+        try:
+            task_center_store.set_task_control_state(KIND, account_id, "paused")
+            _append_log(email, "[查活] 等待人工验证：保留当前浏览器会话、Cookie 和出口；在任务中心完成验证，其它任务继续执行")
+            yield
+        finally:
+            with _LOCK:
+                _WAITING.pop(account_id, None)
+                _REMOTE_VERIFICATIONS.pop(account_id, None)
+                _FOCUS_REQUESTS.discard(account_id)
+            if owned_pause:
+                handle.resume()
+            if not handle.cancelled:
+                task_center_store.set_task_control_state(KIND, account_id, "running")
+    _append_log(email, "[查活] 人工验证已结束，继续同一浏览器会话")
+
+
+def list_manual_verifications() -> list[dict]:
+    with _LOCK:
+        return [dict(item) for item in _WAITING.values()]
+
+
+def request_verification_window(account_id: int) -> dict:
+    account_id = int(account_id)
+    with _LOCK:
+        if account_id not in _WAITING:
+            return {"ok": False, "status": 409, "error": "该任务当前没有等待人工验证的窗口"}
+        _FOCUS_REQUESTS.add(account_id)
+    return {"ok": True, "message": "已请求显示运行程序桌面上的验证窗口，请手动完成验证"}
+
+
+def manual_verification_frame(account_id: int) -> dict:
+    with _LOCK:
+        remote = _REMOTE_VERIFICATIONS.get(int(account_id))
+        if remote is None:
+            return {"ok": False, "status": 409, "error": "验证已结束或该任务不在等待人工验证"}
+        remote["requested_at"] = time.monotonic()
+        frame = remote["frame"]
+        if frame is None:
+            return {"ok": True, "pending": True, "status": 202}
+        return {"ok": True, "pending": False, "frame": dict(frame)}
+
+
+def request_verification_input(account_id: int, data: dict) -> dict:
+    if not isinstance(data, dict):
+        return {"ok": False, "status": 400, "error": "输入必须是 JSON 对象"}
+    with _LOCK:
+        remote = _REMOTE_VERIFICATIONS.get(int(account_id))
+        if remote is None:
+            return {"ok": False, "status": 409, "error": "验证已结束或该任务不在等待人工验证"}
+        frame = remote["frame"]
+        if frame is None or data.get("revision") != frame["revision"]:
+            return {"ok": False, "status": 409, "error": "画面已更新，请在最新画面上点击"}
+        x, y = data.get("x"), data.get("y")
+        if (type(x) not in (int, float) or type(y) not in (int, float)
+                or not math.isfinite(x) or not math.isfinite(y)
+                or not 0 <= x < frame["width"] or not 0 <= y < frame["height"]):
+            return {"ok": False, "status": 400, "error": "点击坐标无效或超出画面范围"}
+        if remote["commands"]:
+            return {"ok": False, "status": 429, "error": "上一次点击正在处理，请稍后再试"}
+        remote["commands"].append({"x": x, "y": y, "revision": frame["revision"]})
+        remote["requested_at"] = time.monotonic()
+    return {"ok": True, "message": "已提交你的手动点击，正在等待验证页面响应"}
+
+
+def _pump_manual_browser(account_id: int, page) -> None:
+    """Run only on the browser owner thread, only while the challenge is present."""
+    _manual_checkpoint(account_id)
+    if urlparse(str(page.url)).hostname not in {"chatgpt.com", "auth.openai.com"}:
+        return
+    now = time.monotonic()
+    with _LOCK:
+        remote = _REMOTE_VERIFICATIONS.get(account_id)
+        if remote is None:
+            return
+        commands = list(remote["commands"])
+        remote["commands"].clear()
+        requested = remote["requested_at"]
+        captured = remote["captured_at"]
+        frame = remote["frame"]
+    challenge_detector = r"""() => /just a moment/i.test(document.title) ||
+        [...document.querySelectorAll('iframe')].some(el =>
+          el.getClientRects().length && /challenges\.cloudflare\.com/.test(el.src))"""
+    if page.evaluate(challenge_detector) is not True:
+        with _LOCK:
+            if _REMOTE_VERIFICATIONS.get(account_id) is remote:
+                remote["frame"] = None
+        return
+    for command in commands:
+        if frame and command["revision"] == frame["revision"]:
+            page.mouse.click(command["x"], command["y"])
+    challenge_visible = page.evaluate(challenge_detector)
+    if challenge_visible is not True:
+        with _LOCK:
+            if _REMOTE_VERIFICATIONS.get(account_id) is remote:
+                remote["frame"] = None
+        return
+    if requested is None or now - requested > 5:
+        return
+    if not commands and captured is not None and now - captured < 1:
+        return
+    size = page.viewport_size
+    if not isinstance(size, dict):
+        size = page.evaluate("() => ({width: innerWidth, height: innerHeight})")
+    if not isinstance(size, dict) or not all(type(size.get(k)) is int and 0 < size[k] <= 4096 for k in ("width", "height")):
+        return
+    try:
+        image = page.screenshot(type="jpeg", quality=65, scale="css", timeout=2000)
+    except Exception:
+        # A transient screenshot failure does not restart authentication.
+        return
+    if not isinstance(image, bytes) or len(image) > 2_000_000:
+        return
+    with _LOCK:
+        if _REMOTE_VERIFICATIONS.get(account_id) is not remote:
+            return
+        remote["counter"] += 1
+        remote["captured_at"] = now
+        remote["frame"] = {
+            "image": base64.b64encode(image).decode("ascii"),
+            "width": size["width"], "height": size["height"],
+            "revision": f'{remote["session"]}:{remote["counter"]}',
+        }
+
+
+def _manual_checkpoint(account_id: int):
+    handle = task_control.get_control(KIND, account_id)
+    if handle is not None and handle.cancelled:
+        raise task_control.TaskCancelled("用户取消等待人工验证的查活任务")
+    with _LOCK:
+        focus = account_id in _FOCUS_REQUESTS
+        _FOCUS_REQUESTS.discard(account_id)
+    return focus
+
+
 def is_checking(email: str) -> bool:
     acc = db.get_account_by_email(email)
     if not acc:
         return False
-    return str(acc.get("live_check_status") or "") in {"queued", "running"}
+    return str(acc.get("live_check_status") or "") in {"queued", "running", "challenge_waiting"}
 
 
 def _append_log(email: str, line: str, *, clear: bool = False) -> None:
@@ -151,7 +307,9 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         max_attempts, retry_delay = _live_retry_settings(proxy_cfg)
         used_proxies: set[str] = set()
         result: dict = {"ok": False, "status": "failed", "error": "查活未执行"}
-        for attempt in range(1, max_attempts + 1):
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
             task_control.checkpoint(KIND, account_id)
             selected_proxy = str(route.get("proxy") or "").strip()
             if selected_proxy:
@@ -165,13 +323,18 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 effective_proxy, relay = open_plan_check_proxy(
                     route, selected_proxy, timeout=timeout,
                 )
-                result = dict(check_account_liveness(
-                    email,
-                    proxy=effective_proxy,
-                    clear_log=False,
-                    email_source=email_source,
-                    fingerprint_state={"force_fresh": attempt > 1},
-                ))
+                with bind_callbacks(lambda: _manual_wait(account_id, email),
+                                    lambda: _manual_checkpoint(account_id),
+                                    lambda page: _pump_manual_browser(account_id, page)):
+                    result = dict(check_account_liveness(
+                        email,
+                        proxy=effective_proxy,
+                        clear_log=False,
+                        email_source=email_source,
+                        fingerprint_state={"force_fresh": attempt > 1},
+                    ))
+            except task_control.TaskCancelled:
+                raise
             except Exception as exc:
                 dead_code = (
                     getattr(exc, "error_code", "") if isinstance(exc, AccountUnusableError)
@@ -297,6 +460,9 @@ def enqueue_account_live_check(*, account_id: int, email: str, trigger: str = "m
     email = str(email or "").strip()
     if not email:
         return {"accepted": False, "busy": False, "error": "email 为空"}
+    with _LOCK:
+        if account_id in _RUNNING:
+            return {"accepted": False, "busy": True, "error": "该账号正在查活或等待人工验证"}
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "queue_full": True, "error": "查活队列已满，请稍后重试"}
     if not db.claim_account_live_check(acc_id=account_id, trigger=trigger):

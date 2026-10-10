@@ -278,8 +278,9 @@ def _random_local_part(length: int | None = None) -> str:
     return random.choice(string.ascii_lowercase) + "".join(secrets.choice(alphabet) for _ in range(length - 1))
 
 
-def generate_email() -> str:
-    domain = random.choice(_domains())
+def generate_email(email_suffix: str | None = None) -> str:
+    from core.email_provider import normalize_email_suffix
+    domain = normalize_email_suffix(email_suffix) or random.choice(_domains())
     return f"{_random_local_part()}@{domain}"
 
 
@@ -288,8 +289,11 @@ def _add_user(email: str) -> None:
     _request("/api/public/addUser", {"list": [{"email": email, "password": password}]})
 
 
-def pick_account() -> CloudMailAccount:
-    email = generate_email()
+def pick_account(email_suffix: str | None = None) -> CloudMailAccount:
+    from core.email_provider import normalize_email_suffix, _check_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
+    email = generate_email(email_suffix=suffix) if suffix else generate_email()
+    _check_email_suffix(email, suffix, release_account)
     domain = email.rsplit("@", 1)[1]
     if bool(getattr(_email_cfg, "CLOUDMAIL_AUTO_ADD_USER", True)):
         _add_user(email)

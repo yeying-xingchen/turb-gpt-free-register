@@ -2687,13 +2687,16 @@ async function changeAccountEmails(ids) {
   if (!ids.length) { showToast('请先选择账号'); return; }
   const source = prompt('请输入新邮箱来源：\noutlook / generic_api / imap / cloudflare_domain / cloudflare / gptmail / mailnest / cloudmail / remail', 'outlook');
   if (!source) return;
+  const email_suffix = prompt('请输入邮箱后缀（可选）：例如 outlook.com 或 @outlook.com，留空使用默认规则', '');
+  if (email_suffix === null) return;
+  const payload = {source: source.trim(), email_suffix: email_suffix.trim()};
   const btn = $('#btnChangeSelectedEmails');
   const old = btn ? btn.textContent : '';
   try {
     // 单个账号走单账号接口；批量换绑按后端单次上限分片提交。
     const r = ids.length === 1
-      ? await api(`/api/accounts/${ids[0]}/change-email`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source:source.trim()})})
-      : await postAccountBatches('/api/accounts/change-email-bulk', {source: source.trim()}, ids, accountBatchLimit('email'), accountBatchProgress(btn, '提交中…'));
+      ? await api(`/api/accounts/${ids[0]}/change-email`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+      : await postAccountBatches('/api/accounts/change-email-bulk', payload, ids, accountBatchLimit('email'), accountBatchProgress(btn, '提交中…'));
     clearAccountSelection();
     showToast(ids.length === 1 ? '邮箱换绑任务已开始' : `已开始 ${r.started_count || 0} 个，跳过 ${(r.skipped || []).length} 个`);
     loadAccounts();

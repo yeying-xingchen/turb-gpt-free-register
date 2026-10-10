@@ -1,7 +1,7 @@
 """Unified task-center views and controls; execution stays with the owning service."""
 from flask import jsonify, request
 
-from core import codex_retry_service, registration_service, task_center_store, task_control
+from core import codex_retry_service, live_check_service, registration_service, task_center_store, task_control
 
 ACTIONS = ("pause", "resume", "cancel")
 # 任务中心的并发设置写回 .env，配置页与重启后保持一致。
@@ -64,6 +64,32 @@ def _task_filters():
 
 
 def register_task_routes(app):
+    @app.get("/api/tasks/manual-verifications")
+    def task_center_manual_verifications():
+        return jsonify({"ok": True, "items": live_check_service.list_manual_verifications()})
+
+    @app.post("/api/tasks/manual-verifications/<int:account_id>/show")
+    def task_center_show_verification_window(account_id):
+        # 仅请求运行程序的本地浏览器显示窗口，验证由用户在该桌面完成。
+        result = live_check_service.request_verification_window(account_id)
+        return jsonify(result), 200 if result.get("ok") else int(result.get("status") or 409)
+
+    def manual_response(result):
+        status = int(result.get("status") or (202 if result.get("pending") else 200 if result.get("ok") else 409))
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response, status
+
+    @app.get("/api/tasks/manual-verifications/<int:account_id>/frame")
+    def task_center_verification_frame(account_id):
+        return manual_response(live_check_service.manual_verification_frame(account_id))
+
+    @app.post("/api/tasks/manual-verifications/<int:account_id>/input")
+    def task_center_verification_input(account_id):
+        data = request.get_json(silent=True)
+        return manual_response(live_check_service.request_verification_input(account_id, data))
+
     @app.get("/api/tasks/active")
     def task_center_active():
         filters, error = _task_filters()

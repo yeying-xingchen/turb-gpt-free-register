@@ -65,6 +65,15 @@ const group = ref(
     : "",
 );
 const source = ref("outlook");
+const emailSuffix = ref("");
+const supportsEmailSuffix = computed(() => !["gptmail", "mailnest"].includes(source.value));
+const emailSuffixHint = computed(() =>
+  !supportsEmailSuffix.value
+    ? "该来源暂不支持指定后缀，按来源默认规则领取。"
+    : source.value === "cloudflare_domain"
+      ? "可填写已配置的域名邮箱后缀；留空使用配置中的域名。"
+      : "留空使用来源默认规则；填写后只领取该后缀的邮箱，邮箱池需有匹配的可用地址。",
+);
 const workers = ref(3);
 const verifyTask = ref(true);
 const successGroup = ref("");
@@ -409,7 +418,10 @@ async function submit() {
     }
     if (mode.value === "archive" || mode.value === "restore")
       body.archived = mode.value === "archive";
-    if (mode.value === "email") body.source = source.value;
+    if (mode.value === "email") {
+      body.source = source.value;
+      body.email_suffix = supportsEmailSuffix.value ? emailSuffix.value.trim() : "";
+    }
     if (mode.value === "agent") body.verify_task = verifyTask.value;
     if (mode.value === "plan" || mode.value === "quota") {
       body.timezone_offset_min = String(new Date().getTimezoneOffset());
@@ -809,6 +821,16 @@ async function copy(value: string) {
               <option value="cloudmail">CloudMail</option>
               <option value="remail">ReMail</option>
             </select></label
+          >
+          <label v-if="mode === 'email'" class="field"
+            >邮箱后缀（可选）<input
+              v-model="emailSuffix"
+              class="input"
+              :disabled="!supportsEmailSuffix"
+              autocomplete="off"
+              :spellcheck="false"
+              placeholder="例如 outlook.com 或 @outlook.com"
+            /><small class="muted">{{ emailSuffixHint }}</small></label
           >
           <label v-if="mode === 'retry'" class="field"
             >并发线程数<input

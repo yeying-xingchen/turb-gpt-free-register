@@ -33,6 +33,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "PLAN_CHECK_PROXY": "套餐查询专用代理（可能包含认证信息）",
     "PLAN_CHECK_UPSTREAM_PROXY": "套餐查询本地上游代理地址（用于代理链）",
     "PROXY_POOL_UPSTREAM_PROXY": "代理池本地上游代理地址（用于代理链）",
+    "SMTP_PASSWORD": "SMTP 通知邮箱密码 / 授权码",
     "QQ_IMAP_PASSWORD": "QQ 邮箱 IMAP 授权码（不是 QQ 密码）",
     "GPTMAIL_API_KEY": "GPTMail API Key",
     "CLOUDFLARE_API_KEY": "Cloudflare Worker 临时邮箱 API Key / ADMIN_PASSWORD",

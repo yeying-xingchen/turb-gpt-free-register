@@ -76,8 +76,11 @@ def _request(method: str, path: str, *, params: dict | None = None, json: dict |
     return payload.get("data")
 
 
-def pick_account() -> MailNestAccount:
+def pick_account(email_suffix: str | None = None) -> MailNestAccount:
     """购买/领取一个 MailNest 临时邮箱并缓存上下文。"""
+    from core.email_provider import normalize_email_suffix
+    if normalize_email_suffix(email_suffix):
+        raise MailNestClientError("mailnest 不支持显式 email_suffix 后缀选择")
     project_code = _project_code()
     data = _request(
         "POST",

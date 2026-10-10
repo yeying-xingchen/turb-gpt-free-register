@@ -42,6 +42,122 @@ const updated = ref("");
 const confirmation = shallowRef<ActionPrompt | null>(null);
 const logOpen = ref(false);
 const logTask = ref<OperationRow | null>(null);
+type ManualVerification = {
+  account_id: number;
+  email: string;
+  waiting_since: string;
+};
+const manualVerifications = shallowRef<ManualVerification[]>([]);
+const manualLoaded = ref(false);
+const manualError = ref("");
+type VerificationFrame = {
+  image: string;
+  width: number;
+  height: number;
+  revision: string;
+};
+const verificationOpen = ref(false);
+const verificationAccount = shallowRef<ManualVerification | null>(null);
+const verificationFrame = shallowRef<VerificationFrame | null>(null);
+const verificationDisplayedFrame = shallowRef<VerificationFrame | null>(null);
+const verificationPending = ref(true);
+const verificationError = ref("");
+const verificationInputBusy = ref(false);
+let verificationGeneration = 0;
+let verificationTimer: ReturnType<typeof setTimeout> | undefined;
+let verificationController: AbortController | undefined;
+function cleanupVerification() {
+  verificationGeneration++;
+  clearTimeout(verificationTimer);
+  verificationTimer = undefined;
+  verificationController?.abort();
+  verificationController = undefined;
+  verificationFrame.value = null;
+  verificationDisplayedFrame.value = null;
+  verificationInputBusy.value = false;
+}
+function verificationCurrent(accountId: number, generation: number) {
+  return verificationOpen.value &&
+    verificationAccount.value?.account_id === accountId &&
+    verificationGeneration === generation;
+}
+function verificationConflict(cause: unknown) {
+  return typeof cause === "object" && cause !== null &&
+    "status" in cause && cause.status === 409;
+}
+async function pollVerificationFrame(accountId: number, generation: number) {
+  if (!verificationCurrent(accountId, generation)) return;
+  const controller = new AbortController();
+  verificationController = controller;
+  let retry = true;
+  try {
+    const result = await request<{
+      ok: boolean;
+      pending: boolean;
+      frame?: VerificationFrame;
+    }>(`/api/tasks/manual-verifications/${accountId}/frame`, {
+      signal: controller.signal,
+    });
+    if (!verificationCurrent(accountId, generation)) return;
+    verificationError.value = "";
+    verificationPending.value = result.pending;
+    verificationFrame.value = result.frame || null;
+  } catch (cause) {
+    if (!verificationCurrent(accountId, generation)) return;
+    verificationError.value = errorMessage(cause);
+    if (verificationConflict(cause)) {
+      retry = false;
+      verificationPending.value = false;
+      verificationFrame.value = null;
+      verificationDisplayedFrame.value = null;
+    }
+  } finally {
+    if (verificationCurrent(accountId, generation)) {
+      verificationController = undefined;
+      if (retry)
+        verificationTimer = setTimeout(
+          () => void pollVerificationFrame(accountId, generation), 1000,
+        );
+    }
+  }
+}
+function openVerification(item: ManualVerification) {
+  cleanupVerification();
+  verificationAccount.value = item;
+  verificationError.value = "";
+  verificationPending.value = true;
+  verificationOpen.value = true;
+  void pollVerificationFrame(item.account_id, verificationGeneration);
+}
+watch(verificationOpen, (open) => {
+  if (!open) cleanupVerification();
+}, { flush: "sync" });
+async function sendVerificationClick(event: MouseEvent) {
+  const accountId = verificationAccount.value?.account_id;
+  const frame = verificationDisplayedFrame.value;
+  const image = event.currentTarget as HTMLImageElement;
+  if (accountId == null || !verificationOpen.value || verificationInputBusy.value ||
+      !frame || frame !== verificationFrame.value || !image.complete) return;
+  const bounds = image.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const x = Math.min(frame.width - 1, Math.max(0,
+    Math.floor((event.clientX - bounds.left) * frame.width / bounds.width)));
+  const y = Math.min(frame.height - 1, Math.max(0,
+    Math.floor((event.clientY - bounds.top) * frame.height / bounds.height)));
+  const generation = verificationGeneration;
+  verificationInputBusy.value = true;
+  try {
+    await request(`/api/tasks/manual-verifications/${accountId}/input`, {
+      method: "POST", body: { x, y, revision: frame.revision },
+    });
+    if (verificationCurrent(accountId, generation)) verificationError.value = "";
+  } catch (cause) {
+    if (!verificationCurrent(accountId, generation)) return;
+    verificationError.value = errorMessage(cause);
+  } finally {
+    if (verificationCurrent(accountId, generation)) verificationInputBusy.value = false;
+  }
+}
 // 任务筛选：表单值在提交后才进入 applied，轮询刷新不会打断正在编辑的条件。
 const filters = reactive({ job_type: "", status: "", q: "" });
 const applied = ref<{ job_type: string; status: string; q: string }>({
@@ -193,6 +309,7 @@ async function refresh() {
   loading.value = true;
   const results = await Promise.allSettled([
     request("/api/tasks/active", { query }),
+    request("/api/tasks/manual-verifications"),
     ...(currentView === "history"
       ? [
           request("/api/tasks/history", {
@@ -224,7 +341,19 @@ async function refresh() {
     }
   } else if (live?.status === "rejected")
     errors.push(errorMessage(live.reason));
-  const past = results[1];
+  const manual = results[1];
+  manualError.value = "";
+  if (manual?.status === "fulfilled") {
+    try {
+      const result = checkResult(manual.value);
+      manualVerifications.value = result.items || [];
+      manualLoaded.value = true;
+    } catch (cause) {
+      manualError.value = errorMessage(cause);
+    }
+  } else if (manual?.status === "rejected")
+    manualError.value = errorMessage(manual.reason);
+  const past = results[2];
   if (past?.status === "fulfilled") {
     try {
       const result = checkResult(past.value);
@@ -269,6 +398,7 @@ watch(pageSize, () => {
 });
 onBeforeUnmount(() => {
   revision++;
+  cleanupVerification();
 });
 function openLog(task: OperationRow) {
   logTask.value = task;
@@ -423,6 +553,53 @@ function cancelPending() {
         <span class="stat-label">已暂停</span
         ><strong class="stat-value">{{ counts.paused ?? "—" }}</strong
         ><span class="muted">恢复后继续执行</span>
+      </div>
+    </section>
+    <section class="card" aria-labelledby="manual-verification-title">
+      <div class="card-header task-header">
+        <div>
+          <h2 id="manual-verification-title">待人工验证</h2>
+          <p class="muted">
+            后台浏览器保持同一验证会话，无需桌面窗口。打开网页验证后，验证码请自己点击。
+          </p>
+        </div>
+        <button class="btn btn-sm" :disabled="loading" @click="refresh">
+          {{ loading ? "刷新中…" : "刷新列表" }}
+        </button>
+      </div>
+      <div v-if="manualError" class="alert alert-error table-alert" role="alert">
+        {{ manualError }}
+      </div>
+      <div v-if="loading && !manualLoaded" class="empty-state" role="status">
+        正在加载待人工验证列表…
+      </div>
+      <div
+        v-else-if="!manualVerifications.length && !manualError"
+        class="empty-state"
+      >
+        当前没有待人工验证的账号。
+      </div>
+      <div v-if="manualVerifications.length" class="table-wrap" :aria-busy="loading">
+        <table class="data-table">
+          <thead>
+            <tr><th>邮箱</th><th>等待开始时间</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in manualVerifications" :key="item.account_id">
+              <td>{{ item.email || `账号 ${item.account_id}` }}</td>
+              <td class="time-cell">{{ formatTime(item.waiting_since) }}</td>
+              <td>
+                <button
+                  class="btn btn-sm btn-primary"
+                  type="button"
+                  @click="openVerification(item)"
+                >
+                  网页验证
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </section>
     <section class="card">
@@ -734,6 +911,26 @@ function cancelPending() {
       </div>
       <UiPagination v-model:page="page" :total="total" :page-size="pageSize" />
     </section>
+    <UiModal v-model:open="verificationOpen" title="网页人工验证">
+      <div class="stack">
+        <p>{{ verificationAccount?.email || `账号 ${verificationAccount?.account_id}` }}</p>
+        <p class="muted">后台浏览器保持同一验证会话，无需桌面窗口。验证码请自己点击。</p>
+        <p v-if="verificationError" class="alert alert-error" role="alert">{{ verificationError }}</p>
+        <p v-if="verificationPending" class="muted" role="status">验证画面准备中…</p>
+        <img
+          v-if="verificationFrame"
+          :key="verificationFrame.revision"
+          class="verification-image"
+          :src="`data:image/jpeg;base64,${verificationFrame.image}`"
+          alt="后台浏览器实时验证画面，点击验证码进行人工验证"
+          :aria-busy="verificationInputBusy"
+          draggable="false"
+          @load="verificationDisplayedFrame = verificationFrame"
+          @click="sendVerificationClick"
+        />
+        <p v-if="verificationInputBusy" class="muted" role="status">正在发送点击…</p>
+      </div>
+    </UiModal>
     <OperationsActionDialog v-model:action="confirmation" />
     <OperationsLogModal
       v-model:open="logOpen"

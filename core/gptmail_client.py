@@ -72,8 +72,11 @@ def _get(path: str, params: dict | None = None) -> dict:
     return data
 
 
-def pick_account() -> GPTMailAccount:
+def pick_account(email_suffix: str | None = None) -> GPTMailAccount:
     """生成并缓存一个新的 GPTMail 随机邮箱地址。"""
+    from core.email_provider import normalize_email_suffix
+    if normalize_email_suffix(email_suffix):
+        raise GPTMailError("gptmail 不支持显式 email_suffix 后缀选择")
     data = _get("/api/generate-email")
     email = str(data.get("email") or "").strip()
     if not email or "@" not in email:

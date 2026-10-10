@@ -299,10 +299,13 @@ def create_address(domain: str | None = None) -> CFTempMailAccount:
     return account
 
 
-def pick_account() -> CFTempMailAccount:
+def pick_account(email_suffix: str | None = None) -> CFTempMailAccount:
     """创建并缓存一个 Cloudflare 临时邮箱。"""
-    account = create_address()
+    from core.email_provider import normalize_email_suffix, _check_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
+    account = create_address(domain=suffix) if suffix else create_address()
     _CONTEXT_CACHE[_cache_key(account.email)] = account
+    _check_email_suffix(account.email, suffix, release_account)
     return account
 
 

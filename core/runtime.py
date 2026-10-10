@@ -21,6 +21,7 @@ class DatabaseOwner:
         self.database_path = database_path.expanduser().resolve()
         self.pid = os.getpid()
         self.recovered = False
+        self.mail_worker = None
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.database_path.with_name("." + self.database_path.name + ".runtime.lock")
         self._handle = lock_path.open("a+b")
@@ -53,6 +54,9 @@ class DatabaseOwner:
         if self._handle.closed:
             return
         if self.pid == os.getpid():
+            if self.mail_worker is not None:
+                self.mail_worker.stop()
+                self.mail_worker = None
             if os.name == "nt":
                 import msvcrt
                 self._handle.seek(0)
@@ -119,6 +123,8 @@ def recover_startup(owner: DatabaseOwner) -> dict[str, int]:
         "email_change": db.recover_interrupted_email_changes,
     }
     results = {name: recover() for name, recover in recoveries.items()}
+    from core.mail_notifications import NotificationWorker
+    owner.mail_worker = NotificationWorker(owner)
     owner.recovered = True
     for name, count in results.items():
         if count:

@@ -54,7 +54,7 @@ def test_complete_login_refreshes_token_and_keeps_email_source(browser, monkeypa
     assert result["status"] == "live"
     assert result["access_token"] == "fresh-token"
     assert result["fingerprint"]["driver"] == "cloak"
-    factory.assert_called_once_with(proxy="", isolated=True, force_proxy=True)
+    factory.assert_called_once_with(proxy="", isolated=True, force_proxy=True, headless=True)
     cloak.wait_for_otp.assert_called_once()
     assert cloak.wait_for_otp.call_args.kwargs["email_source"] == "remail"
     assert [call.args[1] for call in cloak._submit_code.call_args_list] == ["123456", "654321"]

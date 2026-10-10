@@ -18,6 +18,7 @@ config 包的统一入口。
     config.email             Outlook 邮箱账号池 + OTP 轮询
     config.twofa             2FA 开关
     config.live_check        账号查活驱动（protocol / cloak）
+    config.notifications     管理员 SMTP 通知
 """
 
 # ---------- 浏览器 / HTTP ----------
@@ -185,6 +186,13 @@ from config.email import (
     EMAIL_CHANGE_WORKERS,
 )
 
+# ---------- SMTP 通知 ----------
+from config.notifications import (
+    SMTP_ENABLED, SMTP_HOST, SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME,
+    SMTP_PASSWORD, SMTP_FROM, SMTP_ADMIN_EMAILS, SMTP_NOTIFY_TASKS,
+    SMTP_NOTIFY_UPLOADS, SMTP_TIMEOUT,
+)
+
 # ---------- 2FA ----------
 from config.twofa import (
     ENABLE_2FA,
@@ -217,6 +225,7 @@ _RELOADABLE_SUBMODULES = (
     "config.proxy",
     "config.register",
     "config.email",
+    "config.notifications",
     "config.twofa",
     "config.live_check",
     "config.roxybrowser",
@@ -259,9 +268,9 @@ def reload_all() -> list[str]:
 def _refresh_top_level_constants() -> None:
     """把刚 reload 的子模块的常量重新拷一份到 config 包顶层。"""
     import config as _self
-    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, live_check, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, scan_api, sub2api, humanize, flow_trigger, update
+    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, live_check, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, scan_api, sub2api, humanize, flow_trigger, update, notifications
     # 简单粗暴：枚举一遍重要常量，覆盖到 _self
-    for src in (browser, openai_protocol, _proxy, register, email, twofa, live_check, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, scan_api, sub2api, humanize, flow_trigger, update):
+    for src in (browser, openai_protocol, _proxy, register, email, twofa, live_check, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, scan_api, sub2api, humanize, flow_trigger, update, notifications):
         for k in dir(src):
             if k.isupper() or k in ("pick_proxy", "pick_browser_profile", "build_browser_environment", "validate_browser_profile"):
                 setattr(_self, k, getattr(src, k))
@@ -313,6 +322,10 @@ __all__ = [
     "CLOUDMAIL_AUTO_ADD_USER", "CLOUDMAIL_RANDOM_LOCAL_LENGTH",
     "REMAIL_API_BASE", "REMAIL_API_KEY", "REMAIL_PROJECT_ID", "REMAIL_EMAIL_SUFFIX", "REMAIL_SERVICE_MODE",
     "REMAIL_SUPPLY_POLICY", "REMAIL_ORDER_WAIT_SECONDS", "REMAIL_REQUEST_TIMEOUT",
+    # notifications
+    "SMTP_ENABLED", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME",
+    "SMTP_PASSWORD", "SMTP_FROM", "SMTP_ADMIN_EMAILS", "SMTP_NOTIFY_TASKS",
+    "SMTP_NOTIFY_UPLOADS", "SMTP_TIMEOUT",
     # live_check
     "LIVE_CHECK_DRIVER", "LIVE_CHECK_WORKERS",
     # 任务中心可调并发（register / codex / email / scan_api）

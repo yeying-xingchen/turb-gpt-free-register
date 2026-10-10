@@ -514,10 +514,12 @@ def _wait_for_order_credentials(order: dict) -> tuple[str, str, str]:
     raise RemailError(f"Remail 订单等待 service token 超时: order={order_no}, status={status}")
 
 
-def pick_account() -> RemailAccount:
+def pick_account(email_suffix: str | None = None) -> RemailAccount:
     """按配置创建一个 Remail 接码/长效购买订单并返回交付邮箱。"""
+    from core.email_provider import normalize_email_suffix, _check_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
     project_id = _project_id()
-    email_suffix = _email_suffix()
+    email_suffix = suffix or _email_suffix()
     service_mode = _service_mode()
     supply = _supply_policy()
     idempotency_key = f"turb-gpt-free-register-{uuid.uuid4()}"
@@ -539,6 +541,7 @@ def pick_account() -> RemailAccount:
         email_suffix=email_suffix,
     )
     _cache_context(account)
+    _check_email_suffix(account.email, suffix, release_account)
     logger.info("[Remail] 已创建邮箱订单: %s order=%s project=%s", email, order_no or "-", project_id)
     return account
 

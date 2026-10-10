@@ -207,8 +207,22 @@ def _event(conn, task_id, kind, source, timestamp, message=None):
     )
 
 
+def _notify_completion(conn, *, task_id, event_key, kind, status, completed_at, email):
+    """Enqueue only allowlisted task metadata in the caller's transaction."""
+    from core.mail_notifications import enqueue_notification
+
+    kind = kind if kind in LABELS else "registration"
+    email = _email(email)
+    enqueue_notification(
+        conn, event_key=event_key, category="task", title=f"{LABELS[kind]} · {_STAGE[status]}",
+        fields={"任务编号": task_id, "任务类型": LABELS[kind], "任务状态": _STAGE[status],
+                "结束时间": _timestamp(completed_at, db._now())},
+        emails=[email] if email else [],
+    )
+
+
 def _store_state(conn, account, kind, source, *, task=None, created_at=None,
-                 started_at=None, completed_at=None, record_id="", progress=None):
+                 started_at=None, completed_at=None, record_id="", progress=None, notify=True):
     now = db._now()
     status, amount, stage, message, error = _presentation(kind, source, progress)
     message = _result_message(account, kind, source, message)
@@ -239,6 +253,10 @@ def _store_state(conn, account, kind, source, *, task=None, created_at=None,
         task_id = cursor.lastrowid
     if task is None or task["source_status"] != source:
         _event(conn, task_id, kind, source, now, message)
+    if notify and status not in ACTIVE and (task is None or task["status"] in ACTIVE):
+        _notify_completion(conn, task_id=f"account-{task_id}",
+                           event_key=f"task:account:{task_id}:completed", kind=kind,
+                           status=status, completed_at=completed, email=email)
     return task_id
 
 
@@ -281,7 +299,7 @@ def sync_account(conn, before, account, *, backfill=False):
                 continue
         if not value:
             if task and task["status"] in ACTIVE:
-                _store_state(conn, account, kind, "reset", task=task)
+                _store_state(conn, account, kind, "reset", task=task, notify=not backfill)
             continue
         source = _source(value)
         new_queue = source in {"queued", "pending", "retrying"} and (
@@ -290,7 +308,7 @@ def sync_account(conn, before, account, *, backfill=False):
         )
         if new_queue and task:
             if task["status"] in ACTIVE:
-                _store_state(conn, account, kind, "interrupted", task=task)
+                _store_state(conn, account, kind, "interrupted", task=task, notify=not backfill)
             task = None
         if task is None and kind == "codex_retry" and source != "retrying":
             continue
@@ -308,7 +326,7 @@ def sync_account(conn, before, account, *, backfill=False):
         _store_state(conn, account, kind, source, task=task,
                      created_at=created, started_at=account.get(prefix + "_started_at"),
                      completed_at=account.get(prefix + "_completed_at") or account.get(checked_key),
-                     progress=account.get(prefix + "_progress"))
+                     progress=account.get(prefix + "_progress"), notify=not backfill)
 
 
 def sync_payment_record(conn, record, *, backfill=False):
@@ -340,7 +358,7 @@ def sync_payment_record(conn, record, *, backfill=False):
             task = legacy
     task_id = _store_state(conn, account, "scan_payment", source, task=task, record_id=record_id,
                            created_at=record.get("created_at"), started_at=record.get("created_at"),
-                           completed_at=record.get("updated_at"))
+                           completed_at=record.get("updated_at"), notify=not backfill)
     conn.execute("UPDATE account_tasks SET lease_until=? WHERE id=?", (lease_until, task_id))
 
 
@@ -435,6 +453,10 @@ def set_task_control_state(kind: str, account_id, state: str) -> bool:
             ),
         )
         _event(conn, task["id"], kind, status, now, message)
+        if status not in ACTIVE:
+            _notify_completion(conn, task_id=f"account-{task['id']}",
+                               event_key=f"task:account:{task['id']}:completed", kind=kind,
+                               status=status, completed_at=now, email=task["email"])
     return True
 
 

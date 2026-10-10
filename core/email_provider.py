@@ -16,6 +16,7 @@ EMAIL_SOURCE 支持单个或多个来源：
     ["outlook", "generic_api", "mailnest", "cloudmail", "remail"]  # 也兼容列表写法
 """
 import logging
+import re
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
@@ -48,33 +49,76 @@ def parse_email_sources(value=None) -> list[str]:
     return out or ["outlook"]
 
 
-def _pick_from_source(source: str) -> str:
+def normalize_email_suffix(value=None) -> str:
+    """Return a lowercase bare DNS domain, or '' for an empty request.
+
+    A suffix may have one leading @. Full addresses, URLs, wildcard domains,
+    empty labels and invalid DNS labels are rejected rather than guessed.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("email_suffix 必须是域名字符串")
+    domain = value.strip().lower()
+    if not domain:
+        return ""
+    if domain.startswith("@"):
+        domain = domain[1:]
+    labels = domain.split(".")
+    if (
+        len(domain) > 253
+        or len(labels) < 2
+        or all(label.isdigit() for label in labels)
+        or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
+    ):
+        raise ValueError(f"无效的 email_suffix 域名: {value!r}")
+    return domain
+
+
+def _check_email_suffix(email: str, suffix: str, recycle) -> None:
+    """Check the exact domain and release a mismatched allocation once."""
+    if not suffix:
+        return
+    address = str(email or "").strip()
+    if address.count("@") == 1 and address.split("@", 1)[0] and address.rsplit("@", 1)[1].lower() == suffix:
+        return
+    note = f"email_suffix 后缀不匹配: 请求 {suffix}，实际邮箱 {address}"
+    try:
+        recycle(email, status="available", note=note)
+    except Exception:
+        logger.exception("[EmailProvider] 回收后缀不匹配的邮箱失败: %s", email)
+    raise RuntimeError(note)
+
+
+def _allocate_email(pick, recycle, email_suffix: str) -> str:
+    # Preserve the original zero-argument call for callers and legacy mocks.
+    allocated = pick(email_suffix=email_suffix) if email_suffix else pick()
+    email = allocated if isinstance(allocated, str) else allocated.email
+    _check_email_suffix(email, email_suffix, recycle)
+    return email
+
+
+def _pick_from_source(source: str, email_suffix: str = "") -> str:
     if source == "gptmail":
-        from core.gptmail_client import pick_account
-        return pick_account().email
-    if source == "cloudflare":
-        from core.cf_temp_mail_client import pick_account
-        return pick_account().email
-    if source == "cloudflare_domain":
-        from core.qqmail_client import pick_domain_email
-        return pick_domain_email()
-    if source == "generic_api":
-        from core.generic_api_mail_client import pick_account
-        return pick_account().email
-    if source == "imap":
-        from core.imap_mail_client import pick_account
-        return pick_account().email
-    if source == "mailnest":
-        from core.mailnest_client import pick_account
-        return pick_account().email
-    if source == "cloudmail":
-        from core.cloudmail_client import pick_account
-        return pick_account().email
-    if source == "remail":
-        from core.remail_client import pick_account
-        return pick_account().email
-    from core.outlook_client import pick_account
-    return pick_account().email
+        from core.gptmail_client import pick_account, release_account
+    elif source == "cloudflare":
+        from core.cf_temp_mail_client import pick_account, release_account
+    elif source == "cloudflare_domain":
+        from core.qqmail_client import pick_domain_email, release_domain_email
+        return _allocate_email(pick_domain_email, release_domain_email, email_suffix)
+    elif source == "generic_api":
+        from core.generic_api_mail_client import pick_account, release_account
+    elif source == "imap":
+        from core.imap_mail_client import pick_account, release_account
+    elif source == "mailnest":
+        from core.mailnest_client import pick_account, release_account
+    elif source == "cloudmail":
+        from core.cloudmail_client import pick_account, release_account
+    elif source == "remail":
+        from core.remail_client import pick_account, release_account
+    else:
+        from core.outlook_client import pick_account, release_account
+    return _allocate_email(pick_account, release_account, email_suffix)
 
 
 def acquire_email() -> str:
@@ -93,12 +137,13 @@ def acquire_email() -> str:
     raise RuntimeError(f"所有邮箱来源均领取失败: {sources}; last={last_exc}")
 
 
-def acquire_email_from_source(source: str) -> str:
-    """从调用方指定的单一来源领取邮箱，不受 EMAIL_SOURCE 兜底顺序影响。"""
+def acquire_email_from_source(source: str, email_suffix: str | None = None) -> str:
+    """从指定来源领取邮箱；可选后缀只作用于本次请求。"""
     source = str(source or "").strip().lower()
     if source not in _VALID_SOURCES:
         raise ValueError(f"不支持的邮箱来源: {source}")
-    email = _pick_from_source(source)
+    suffix = normalize_email_suffix(email_suffix)
+    email = _pick_from_source(source, email_suffix=suffix) if suffix else _pick_from_source(source)
     logger.info("[EmailProvider] 指定来源领取邮箱: source=%s, email=%s", source, email)
     return email
 

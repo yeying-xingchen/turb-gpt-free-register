@@ -60,7 +60,7 @@ _SESSION_FINGERPRINT_KEYS = {
 
 
 def _is_retryable_network_error(exc: BaseException) -> bool:
-    if isinstance(exc, AccountUnusableError):
+    if isinstance(exc, AccountUnusableError) or _is_cloudflare_challenge(exc):
         return False
     if detect_account_unusable_text(_exception_response_text(exc)) or detect_account_unusable_text(str(exc)):
         return False
@@ -597,6 +597,18 @@ def _exception_response_text(exc: BaseException) -> str:
     return str(getattr(response, "text", "") or "")
 
 
+def _exception_response_headers(exc: BaseException) -> dict:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    return dict(headers or {}) if headers is not None else {}
+
+
+def _is_cloudflare_challenge(exc: BaseException) -> bool:
+    """识别 Cloudflare 明确返回的挑战页，不把它误判成账号失效。"""
+    headers = {str(key).lower(): str(value).lower() for key, value in _exception_response_headers(exc).items()}
+    return headers.get("cf-mitigated") == "challenge"
+
+
 def _exception_status_code(exc: BaseException) -> int | None:
     response = getattr(exc, "response", None)
     try:
@@ -619,6 +631,12 @@ def _failure_result(exc: BaseException, checked_at: str) -> dict:
             error_code = error
     except (ValueError, TypeError):
         pass
+    session_pending = isinstance(exc, SessionNotReadyError)
+    challenge_pending = _is_cloudflare_challenge(exc)
+    if session_pending:
+        error_code = "session_not_ready"
+    elif challenge_pending:
+        error_code = "cloudflare_challenge"
     hints = {
         "invalid_username_or_password": "邮箱或密码不正确，请检查保存的登录凭据",
         "invalid_password": "密码不正确，请更新保存的登录密码",
@@ -630,12 +648,11 @@ def _failure_result(exc: BaseException, checked_at: str) -> dict:
     message = hints.get(error_code)
     if message is None and status == 429:
         message = "登录请求被限流，请稍后重试"
+    if message is None and challenge_pending:
+        message = "检测到 Cloudflare 人机验证，请在可见窗口完成后恢复任务"
     if message is None and status == 403:
         message = "认证请求被拒绝，请检查网络出口或稍后重试"
     error_text = f"{message}（HTTP {status}）" if message and status else message
-    session_pending = isinstance(exc, SessionNotReadyError)
-    if session_pending:
-        error_code = "session_not_ready"
     credential_error = error_code in {
         "invalid_username_or_password", "invalid_password", "wrong_password",
         "incorrect_password", "password_mismatch", "invalid_otp", "invalid_totp",
@@ -648,7 +665,8 @@ def _failure_result(exc: BaseException, checked_at: str) -> dict:
         "error": error_text or f"{type(exc).__name__}: {str(exc)[:500]}",
         "http_status": status,
         "error_code": error_code,
-        "retryable": not credential_error and (session_pending or _is_retryable_network_error(exc)),
+        "retryable": getattr(exc, "retryable", True) is not False and not challenge_pending and not credential_error and (session_pending or _is_retryable_network_error(exc)),
+        "challenge_waiting": challenge_pending,
     }
 
 
@@ -1102,6 +1120,9 @@ def check_account_liveness(
         logger.warning("[查活] 已废号：%s %s", email, code)
         return {"ok": False, "status": "deactivated", "checked_at": checked_at, "error": code}
     except Exception as exc:
+        from core.task_control import TaskCancelled
+        if isinstance(exc, TaskCancelled):
+            raise
         code = detect_account_unusable_text(_exception_response_text(exc)) or detect_account_unusable_text(str(exc))
         if code:
             logger.warning("[查活] 已废号：%s %s", email, code)

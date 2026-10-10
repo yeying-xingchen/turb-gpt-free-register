@@ -642,12 +642,16 @@ def _fetch_inline_messages_page_otp(
     return None
 
 
-def pick_account() -> GenericApiEmailAccount:
+def pick_account(email_suffix: str | None = None) -> GenericApiEmailAccount:
     """直接从 SQLite 邮箱库领取一个可用通用 API 邮箱。"""
     from core.db import claim_next_generic_api_email, generic_api_email_pool_summary
 
-    row = claim_next_generic_api_email()
+    from core.email_provider import normalize_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
+    row = claim_next_generic_api_email(email_suffix=suffix) if suffix else claim_next_generic_api_email()
     if row is None:
+        if suffix:
+            raise GenericApiMailError(f"通用 API 邮箱池没有可用的 @{suffix} 邮箱")
         summary = generic_api_email_pool_summary()
         raise GenericApiMailError(
             f"通用 API 邮箱池没有可用账号: {summary}. 请在 WebUI 邮箱池导入：邮箱----取码地址"

@@ -14,7 +14,7 @@ from config import email as email_cfg
 from core import db, task_control
 from core.email_provider import (
     acquire_email_from_source, email_material_line,
-    release_email_if_unconsumed, wait_for_otp,
+    release_email_if_unconsumed, wait_for_otp, normalize_email_suffix,
 )
 from core.session import BrowserSession, close_browser_session
 
@@ -405,7 +405,7 @@ def _check_live_in_current_session(
     return result
 
 
-def _run(account_id: int, source: str) -> dict:
+def _run(account_id: int, source: str, email_suffix: str = "") -> dict:
     new_email = ""
     task_started = time.monotonic()
     stage = "初始化"
@@ -423,7 +423,8 @@ def _run(account_id: int, source: str) -> dict:
             raise RuntimeError("账号缺少 access_token，请先查活刷新 AT")
         stage = "领取新邮箱"
         acquire_started = time.monotonic()
-        new_email = acquire_email_from_source(source)
+        new_email = (acquire_email_from_source(source, email_suffix=email_suffix)
+                     if email_suffix else acquire_email_from_source(source))
         _append_log(account_id, f"新邮箱领取成功：source={source} email={new_email} cost={_cost(acquire_started)}")
         if new_email.lower() == str(account.get("email") or "").lower():
             raise RuntimeError("领取到的邮箱与当前邮箱相同")
@@ -557,15 +558,19 @@ def _cancel_pending_email_change(account_id: int) -> None:
     task_control.release(KIND, account_id)
 
 
-def enqueue(account_id: int, source: str, trigger: str = "manual") -> dict:
+def enqueue(account_id: int, source: str, trigger: str = "manual", *, email_suffix: str = "") -> dict:
     account_id = int(account_id)
     source = str(source or "").strip().lower()
+    try:
+        email_suffix = normalize_email_suffix(email_suffix)
+    except ValueError as exc:
+        return {"accepted": False, "error": str(exc)}
     if not _SLOTS.acquire(blocking=False):
         return {"accepted": False, "error": "邮箱换绑队列已满"}
     if not db.claim_account_email_change(account_id, source, trigger):
         _SLOTS.release()
         return {"accepted": False, "busy": True, "error": "账号正在换绑或不存在"}
-    _append_log(account_id, f"换绑任务已入队：source={source} trigger={trigger}", clear=True)
+    _append_log(account_id, f"换绑任务已入队：source={source} suffix={email_suffix or '默认'} trigger={trigger}", clear=True)
     try:
         future = _EXECUTOR.submit(
             task_control.gated(
@@ -573,7 +578,7 @@ def enqueue(account_id: int, source: str, trigger: str = "manual") -> dict:
                 task_control.control(KIND, account_id),
                 on_cancel=lambda: _cancel_pending_email_change(account_id),
             ),
-            account_id, source,
+            account_id, source, email_suffix,
         )
         if future is False:
             raise RuntimeError("邮箱换绑队列已关闭")

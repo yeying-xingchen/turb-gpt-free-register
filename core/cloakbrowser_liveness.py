@@ -7,6 +7,8 @@ import logging
 import re
 import time
 import uuid
+from contextlib import nullcontext
+from collections.abc import Mapping
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -92,6 +94,9 @@ def _page_state(driver) -> dict:
       const errors = [...document.querySelectorAll('[role="alert"],.react-aria-FieldError,[slot="errorMessage"],[id$="-error"]')]
         .filter(visible).map(el => el.innerText || '').filter(Boolean);
       return {url: location.href, errors,
+        challenge: /^just a moment\b/i.test(document.title.trim()) ||
+          [...document.querySelectorAll('iframe')].some(el => visible(el) &&
+            /^https:\/\/challenges\.cloudflare\.com\//i.test(el.src || '') && /turnstile/i.test(el.src || '')),
         email: has('input[type="email"],input[name="email"],input[name="username"]'),
         password: has('input[type="password"],input[autocomplete="current-password"]'),
         code: has('input[autocomplete="one-time-code"],input[name="code"],input[inputmode="numeric"]'),
@@ -113,6 +118,8 @@ def _page_text(driver) -> str:
 
 
 def _step(state: dict) -> str:
+    if state.get("challenge") is True:
+        return "waiting"
     parsed = urlparse(str(state.get("url") or ""))
     path = parsed.path.lower()
     # 先辨别手机与 MFA，不能把它们的 code 输入框误判成邮箱验证码。
@@ -137,27 +144,60 @@ def _step(state: dict) -> str:
 
 
 class _BrowserAuthError(RuntimeError):
-    def __init__(self, status: int, code: str):
+    def __init__(self, status: int, code: str, headers=None):
         super().__init__(f"浏览器登录失败：HTTP {status} {code}".strip())
         self.response = SimpleNamespace(
             status_code=status, text=json.dumps({"error": {"code": code}}),
+            headers=_response_headers(headers),
         )
 
 
+def _response_headers(headers) -> dict:
+    # MagicMock.headers/get() 默认返回 Mock，不能据其真值误判 challenge。
+    if not isinstance(headers, Mapping):
+        return {}
+    return {key.lower(): value.strip().lower() for key, value in headers.items()
+            if isinstance(key, str) and isinstance(value, str)}
+
+
+class _ManualVerificationError(RuntimeError):
+    retryable = False
+
+
 class _AuthResponses:
-    """只保留认证接口的错误码，浏览器导航后也可识别明确废号。"""
+    """仅认证接口错误与可信文档的明确 challenge 影响登录。"""
     def __init__(self):
         self.dead_code = ""
         self.error = ""
         self.status = 0
         self.code = ""
+        self.headers = {}
+        self.challenge = False
+        self.challenge_status = 0
+        self.challenge_headers = {}
+
+    def clear_challenge(self):
+        # 普通凭据/废号错误独立保留，绝不因人工验证成功抹掉。
+        self.challenge = False
+        self.challenge_status = 0
+        self.challenge_headers = {}
 
     def __call__(self, response):
         parsed = urlparse(response.url)
         is_auth_api = parsed.hostname == "auth.openai.com" and parsed.path.startswith("/api/accounts/")
         is_web_auth = parsed.hostname == "chatgpt.com" and parsed.path.startswith((
-            "/api/auth/csrf", "/api/auth/signin/", "/api/auth/callback/",
+            "/api/auth/csrf", "/api/auth/signin/", "/api/auth/callback/", "/api/auth/session",
         ))
+        is_document = (parsed.hostname in {"auth.openai.com", "chatgpt.com"}
+                       and getattr(getattr(response, "request", None), "resource_type", None) == "document")
+        if not (is_auth_api or is_web_auth or is_document):
+            return
+        headers = _response_headers(getattr(response, "headers", None))
+        if headers.get("cf-mitigated") == "challenge":
+            self.challenge = True
+            self.challenge_status = response.status
+            self.challenge_headers = headers
+            return
         if not (is_auth_api or is_web_auth) or response.status < 400:
             return
         try:
@@ -169,8 +209,66 @@ class _AuthResponses:
             code = code if code.replace("_", "").isalnum() else ""
         except Exception:
             code = ""
-        self.status, self.code = response.status, code
+        self.status, self.code, self.headers = response.status, code, headers
         self.error = f"HTTP {response.status}" + (f" {code}" if code else "")
+
+
+def _wait_manual_challenge(driver, state: dict, responses: _AuthResponses) -> tuple[dict, float]:
+    """只等待用户操作；保持同一 page/context/proxy，不执行验证码交互。"""
+    from config import live_check as live_cfg
+    if not bool(getattr(live_cfg, "LIVE_CHECK_MANUAL_VERIFICATION", True)):
+        raise _ManualVerificationError("检测到 Cloudflare 人机验证，需要启用人工验证并完成验证后再查活")
+    timeout = max(1, int(getattr(live_cfg, "LIVE_CHECK_MANUAL_TIMEOUT", 600) or 600))
+    started = time.monotonic()
+    deadline = started + timeout
+    wait = getattr(driver, "_manual_verification_wait", None)
+    checkpoint = getattr(driver, "_manual_verification_checkpoint", None)
+    pump = getattr(driver, "_manual_verification_pump", None)
+    window_mode = getattr(live_cfg, "LIVE_CHECK_MANUAL_MODE", "web") == "window"
+    logger.info("[Cloak查活] 等待人工完成人机验证（最多 %s 秒）", timeout)
+    # 回调返回 context manager，由服务管理池让位和任务状态。独立调用默认 no-op。
+    with wait() if callable(wait) else nullcontext():
+        while True:
+            focus_requested = callable(checkpoint) and checkpoint() is True
+            if window_mode and focus_requested:
+                try:
+                    driver.page.bring_to_front()
+                except Exception as exc:
+                    if "closed" in str(exc).lower():
+                        raise _ManualVerificationError("人工验证窗口已关闭，请重新发起查活") from None
+                    raise
+            try:
+                is_closed = getattr(driver.page, "is_closed", None)
+                if callable(is_closed) and is_closed() is True:
+                    raise _ManualVerificationError("人工验证窗口已关闭，请重新发起查活")
+                # Playwright 等待会泵送 response/导航事件；禁止用 time.sleep。
+                driver.page.wait_for_timeout(500)
+                current = _page_state(driver)
+            except _ManualVerificationError:
+                raise
+            except Exception as exc:
+                if _during_navigation(exc):
+                    if time.monotonic() < deadline:
+                        continue
+                    raise _ManualVerificationError("人工人机验证等待已超时，请完成验证后重新查活") from None
+                if "closed" in str(exc).lower():
+                    raise _ManualVerificationError("人工验证窗口已关闭，请重新发起查活") from None
+                raise
+            _check_error(current, responses, driver)
+            # 显式响应标记可能在 DOM 恢复后滞留；可操作的普通认证页是结束证据。
+            actionable = any(current.get(key) is True for key in ("email", "password", "code"))
+            if current.get("challenge") is not True and (
+                not responses.challenge or actionable or _step(current) == "session"
+            ):
+                responses.clear_challenge()
+                logger.info("[Cloak查活] 人工验证结束，继续当前浏览器登录")
+                return current, time.monotonic() - started
+            # 先确认仍在 challenge，再由浏览器所属线程截图/响应人工点击。
+            # 恢复后直接退出，由等待 context 清画面，避免发送密码或 Session 页面。
+            if callable(pump):
+                pump(driver.page)
+            if time.monotonic() >= deadline:
+                raise _ManualVerificationError("人工人机验证等待已超时，请完成验证后重新查活")
 
 
 def _check_error(state: dict, responses: _AuthResponses, driver=None) -> None:
@@ -226,6 +324,7 @@ def _read_session(driver) -> dict | None:
           let data = null;
           try { data = await response.json(); } catch (_) {}
           return {status: response.status, data,
+                  headers: {'cf-mitigated': response.headers.get('cf-mitigated')},
                   retryAfter: response.headers.get('retry-after')};
         }""")
     except Exception as exc:
@@ -239,6 +338,9 @@ def _read_session(driver) -> dict | None:
         raise _SessionReadTransient("Session timeout" if failure == "timeout" else "Session network error")
     status = int(result.get("status") or 0)
     data = result.get("data")
+    headers = _response_headers(result.get("headers"))
+    if headers.get("cf-mitigated") == "challenge":
+        raise _BrowserAuthError(status, "cloudflare_challenge", headers)
     if status >= 400:
         dead = detect_account_unusable_response_body(json.dumps(data))
         if dead:
@@ -547,6 +649,14 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
             driver.page.wait_for_timeout(500)
             continue
         _check_error(state, responses, driver)
+        if state.get("challenge") is True or responses.challenge:
+            state, waited = _wait_manual_challenge(driver, state, responses)
+            deadline += waited
+            step_deadline += waited
+            next_session_read = 0.0
+            # challenge 拒绝过的提交可以在普通认证表单恢复后继续。
+            if any(state.get(key) is True for key in ("email", "password", "code")):
+                submitted = False
         step = _step(state)
         if step != last_step:
             logger.info("[Cloak查活] 登录阶段：%s", step)
@@ -575,7 +685,7 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
             submitted = False
             responses.error = ""
         elif responses.error:
-            raise _BrowserAuthError(responses.status, responses.code)
+            raise _BrowserAuthError(responses.status, responses.code, responses.headers)
         elif submitted and (state.get("errors") or state.get("invalid")):
             raise RuntimeError("登录凭据验证失败，请检查账号密码或验证码")
 
@@ -587,6 +697,13 @@ def _login(driver, email: str, *, email_source: str | None, responses: _AuthResp
                 retry_after = 0.0
                 try:
                     session_info = _read_session(driver)
+                except _BrowserAuthError as exc:
+                    if exc.response.headers.get("cf-mitigated") != "challenge":
+                        raise
+                    responses.challenge = True
+                    responses.challenge_status = exc.response.status_code
+                    responses.challenge_headers = exc.response.headers
+                    continue
                 except _SessionReadTransient as exc:
                     session_failures += 1
                     if session_failures >= 3:
@@ -691,7 +808,16 @@ def login_with_cloak(email: str, proxy: str | None = None, *, email_source: str 
     driver = saver = None
     started_at = time.monotonic()
     try:
-        driver, opened = build_cloak_driver(proxy=proxy, isolated=True, force_proxy=True)
+        from config import live_check as live_cfg
+        manual = bool(getattr(live_cfg, "LIVE_CHECK_MANUAL_VERIFICATION", True))
+        manual_mode = getattr(live_cfg, "LIVE_CHECK_MANUAL_MODE", "web")
+        driver, opened = build_cloak_driver(
+            proxy=proxy, isolated=True, force_proxy=True,
+            headless=(manual_mode != "window") if manual else None,
+        )
+        from core.manual_verification import current_callbacks, current_browser_bridge
+        driver._manual_verification_wait, driver._manual_verification_checkpoint = current_callbacks()
+        driver._manual_verification_pump = current_browser_bridge()
         driver._registration_log_prefix = "[Cloak查活]"
         launched_at = time.monotonic()
         logger.info("[Cloak查活] 浏览器就绪，耗时 %.2fs", launched_at - started_at)

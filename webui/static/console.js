@@ -3773,6 +3773,7 @@ function openEmailChangeModal(ids) {
   $('#emailChangeHintV2').textContent = EMAIL_CHANGE_ACCOUNT_IDS.length === 1
     ? `将为账号 #${EMAIL_CHANGE_ACCOUNT_IDS[0]} 换绑新邮箱，请选择来源。`
     : `将为选中的 ${EMAIL_CHANGE_ACCOUNT_IDS.length} 个账号分别领取并换绑新邮箱。`;
+  updateEmailChangeSuffixField();
   $('#emailChangeModalV2').classList.remove('hidden');
   updateModalScrollLock();
 }
@@ -3784,14 +3785,17 @@ function closeEmailChangeModal() {
 async function submitEmailChange() {
   const ids = EMAIL_CHANGE_ACCOUNT_IDS.slice();
   const source = $('#emailChangeSourceV2').value;
+  const suffixField = $('#emailChangeSuffixV2');
+  const email_suffix = suffixField.disabled ? '' : suffixField.value.trim();
+  const payload = {source, email_suffix};
   if (!ids.length) return;
   const btn = $('#btnSubmitEmailChangeV2');
   btn.disabled = true;
   try {
     // 单个账号走单账号接口；批量换绑按后端单次上限分片提交。
     const r = ids.length === 1
-      ? await api(`/api/accounts/${ids[0]}/change-email`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({source})})
-      : await postAccountBatches('/api/accounts/change-email-bulk', {source}, ids, accountBatchLimit('email'), accountBatchProgress(btn, '提交中…'));
+      ? await api(`/api/accounts/${ids[0]}/change-email`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)})
+      : await postAccountBatches('/api/accounts/change-email-bulk', payload, ids, accountBatchLimit('email'), accountBatchProgress(btn, '提交中…'));
     closeEmailChangeModal();
     clearAccountSelection();
     showToast(ids.length === 1 ? '邮箱换绑任务已开始' : `已开始 ${r.started_count || 0} 个换绑任务，跳过 ${(r.skipped || []).length} 个`);
@@ -3802,6 +3806,17 @@ async function submitEmailChange() {
   } catch (e) { showToast('邮箱换绑失败: ' + e.message); }
   finally { btn.disabled = false; }
 }
+function updateEmailChangeSuffixField() {
+  const source = $('#emailChangeSourceV2').value;
+  const unsupported = ['gptmail', 'mailnest'].includes(source);
+  $('#emailChangeSuffixV2').disabled = unsupported;
+  $('#emailChangeSuffixHintV2').textContent = unsupported
+    ? '该来源暂不支持指定后缀，按来源默认规则领取。'
+    : source === 'cloudflare_domain'
+      ? '可填写已配置的域名邮箱后缀；留空使用配置中的域名。'
+      : '留空使用来源默认规则；填写后只领取该后缀的邮箱，邮箱池需有匹配的可用地址。';
+}
+$('#emailChangeSourceV2').addEventListener('change', updateEmailChangeSuffixField);
 $('#btnCloseEmailChangeV2').addEventListener('click', closeEmailChangeModal);
 $('#btnCancelEmailChangeV2').addEventListener('click', closeEmailChangeModal);
 $('#btnSubmitEmailChangeV2').addEventListener('click', submitEmailChange);

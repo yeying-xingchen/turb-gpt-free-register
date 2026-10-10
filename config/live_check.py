@@ -17,5 +17,15 @@ LIVE_CHECK_WORKERS: int = 3
 # 与 BROWSER_DATA_SAVER_MODE 独立：后者影响注册，本项只作用于查活。
 LIVE_CHECK_DATA_SAVER: bool = True
 
+# 在同一浏览器中等待人工完成 Cloudflare 验证。
+# "web" = 网页展示验证画面，默认无头；"window" = 兼容本地可见窗口。
+LIVE_CHECK_MANUAL_VERIFICATION: bool = True
+LIVE_CHECK_MANUAL_MODE: str = "web"
+LIVE_CHECK_MANUAL_TIMEOUT: int = 600
+
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {"LIVE_CHECK_DRIVER": "str", "LIVE_CHECK_WORKERS": "int", "LIVE_CHECK_DATA_SAVER": "bool"})
+apply_env_overrides(globals(), {
+    "LIVE_CHECK_DRIVER": "str", "LIVE_CHECK_WORKERS": "int", "LIVE_CHECK_DATA_SAVER": "bool",
+    "LIVE_CHECK_MANUAL_VERIFICATION": "bool", "LIVE_CHECK_MANUAL_MODE": "str",
+    "LIVE_CHECK_MANUAL_TIMEOUT": "int",
+})

@@ -526,6 +526,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             }), 400
 
         inserted, skipped_details, name_details = import_existing_accounts(records)
+        _notify_uploaded_accounts(records, inserted, skipped_details, parse_errors, "公共上传")
         live_checks = _queue_import_live_checks(records, skipped_details)
         name_warnings = [
             {"email": item["email"], "reason": "账号已导入，用户名获取失败：" + item["error"]}
@@ -986,6 +987,15 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         return jsonify(snapshot)
 
 
+    def _notify_uploaded_accounts(records, inserted, skipped_details, parse_errors, source):
+        from core.mail_notifications import notify_account_upload
+
+        skipped = {str(item.get("email") or "").strip().casefold() for item in skipped_details}
+        notify_account_upload(
+            emails=[record["email"] for record in records if record["email"].casefold() not in skipped],
+            inserted=inserted, skipped=len(parse_errors) + len(skipped_details), source=source,
+        )
+
     def _queue_import_live_checks(records, skipped_details):
         skipped = {str(item.get("email") or "").strip().casefold() for item in skipped_details}
         queued = 0
@@ -1030,6 +1040,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             }), 400
 
         inserted, skipped_details, name_details = import_existing_accounts(records)
+        _notify_uploaded_accounts(records, inserted, skipped_details, parse_errors, "管理员导入")
         live_checks = _queue_import_live_checks(records, skipped_details)
         details = parse_errors + skipped_details
         name_warnings = [
@@ -1224,7 +1235,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
 
     @app.post("/api/accounts/<int:acc_id>/change-email")
     def api_account_change_email(acc_id: int):
-        """给单个账号排队换绑邮箱。Body {source}."""
+        """给单个账号排队换绑邮箱。Body {source, email_suffix?}."""
         data = request.get_json(silent=True) or {}
         source = str(data.get("source") or "").strip().lower()
         allowed = {"outlook", "generic_api", "imap", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "remail"}
@@ -1236,13 +1247,18 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         if not str(acc.get("access_token") or "").strip():
             return jsonify({"ok": False, "error": "账号缺少 access_token，请先查活刷新 AT"}), 400
         from core import email_change_service
-        result = email_change_service.enqueue(acc_id, source, trigger="manual")
+        from core.email_provider import normalize_email_suffix
+        try:
+            email_suffix = normalize_email_suffix(data.get("email_suffix"))
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        result = email_change_service.enqueue(acc_id, source, trigger="manual", email_suffix=email_suffix)
         public = {k: v for k, v in result.items() if k != "future"}
         return jsonify({"ok": bool(result.get("accepted")), **public}), (202 if result.get("accepted") else 409)
 
     @app.post("/api/accounts/change-email-bulk")
     def api_accounts_change_email_bulk():
-        """批量换绑邮箱。Body {account_ids:[...], source}."""
+        """批量换绑邮箱。Body {account_ids:[...], source, email_suffix?}."""
         data = request.get_json(silent=True) or {}
         ids = data.get("account_ids") or data.get("ids") or []
         source = str(data.get("source") or "").strip().lower()
@@ -1254,6 +1270,11 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
         if len(ids) > 500:
             return jsonify({"ok": False, "error": "单次最多提交 500 个账号"}), 400
         from core import email_change_service
+        from core.email_provider import normalize_email_suffix
+        try:
+            email_suffix = normalize_email_suffix(data.get("email_suffix"))
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         started, skipped = [], []
         seen_ids: set[int] = set()
         for raw_id in ids:
@@ -1272,7 +1293,7 @@ def create_app(auth_code: str | None = None, *, data_dir=None) -> Flask:
             if not str(acc.get("access_token") or "").strip():
                 skipped.append({"id": acc_id, "email": acc.get("email"), "reason": "缺少 access_token"})
                 continue
-            result = email_change_service.enqueue(acc_id, source, trigger="manual_bulk")
+            result = email_change_service.enqueue(acc_id, source, trigger="manual_bulk", email_suffix=email_suffix)
             if result.get("accepted"):
                 started.append({"id": acc_id, "email": acc.get("email"), "status": "queued"})
             else:

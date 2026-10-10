@@ -4851,12 +4851,17 @@ def import_registered_email_accounts(records: list[dict], source: str | None) ->
         return inserted, skipped
 
 
-def _claim_available_email(collection: str) -> dict | None:
+def _claim_available_email(collection: str, email_suffix: str | None = None) -> dict | None:
+    from core.email_provider import normalize_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
     with _row_write_transaction() as conn:
-        stored = conn.execute(
-            "SELECT payload FROM email_pool WHERE source=? AND status='available' ORDER BY id LIMIT 1",
-            (_EMAIL_SOURCES[collection],),
-        ).fetchone()
+        query = "SELECT payload FROM email_pool WHERE source=? AND status='available'"
+        params = [_EMAIL_SOURCES[collection]]
+        if suffix:
+            # Compare the complete domain, never a subdomain or a LIKE wildcard.
+            query += " AND instr(email, '@') > 1 AND lower(substr(email, instr(email, '@') + 1))=?"
+            params.append(suffix)
+        stored = conn.execute(query + " ORDER BY id LIMIT 1", params).fetchone()
         if stored is None:
             return None
         row = json.loads(stored["payload"])
@@ -4885,9 +4890,9 @@ def _release_email_row(collection: str, email: str, status: str, note: str | Non
         return True
 
 
-def claim_next_outlook() -> dict | None:
+def claim_next_outlook(email_suffix: str | None = None) -> dict | None:
     """原子领取一个可用 Outlook 账号并标记为 used。"""
-    row = _claim_available_email("outlook")
+    row = _claim_available_email("outlook", email_suffix=email_suffix) if email_suffix else _claim_available_email("outlook")
     return _decorate_outlook(row) if row is not None else None
 
 
@@ -5000,9 +5005,9 @@ def import_generic_api_emails(records: list[dict]) -> tuple[int, int]:
         return inserted, skipped
 
 
-def claim_next_generic_api_email() -> dict | None:
+def claim_next_generic_api_email(email_suffix: str | None = None) -> dict | None:
     """原子领取一个可用通用 API 邮箱并标记为 used。"""
-    row = _claim_available_email("generic_api")
+    row = _claim_available_email("generic_api", email_suffix=email_suffix) if email_suffix else _claim_available_email("generic_api")
     return _decorate_generic_api_email(row) if row is not None else None
 
 
@@ -5074,8 +5079,8 @@ def import_imap_emails(records: list[dict]) -> tuple[int, int]:
         return inserted, skipped
 
 
-def claim_next_imap_email() -> dict | None:
-    row = _claim_available_email("imap")
+def claim_next_imap_email(email_suffix: str | None = None) -> dict | None:
+    row = _claim_available_email("imap", email_suffix=email_suffix) if email_suffix else _claim_available_email("imap")
     return _decorate_imap_email(row) if row is not None else None
 
 
@@ -5471,6 +5476,7 @@ def update_job(
         row = _select_collection_row(conn, "jobs", row_id=job_id)
         if row is None:
             return
+        previous_status = row.get("status")
         if status is not None:
             row["status"] = status
         if email is not None:
@@ -5493,6 +5499,20 @@ def update_job(
             row["progress_message"] = str(progress_message)
         row["updated_at"] = _now()
         _write_collection_row(conn, "jobs", row)
+        from core import task_center_store
+        source = task_center_store._source(row.get("status"))
+        terminal = task_center_store._NORMALIZED[source]
+        if (status is not None and terminal not in task_center_store.ACTIVE
+                and task_center_store._NORMALIZED[task_center_store._source(previous_status)]
+                in task_center_store.ACTIVE):
+            identity = row.get("job_uuid") or str(row["id"])
+            kind = "codex_retry" if row.get("job_type") == "codex_retry" else "registration"
+            task_center_store._notify_completion(
+                conn, task_id=f"registration-{row['id']}",
+                event_key=f"task:registration:{identity}:completed", kind=kind,
+                status=terminal, completed_at=row.get("completed_at") or row["updated_at"],
+                email=row.get("email"),
+            )
 
 
 def list_jobs(limit: int = 100) -> list[dict]:

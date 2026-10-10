@@ -17,6 +17,7 @@ import logging
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,9 @@ MAX_WORKERS = 16
 _STATE_RUNNING = "running"
 _STATE_PAUSED = "paused"
 _STATE_CANCELLED = "cancelled"
+
+# Only a task executing on this pool may release its running slot.
+_WORKER_LOCAL = threading.local()
 
 
 class TaskCancelled(RuntimeError):
@@ -185,6 +189,8 @@ class DynamicPool:
         self._threads: set[threading.Thread] = set()
         self._closed = False
         self._running = 0
+        self._parked_threads: set[threading.Thread] = set()
+        self._resuming = 0
         self._completed = 0
         self._cancelled = 0
         self._rejected = 0
@@ -224,6 +230,7 @@ class DynamicPool:
                 "max_workers": self._max_workers,
                 "threads": len(self._threads),
                 "running": self._running,
+                "waiting": len(self._parked_threads),
                 "pending": len(self._queue),
                 "completed": self._completed,
                 "cancelled": self._cancelled,
@@ -267,6 +274,53 @@ class DynamicPool:
             self._condition.notify_all()
             return self._target
 
+    @contextmanager
+    def park_current(self):
+        """释放当前任务的执行容量，但保留原线程及线程内对象。
+
+        非本池任务线程调用以及同一线程的嵌套调用都是 no-op。最多允许
+        ``max_workers`` 个任务等待；达到上限时抛出 ``RuntimeError``。
+        离开上下文（包括异常）前重新获取容量，恢复任务优先于排队任务。
+        暂停、取消及人工验证超时仍由调用者管理，shutdown 不会中断等待。
+        """
+        if getattr(_WORKER_LOCAL, "pool", None) is not self:
+            yield
+            return
+        me = threading.current_thread()
+        with self._condition:
+            nested = me in self._parked_threads
+            if not nested:
+                if len(self._parked_threads) >= self._max_workers:
+                    raise RuntimeError(
+                        f"{self.name}: parked waiting limit reached (max_workers={self._max_workers})"
+                    )
+                self._parked_threads.add(me)
+                self._running -= 1
+                try:
+                    self._spawn_locked()
+                except BaseException:
+                    self._parked_threads.remove(me)
+                    self._running += 1
+                    self._condition.notify_all()
+                    raise
+                self._condition.notify_all()
+        if nested:
+            yield
+            return
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._resuming += 1
+                try:
+                    while self._running >= self._target:
+                        self._condition.wait()
+                    self._parked_threads.remove(me)
+                    self._running += 1
+                finally:
+                    self._resuming -= 1
+                    self._condition.notify_all()
+
     def shutdown(self, wait: bool = False) -> None:
         with self._condition:
             self._closed = True
@@ -275,10 +329,10 @@ class DynamicPool:
             self.wait_idle()
 
     def wait_idle(self, timeout: float | None = None) -> bool:
-        """等待队列清空且没有任务在执行。"""
+        """等待队列清空且没有执行中或 parked 等待中的任务。"""
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
         with self._condition:
-            while self._queue or self._running:
+            while self._queue or self._running or self._parked_threads:
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return False
@@ -287,7 +341,9 @@ class DynamicPool:
 
     # ---- 内部实现 ----------------------------------------------------
     def _spawn_locked(self) -> None:
-        while not self._closed and len(self._threads) < self._target:
+        while (not self._closed or self._queue) and (
+            len(self._threads) - len(self._parked_threads) < self._target
+        ):
             self._generation += 1
             thread = threading.Thread(
                 target=self._worker,
@@ -295,16 +351,22 @@ class DynamicPool:
                 daemon=True,
             )
             self._threads.add(thread)
-            thread.start()
+            try:
+                thread.start()
+            except BaseException:
+                self._threads.discard(thread)
+                raise
 
     def _take_locked(self, me: threading.Thread) -> _WorkItem | None:
         """取一个待执行任务；返回 None 表示本线程应当退出。"""
         with self._condition:
             while True:
-                if len(self._threads) > self._target or (self._closed and not self._queue):
+                if (len(self._threads) - len(self._parked_threads) > self._target
+                        or (self._closed and not self._queue)):
                     self._threads.discard(me)
+                    self._condition.notify_all()
                     return None
-                if self._queue:
+                if self._queue and self._running < self._target and not self._resuming:
                     item = self._queue.popleft()
                     self._running += 1
                     return item
@@ -347,6 +409,7 @@ class DynamicPool:
             if state == _STATE_PAUSED:
                 self._defer_locked(item)
                 continue
+            _WORKER_LOCAL.pool = self
             try:
                 item.fn(*item.args, **item.kwargs)
             except TaskCancelled:
@@ -357,6 +420,8 @@ class DynamicPool:
                 self._finish(cancelled=False)
             else:
                 self._finish(cancelled=False)
+            finally:
+                del _WORKER_LOCAL.pool
 
 
 # ============================================================

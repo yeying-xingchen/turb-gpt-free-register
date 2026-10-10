@@ -233,6 +233,51 @@ class EmailChangeTests(unittest.TestCase):
             self.assertEqual(response.status_code, 202)
             self.assertEqual(response.get_json()["started_count"], 1)
 
+    def test_single_and_bulk_api_pass_normalized_suffix(self):
+        with tempfile.TemporaryDirectory() as td, patch.multiple(db, **self.storage(Path(td))):
+            account_id = db.insert_account(email="old@example.com", access_token="token", email_source="outlook")
+            client = create_app(auth_code="test-auth").test_client()
+            for route, trigger in ((f"/api/accounts/{account_id}/change-email", "manual"),
+                                   ("/api/accounts/change-email-bulk", "manual_bulk")):
+                with self.subTest(route=route), patch("core.email_change_service.enqueue", return_value={"accepted": True}) as enqueue:
+                    response = client.post(route, json={"account_ids": [account_id], "source": "imap", "email_suffix": " @EXAMPLE.COM "}, headers={"X-Auth-Code": "test-auth"})
+                    self.assertEqual(response.status_code, 202)
+                    enqueue.assert_called_once_with(account_id, "imap", trigger=trigger, email_suffix="example.com")
+
+    def test_api_rejects_invalid_suffix_before_queueing(self):
+        with tempfile.TemporaryDirectory() as td, patch.multiple(db, **self.storage(Path(td))):
+            account_id = db.insert_account(email="old@example.com", access_token="token")
+            client = create_app(auth_code="test-auth").test_client()
+            for route in (f"/api/accounts/{account_id}/change-email", "/api/accounts/change-email-bulk"):
+                with self.subTest(route=route), patch("core.email_change_service.enqueue") as enqueue:
+                    response = client.post(route, json={"account_ids": [account_id], "source": "imap", "email_suffix": "person@example.com"}, headers={"X-Auth-Code": "test-auth"})
+                    self.assertEqual(response.status_code, 400)
+                    enqueue.assert_not_called()
+
+    def test_queue_preserves_suffix_for_worker(self):
+        with patch.object(email_change_service, "_SLOTS") as slots, \
+             patch.object(email_change_service.db, "claim_account_email_change", return_value=True), \
+             patch.object(email_change_service, "_append_log"), \
+             patch.object(email_change_service, "_EXECUTOR") as executor, \
+             patch.object(email_change_service.task_control, "control"), \
+             patch.object(email_change_service.task_control, "gated"):
+            slots.acquire.return_value = True
+            result = email_change_service.enqueue(10, "imap", email_suffix="@Example.COM")
+            self.assertTrue(result["accepted"])
+            self.assertEqual(executor.submit.call_args.args[1:], (10, "imap", "example.com"))
+
+    def test_worker_requests_suffix_when_allocating_new_email(self):
+        with patch.object(email_change_service.db, "get_account", return_value={"email": "old@example.com", "access_token": "token"}), \
+             patch.object(email_change_service.db, "finish_account_email_change"), \
+             patch.object(email_change_service, "acquire_email_from_source", side_effect=RuntimeError("no matching mailbox")) as acquire, \
+             patch.object(email_change_service, "_append_log"), \
+             patch.object(email_change_service, "_SLOTS"), \
+             patch.object(email_change_service.task_control, "checkpoint"), \
+             patch.object(email_change_service.task_control, "release"):
+            result = email_change_service._run(10, "imap", "example.com")
+            self.assertFalse(result["ok"])
+            acquire.assert_called_once_with("imap", email_suffix="example.com")
+
     def test_change_email_log_api(self):
         with tempfile.TemporaryDirectory() as td, patch.multiple(db, **self.storage(Path(td))):
             account_id = db.insert_account(email="old@example.com", access_token="token", email_source="outlook")

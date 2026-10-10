@@ -101,6 +101,15 @@ test('账号页提供两种全选且不再有 5000 上限', () => {
   assert.doesNotMatch(page, /selectedIds\.value\.size < 5000/);
 });
 
+test('按邮箱批量匹配后使用不可变集合更新选中状态', () => {
+  assert.match(page, /selectedIds\.value = new Set\(selectedIds\.value\)\.add\(row\.id\)/);
+  assert.match(page, /const nextRows = new Map\(selectedRows\.value\)/);
+  assert.match(page, /selectedRows\.value = nextRows/);
+  assert.match(page, /\.split\(\/\[\\s,;，；\]\+\/\)/);
+  assert.match(page, /request\("\/api\/accounts\/lookup"/);
+  assert.match(page, /for \(const row of matches\) selectRow\(row\)/);
+});
+
 test('账号页删除操作按后端上限分批提交', () => {
   assert.match(page, /chunkAccountIds\(target, accountBatchLimit\("delete"\)\)/);
   assert.match(page, /mergeAccountResults\(results\)/);

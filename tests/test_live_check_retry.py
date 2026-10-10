@@ -141,6 +141,21 @@ def test_credential_error_code_blocks_full_retry_even_on_403(code):
     assert service._retryable_live_check_result(result) is False
 
 
+def test_cloudflare_challenge_is_waiting_and_not_retryable():
+    error = RuntimeError("HTTP 403 challenge")
+    error.response = SimpleNamespace(
+        status_code=403,
+        headers={"cf-mitigated": "challenge"},
+        text="<html>challenge</html>",
+    )
+    result = liveness._failure_result(error, "fixture-time")
+    assert result["status"] == "failed"
+    assert result["error_code"] == "cloudflare_challenge"
+    assert result["challenge_waiting"] is True
+    assert result["retryable"] is False
+    assert service._retryable_live_check_result(result) is False
+
+
 @pytest.mark.parametrize("status", [403, 408, 425, 429, 500, 502, 503, 504])
 def test_structured_http_status_is_retryable_without_english_message(status):
     result = {"ok": False, "status": "failed", "http_status": status, "error": "临时失败"}

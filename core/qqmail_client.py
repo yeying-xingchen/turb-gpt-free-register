@@ -216,14 +216,20 @@ def _search_messages(mail: imaplib.IMAP4_SSL, after_dt: datetime | None = None) 
 # 公共接口
 # ============================================================
 
-def pick_domain_email() -> str:
+def pick_domain_email(email_suffix: str | None = None) -> str:
     """
     生成一个随机的域名邮箱地址并记录到 DB。
     格式：{8位随机数字母}@{EMAIL_DOMAIN}
     """
     from core.db import claim_next_domain_email
 
+    from core.email_provider import normalize_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
     domain = _email_cfg.EMAIL_DOMAIN
+    if suffix:
+        if suffix != normalize_email_suffix(domain):
+            raise QQMailClientError("cloudflare_domain 的 email_suffix 必须与配置的 EMAIL_DOMAIN 一致")
+        domain = suffix
     if not domain:
         raise QQMailClientError(
             "EMAIL_DOMAIN 未配置，请在 config/email.py 中设置你的 Cloudflare 域名"

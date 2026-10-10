@@ -713,6 +713,7 @@ def build_cloak_driver(
     *,
     isolated: bool = False,
     force_proxy: bool = False,
+    headless: bool | None = None,
 ) -> tuple[CloakSeleniumDriver, CloakOpenResult]:
     """启动 CloakBrowser 并返回 Selenium 风格 driver。
 
@@ -721,6 +722,7 @@ def build_cloak_driver(
     proxy=""    时显式禁用代理；
     proxy="..." 时使用指定代理。
     isolated=True 忽略 CLOAK_USER_DATA_DIR，每次创建临时独立 browser/context。
+    headless=None 沿用全局配置；显式布尔值只覆盖本次启动。
 
     启动前会占用一个浏览器并发额度（CLOAK_MAX_CONCURRENT，0=按可用内存自动），
     driver.quit() 时归还；这样批量任务的浏览器峰值内存可控。
@@ -760,7 +762,7 @@ def build_cloak_driver(
         # 之前只有显式 proxy_url 时才开启；如果用户走系统代理/VPN/透明代理，代码层面
         # 看不到 proxy_url，会误关 geoip，导致语言/时区不跟随出口。这里改为完全尊重配置。
         opts = {
-            "headless": bool(getattr(_cfg, "CLOAK_HEADLESS", False)),
+            "headless": bool(getattr(_cfg, "CLOAK_HEADLESS", False)) if headless is None else bool(headless),
             "humanize": bool(getattr(_cfg, "CLOAK_HUMANIZE", True)),
             "geoip": bool(getattr(_cfg, "CLOAK_GEOIP", True)),
         }

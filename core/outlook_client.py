@@ -254,15 +254,19 @@ def _parse_accounts_file(path: Path) -> list[OutlookAccount]:
 # 公共接口：挑账号 / 取 OTP（统一走 DB）
 # ============================================================
 
-def pick_account() -> OutlookAccount:
+def pick_account(email_suffix: str | None = None) -> OutlookAccount:
     """
     原子地挑一个 status='available' 的 Outlook 账号并标记为 'used'（DB 事务）。
     多线程并发安全。
     """
     from core.db import claim_next_outlook, outlook_pool_summary
 
-    row = claim_next_outlook()
+    from core.email_provider import normalize_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
+    row = claim_next_outlook(email_suffix=suffix) if suffix else claim_next_outlook()
     if row is None:
+        if suffix:
+            raise OutlookClientError(f"Outlook 邮箱池没有可用的 @{suffix} 邮箱")
         summary = outlook_pool_summary()
         raise OutlookClientError(
             f"Outlook 账号池没有可用账号: {summary}. "

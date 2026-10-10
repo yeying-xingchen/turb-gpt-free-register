@@ -46,10 +46,15 @@ def _account_from_row(row: dict | None) -> ImapEmailAccount | None:
     )
 
 
-def pick_account() -> ImapEmailAccount:
+def pick_account(email_suffix: str | None = None) -> ImapEmailAccount:
     from core import db
-    account = _account_from_row(db.claim_next_imap_email())
+    from core.email_provider import normalize_email_suffix
+    suffix = normalize_email_suffix(email_suffix)
+    row = db.claim_next_imap_email(email_suffix=suffix) if suffix else db.claim_next_imap_email()
+    account = _account_from_row(row)
     if account is None:
+        if suffix:
+            raise ImapMailError(f"通用 IMAP 邮箱池没有可用的 @{suffix} 邮箱")
         raise ImapMailError("通用 IMAP 邮箱池没有可用邮箱，请先在邮箱池导入")
     _CONTEXT_CACHE[account.email.lower()] = account
     return account

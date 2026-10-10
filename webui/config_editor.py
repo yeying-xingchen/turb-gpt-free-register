@@ -50,6 +50,57 @@ EDITABLE_FIELDS = [
         "label": "公共上传 Key", "help": "公共页面 /upload 的独立上传 Key；保存后生效，留空关闭上传；不授予后台访问权限",
         "storage": "env", "secret": True,
     },
+    # ---- SMTP 通知 ----
+    {
+        "key": "SMTP_ENABLED", "file": "notifications.py", "type": "bool", "group": "SMTP 通知",
+        "label": "启用邮件通知", "help": "默认关闭；先保存服务器、发件人与管理员邮箱，再开启。保存后热重载生效",
+    },
+    {
+        "key": "SMTP_HOST", "file": "notifications.py", "type": "str", "group": "SMTP 通知",
+        "label": "SMTP 服务器", "help": "例如 smtp.example.com，仅填写主机名或 IP",
+    },
+    {
+        "key": "SMTP_PORT", "file": "notifications.py", "type": "int", "group": "SMTP 通知",
+        "label": "SMTP 端口", "help": "范围 1–65535；SSL 常用 465，STARTTLS 常用 587",
+    },
+    {
+        "key": "SMTP_SECURITY", "file": "notifications.py", "type": "str", "group": "SMTP 通知",
+        "label": "连接安全方式", "help": "ssl=直接 TLS；starttls=连接后升级 TLS；plain=明文连接",
+        "choices": [
+            {"value": "ssl", "label": "SSL / TLS"},
+            {"value": "starttls", "label": "STARTTLS"},
+            {"value": "plain", "label": "明文"},
+        ],
+    },
+    {
+        "key": "SMTP_USERNAME", "file": "notifications.py", "type": "str", "group": "SMTP 通知",
+        "label": "SMTP 用户名", "help": "通常为发件邮箱；免认证服务器可留空，此时必须填写发件邮箱",
+    },
+    {
+        "key": "SMTP_PASSWORD", "file": "notifications.py", "type": "str", "group": "SMTP 通知",
+        "label": "SMTP 密码 / 授权码", "help": "使用邮件服务商提供的密码或专用授权码，保存在 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMTP_FROM", "file": "notifications.py", "type": "str", "group": "SMTP 通知",
+        "label": "发件邮箱", "help": "填写纯邮箱地址；留空时使用 SMTP 用户名",
+    },
+    {
+        "key": "SMTP_ADMIN_EMAILS", "file": "notifications.py", "type": "str", "group": "SMTP 通知",
+        "label": "管理员收件邮箱", "help": "多个纯邮箱地址用逗号、分号或换行分隔；页面输入可用逗号或分号",
+    },
+    {
+        "key": "SMTP_NOTIFY_TASKS", "file": "notifications.py", "type": "bool", "group": "SMTP 通知",
+        "label": "任务终态通知", "help": "每个任务进入终态时通知管理员，包括成功、失败或取消",
+    },
+    {
+        "key": "SMTP_NOTIFY_UPLOADS", "file": "notifications.py", "type": "bool", "group": "SMTP 通知",
+        "label": "上传汇总通知", "help": "每次上传成功导入至少一个账号后发送一封汇总，仅含本次新插入账号邮箱；全部重复或无效不发",
+    },
+    {
+        "key": "SMTP_TIMEOUT", "file": "notifications.py", "type": "int", "group": "SMTP 通知",
+        "label": "SMTP 超时(秒)", "help": "连接与网络操作超时，范围 1–120 秒的整数，默认 15 秒；发送在后台进行",
+    },
     # ---- 功能开关 ----
     {
         "key": "ENABLE_CODEX_AUTO", "file": "codex.py", "type": "bool", "group": "功能开关",
@@ -96,6 +147,20 @@ EDITABLE_FIELDS = [
     {
         "key": "LIVE_CHECK_DATA_SAVER", "file": "live_check.py", "type": "bool", "group": "账号查活",
         "label": "查活省流量", "help": "默认开启：Cloak 浏览器查活只拦图片/媒体/字体等可选资源和已确认的遥测 URL，登录页更小、渲染更快、内存更低；验证码/challenge 资源自动放行。与注册的省流量开关独立，遇到页面异常可关闭",
+    },
+
+    {
+        "key": "LIVE_CHECK_MANUAL_VERIFICATION", "file": "live_check.py", "type": "bool", "group": "账号查活",
+        "label": "查活人工验证", "help": "遇到人机验证暂停提交并保留同一会话，人工完成后自动继续。默认在任务中心网页内查看画面并手动点击，无需桌面窗口。协议模式不自动转浏览器",
+    },
+    {
+        "key": "LIVE_CHECK_MANUAL_MODE", "file": "live_check.py", "type": "str", "group": "账号查活",
+        "label": "人工验证方式", "help": "web：浏览器后台运行，在任务中心网页内完成验证；window：兼容本地桌面窗口",
+        "choices": [{"value": "web", "label": "网页内验证（默认）"}, {"value": "window", "label": "本地窗口"}],
+    },
+    {
+        "key": "LIVE_CHECK_MANUAL_TIMEOUT", "file": "live_check.py", "type": "int", "group": "账号查活",
+        "label": "人工验证等待时间(秒)", "help": "默认 600 秒；超时结束该任务，不把人机验证判为废号。等待仍占用浏览器内存和窗口额度",
     },
 
     # ---- CloakBrowser ----
@@ -1269,6 +1334,57 @@ def _format_env_value(value, vtype: str, fallback=None) -> str:
     return "" if value is None else str(value)
 
 
+def _validate_smtp_updates(updates: dict, current_values: dict) -> None:
+    """校验本次字段；仅显式开启时检查完整性，允许关闭时分步配置。"""
+    for key in ("SMTP_PORT", "SMTP_TIMEOUT"):
+        if key not in updates:
+            continue
+        raw = updates[key]
+        if isinstance(raw, bool) or not re.fullmatch(r"[0-9]+", str(raw).strip()):
+            raise ValueError(f"{key} 必须为正整数")
+        value = int(raw)
+        maximum = 65535 if key == "SMTP_PORT" else 120
+        if not 1 <= value <= maximum:
+            raise ValueError(f"{key} 必须在 1–{maximum} 之间")
+
+    def valid_email(value):
+        # 纯邮箱地址，不接受显示名称或头字段；允许内部域名，避免过度限制。
+        return bool(re.fullmatch(r"[^\s@,;<>\x00-\x1f\x7f]+@[^\s@,;<>\x00-\x1f\x7f]+", value))
+
+    normalized = {
+        key: _normalize_config_value(value, "str")
+        for key, value in updates.items()
+        if key in ("SMTP_HOST", "SMTP_FROM", "SMTP_USERNAME", "SMTP_ADMIN_EMAILS")
+    }
+    if "SMTP_HOST" in normalized and any(char.isspace() or ord(char) < 32 for char in normalized["SMTP_HOST"]):
+        raise ValueError("SMTP_HOST 必须为主机名或 IP，不能包含空白或控制字符")
+    if normalized.get("SMTP_FROM") and not valid_email(normalized["SMTP_FROM"]):
+        raise ValueError("SMTP_FROM 必须为有效的纯邮箱地址")
+    if normalized.get("SMTP_ADMIN_EMAILS"):
+        addresses = [item.strip() for item in re.split(r"[,;\r\n]+", normalized["SMTP_ADMIN_EMAILS"]) if item.strip()]
+        if not addresses or not all(valid_email(address) for address in addresses):
+            raise ValueError("SMTP_ADMIN_EMAILS 必须为邮箱地址，多个地址用逗号、分号或换行分隔")
+
+    # 无关配置保存不受 SMTP 配置状态影响；用户可先关闭再逐步修改。
+    if "SMTP_ENABLED" not in updates or _format_env_value(updates["SMTP_ENABLED"], "bool") != "True":
+        return
+    merged = dict(current_values)
+    merged.update(updates)
+    merged.update(normalized)
+    if not str(merged.get("SMTP_HOST") or "").strip():
+        raise ValueError("启用 SMTP 通知前请先配置 SMTP_HOST")
+    sender = str(merged.get("SMTP_FROM") or merged.get("SMTP_USERNAME") or "").strip()
+    if not valid_email(sender):
+        raise ValueError("启用 SMTP 通知需要有效的 SMTP_FROM，留空时 SMTP_USERNAME 必须为邮箱地址")
+    admins = [item.strip() for item in re.split(r"[,;\r\n]+", str(merged.get("SMTP_ADMIN_EMAILS") or "")) if item.strip()]
+    if not admins or not all(valid_email(address) for address in admins):
+        raise ValueError("启用 SMTP 通知前请先配置有效的 SMTP_ADMIN_EMAILS")
+    # 同时检查来自已有 .env 的连接设置。
+    _validate_smtp_updates({key: merged[key] for key in ("SMTP_PORT", "SMTP_TIMEOUT")}, {})
+    if merged.get("SMTP_SECURITY") not in {"ssl", "starttls", "plain"}:
+        raise ValueError("SMTP_SECURITY 的值无效，可选：plain, ssl, starttls")
+
+
 def update_config(updates: dict) -> dict:
     """批量更新配置。所有 WebUI 可编辑项只写项目根 `.env`。"""
     from config.env_loader import write_env_values, load_env
@@ -1279,6 +1395,8 @@ def update_config(updates: dict) -> dict:
         item["key"]: item.get("value")
         for item in get_config()
     }
+
+    _validate_smtp_updates(updates, current_values)
 
     for key, value in updates.items():
         field = _FIELD_BY_KEY.get(key)

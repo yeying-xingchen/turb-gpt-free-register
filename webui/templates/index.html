@@ -856,6 +856,7 @@
         <option value="cloudflare_domain">Cloudflare 域名邮箱</option><option value="cloudflare">Cloudflare 临时邮箱</option>
         <option value="gptmail">GPTMail</option><option value="mailnest">MailNest</option><option value="cloudmail">CloudMail</option><option value="remail">Remail</option>
       </select></label>
+      <label class="outlook-import-field"><span>邮箱后缀（可选）</span><input id="emailChangeSuffixV2" type="text" placeholder="例如 outlook.com 或 @outlook.com" autocomplete="off" spellcheck="false"><small id="emailChangeSuffixHintV2">留空使用来源默认规则；填写后只领取该后缀的邮箱，邮箱池需有匹配的可用地址。</small></label>
       <div class="banner warn">换绑成功后当前 access_token 会失效并被清空，系统会立即使用新邮箱自动查活并刷新 AT。原邮箱会保留在账号记录中。</div>
     </div>
     <div class="outlook-import-foot"><button type="button" class="jobs-tb-btn" id="btnCancelEmailChangeV2">取消</button><button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitEmailChangeV2">开始换绑</button></div>

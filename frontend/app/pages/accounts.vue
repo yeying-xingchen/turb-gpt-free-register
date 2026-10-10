@@ -307,12 +307,18 @@ onBeforeUnmount(() => {
   selectionRevision++;
 });
 function selectRow(row: Account) {
-  selectedIds.value.add(row.id);
-  selectedRows.value.set(row.id, row);
+  selectedIds.value = new Set(selectedIds.value).add(row.id);
+  const nextRows = new Map(selectedRows.value);
+  nextRows.set(row.id, row);
+  selectedRows.value = nextRows;
 }
 function deselectRow(id: number) {
-  selectedIds.value.delete(id);
-  selectedRows.value.delete(id);
+  const nextIds = new Set(selectedIds.value);
+  nextIds.delete(id);
+  selectedIds.value = nextIds;
+  const nextRows = new Map(selectedRows.value);
+  nextRows.delete(id);
+  selectedRows.value = nextRows;
 }
 function toggleRow(row: Account) {
   selectionRevision++;
